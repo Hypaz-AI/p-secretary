@@ -50,6 +50,7 @@ def get_bool(key: str, default: bool = False) -> bool:
 
 
 # --- OpenRouter ----------------------------------------------
+AGENT_NAME = get("AGENT_NAME", "Pi Secretary") or "Pi Secretary"
 OPENROUTER_API_KEY = get("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
 

@@ -369,6 +369,11 @@ La raccolta ordinaria è limitata a ieri/oggi; `fetch_day_messages` richiede
 
 ## Note
 
+- Il nome dell'agente si imposta con `AGENT_NAME` nell'ambiente o nel `.env`
+   (esempio: `AGENT_NAME=Ada`; predefinito: `Pi Secretary`, anche se vuoto).
+   Il nome viene comunicato all'AI nel dialogo, nell'analisi e nei riepiloghi:
+   se gli chiedi come si chiama, usa il nome configurato. Dopo una modifica
+   riavvia il servizio; le variabili dell'ambiente hanno precedenza sul `.env`.
 - Per Gmail serve una **password per app** (account Google → Sicurezza →
   Verifica in due passaggi → Password per le app).
 - Il modello AI si imposta con `OPENROUTER_MODEL` (slug OpenRouter, es.
