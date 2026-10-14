@@ -1,0 +1,10 @@
+# Pi Secretary — dipendenze
+# Connettore account personale Telegram (opzionale a runtime).
+Telethon>=1.36,<2
+Flask>=3.1,<4
+waitress>=3,<4
+psycopg[binary]>=3.2,<4
+
+# Solo se vuoi abilitare WhatsApp:
+#   sudo apt install nodejs npm
+#   cd data && npm install whatsapp-web.js qrcode-terminal
