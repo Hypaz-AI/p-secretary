@@ -1,3 +1,22 @@
+## Email attachment filesystem storage
+
+New email attachments (PDFs and all other binary attachments, including empty
+files) are stored under `DATA_DIR/email_attachments/<sha256>` with atomic
+publication and file/directory fsync. PostgreSQL retains filename, content type,
+metadata and absolute path, with `data` NULL. Existing BYTEA rows remain readable;
+no schema change or automatic migration is required. Back up this directory
+alongside PostgreSQL; moving DATA_DIR requires updating existing absolute paths.
+File failures abort message storage and its durable queue transaction. A DB
+rollback can leave harmless unreferenced files; do not delete files automatically.
+
+Optional existing-blob migration: after backing up the database and data folder,
+run `python migrate_email_attachments.py --apply --limit 100` using the application
+environment. Omit `--limit` for all email blobs. Without `--apply`, no database
+connection is made. Each row is locked, bytes/SHA256 verified on disk, then path
+and `data=NULL` updated in one transaction. It is resumable; failures preserve
+the current blob and previously committed rows remain migrated. No VACUUM or
+blob/schema deletion is performed. Non-email attachments are unchanged.
+
 # Durable processing and operation
 
 ## Architecture

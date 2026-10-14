@@ -147,6 +147,7 @@ TIMEZONE = get("TIMEZONE", "Europe/Rome")
 LANGUAGE = get("LANGUAGE", "it")
 DATA_DIR = Path(get("DATA_DIR", str(BASE_DIR / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+EMAIL_ATTACHMENTS_DIR = DATA_DIR / "email_attachments"
 
 # File di stato
 STATE_FILE = DATA_DIR / "state.json"

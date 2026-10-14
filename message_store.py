@@ -4,6 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import config
+import email_attachments
 
 VERSION = 'native_messages_v1'
 TABLES = {'email': 'email_messages', 'whatsapp': 'whatsapp_messages',
@@ -116,9 +117,13 @@ def store(conn, channel, sender, subject, body, ts=None, source_id=None,
             return conn.execute(f'SELECT id FROM {table} WHERE channel=%s AND source_id=%s',
                                 (channel, source_id)).fetchone()[0]
         for att in attachments or []:
+            path, data = att.get('path'), att.get('data')
+            if native(channel) == 'email' and data is not None:
+                path = email_attachments.persist(data)
+                data = None
             conn.execute("""INSERT INTO attachments(message_id,channel,filename,content_type,path,data,metadata)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)""", (row[0], native(channel), att.get('filename'),
-                att.get('content_type'), att.get('path'), att.get('data'),
+                att.get('content_type'), path, data,
                 json.dumps({k: v for k, v in att.items() if k not in ('data', 'path')})))
         return row[0]
 

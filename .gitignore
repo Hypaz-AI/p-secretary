@@ -33,6 +33,7 @@ data/wa_session/
 data/wa_media/
 data/wa_pending/
 data/tg_files/
+data/email_attachments/
 data/zips/
 
 # --- Ponte WhatsApp generato (sorgente in connectors/whatsapp.py) ---
