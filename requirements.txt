@@ -4,6 +4,7 @@ Telethon>=1.36,<2
 Flask>=3.1,<4
 waitress>=3,<4
 psycopg[binary]>=3.2,<4
+pypdf>=6,<7
 
 # Solo se vuoi abilitare WhatsApp:
 #   sudo apt install nodejs npm

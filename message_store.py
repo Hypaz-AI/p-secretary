@@ -32,8 +32,8 @@ def migrate(conn, base_schema, approved=False):
         kind = conn.execute("SELECT relkind FROM pg_class WHERE oid=to_regclass('communications')").fetchone()
         if kind and kind[0] != 'r':
             raise RuntimeError('Unexpected communications relation; migration refused')
-        if kind and not approved:
-            raise RuntimeError('Explicit approved history reset required before startup')
+        if kind:
+            raise RuntimeError('Legacy communications table requires an offline additive conversion; history resets are forbidden')
         conn.execute(base_schema)
         conn.execute("""CREATE TABLE IF NOT EXISTS message_dedup (
             channel TEXT NOT NULL, source_id TEXT NOT NULL,
@@ -43,14 +43,6 @@ def migrate(conn, base_schema, approved=False):
                 id BIGSERIAL PRIMARY KEY, channel TEXT NOT NULL, account TEXT NOT NULL DEFAULT '',
                 external_id TEXT NOT NULL, UNIQUE(channel, account, external_id));""")
         count = 0
-        if kind:
-            conn.execute('LOCK TABLE communications IN ACCESS EXCLUSIVE MODE')
-            count = conn.execute('SELECT count(*) FROM communications').fetchone()[0]
-            has_source = conn.execute("SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='communications' AND column_name='source_id'").fetchone()
-            if has_source:
-                conn.execute("INSERT INTO message_dedup(channel, source_id) SELECT channel, source_id FROM communications WHERE source_id IS NOT NULL ON CONFLICT DO NOTHING")
-            # No CASCADE: references from unrelated tables/views abort everything.
-            conn.execute('DROP TABLE communications RESTRICT')
         for table in TABLES.values():
             conn.execute(f"""CREATE TABLE {table} (
                 id BIGINT PRIMARY KEY DEFAULT nextval('message_ids'),

@@ -8,6 +8,7 @@ L'ultimo giorno del mese il segretario prepara uno zip per entità con
 tutte le fatture del mese appena concluso e lo invia via Telegram bot.
 """
 import re
+import hashlib
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -66,7 +67,10 @@ def save_invoice(entity: str, filename: str, data: bytes, sender: str = "",
     if ext and ext not in INVOICE_EXTENSIONS:
         ext = ""
     if not ext:
-        ext = ".pdf"  # meglio un'estensione sbagliata che nessuna
+        ext = '.bin'
+    if ext == '.pdf' and not data.startswith(b'%PDF-'):
+        ext = '.bin'
+    digest = hashlib.sha256(data).hexdigest()
 
     # data della fattura (o di oggi se sconosciuta)
     try:
@@ -94,18 +98,18 @@ def save_invoice(entity: str, filename: str, data: bytes, sender: str = "",
     folder = _entity_dir(entity) / month
     folder.mkdir(parents=True, exist_ok=True)
 
-    # se esiste già un file con lo stesso nome, aggiungi un progressivo
-    dest = folder / name
-    if dest.exists():
-        stem, _, e = name.rpartition(".")
-        i = 2
-        while (folder / f"{stem}_{i}.{e}").exists():
-            i += 1
-        dest = folder / f"{stem}_{i}.{e}"
-
-    dest.write_bytes(data)
-    db.add_invoice(entity=entity, month=month, filename=dest.name,
-                    path=str(dest), sender=sender, subject=subject, source=source)
+    dest = folder / (Path(name).stem+'_'+digest[:16]+ext)
+    with db._conn() as conn, conn.transaction():
+        conn.execute('SELECT pg_advisory_xact_lock(%s)', (int(digest[:15],16),))
+        existing = conn.execute('SELECT path FROM invoices WHERE content_hash=%s', (digest,)).fetchone()
+        if existing:
+            return Path(existing[0])
+        temporary = dest.with_suffix(dest.suffix+'.tmp')
+        temporary.write_bytes(data)
+        temporary.replace(dest)
+        conn.execute('''INSERT INTO invoices(entity,month,filename,path,sender,subject,source,content_hash)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)''',
+            (entity,month,dest.name,str(dest),sender,subject,source,digest))
     print(f"[invoices] 💾 fattura salvata: {dest}")
     return dest
 
@@ -149,8 +153,9 @@ def build_monthly_zip(entity: str, month: str) -> Path | None:
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for inv in invoices:
             p = Path(inv["path"])
-            if p.exists():
-                zf.write(p, arcname=f"{month}/{p.name}")
+            if not p.is_file():
+                raise FileNotFoundError('Invoice archive is incomplete')
+            zf.write(p, arcname=f"{month}/{p.name}")
     return zip_path
 
 
@@ -161,10 +166,11 @@ def send_monthly_zips(month: str = None) -> dict:
     """
     month = month or previous_month()
     report = {}
-    for entity in config.INVOICE_ENTITIES:
+    entities = set(config.INVOICE_ENTITIES) | {m['entity'] for m in db.months_with_invoices() if m['month'] == month}
+    for entity in sorted(entities):
         if not flows.enabled('monthly_zip'):
             flows.mark('monthly_zip', 'paused')
-            break
+            raise RuntimeError('Monthly ZIP flow paused')
         if db.zip_sent(entity, month):
             print(f"[invoices] zip {entity} {month} già inviato, salto")
             report[entity] = "già inviato"

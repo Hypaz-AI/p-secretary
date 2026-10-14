@@ -37,6 +37,7 @@ if (SPOOL) fs.mkdirSync(SPOOL, {recursive:true});
 // Mappa chat_id -> nome conversazione: getChats() ha i titoli anche quando
 // getChatById non li ha ancora risolti (chat mai aperte nella UI web).
 const CHAT_NAMES = {};
+const INFLIGHT = new Set();
 function rememberChat(chat) {
   if (chat && chat.id && (chat.name || chat.formattedTitle))
     CHAT_NAMES[chat.id._serialized || chat.id] = chat.name || chat.formattedTitle;
@@ -47,10 +48,15 @@ function cutoff() {
 async function archive(msg, recovered_cached=false) {
   const id = msg.id && (msg.id._serialized || msg.id.id);
   if (!id || msg.from==='status@broadcast' || msg.timestamp < cutoff()) return;
+  if (INFLIGHT.has(id)) return;
+  const finalPath = path.join(SPOOL, Buffer.from(id).toString('hex')+'.json');
+  if (fs.existsSync(finalPath)) return;
+  INFLIGHT.add(id);
+  try {
   const entry = {id, timestamp:msg.timestamp, chat_id:msg.fromMe?msg.to:msg.from,
     author:msg.author || msg.from, from:msg.from, from_name:msg.from,
     author_name:null, from_me:!!msg.fromMe, text:msg.body || '', attachments:[], recovered_cached,
-    enriched:false};
+    enriched:false, version:require('crypto').randomUUID()};
   const dest = path.join(SPOOL, Buffer.from(id).toString('hex')+'.json');
   const persist = () => {fs.writeFileSync(dest+'.tmp', JSON.stringify(entry));fs.renameSync(dest+'.tmp', dest);};
   persist();
@@ -75,6 +81,7 @@ async function archive(msg, recovered_cached=false) {
     } catch(e) {entry.media_error=true;}
   }
   entry.enriched=true;persist();
+  } finally { INFLIGHT.delete(id); }
 }
 async function recover() {
   if(!ready) return;
@@ -83,7 +90,7 @@ async function recover() {
     // prima riempi la mappa dei nomi (rapida), poi il fetch lento
     for(const chat of chats.slice(0,100)) rememberChat(chat);
     for(const chat of chats.slice(0,100)) {
-      try {for(const msg of await chat.fetchMessages({limit:0})) await archive(msg,true);} catch(e) {}
+      try {for(const msg of await chat.fetchMessages({limit:200})) await archive(msg,true);} catch(e) {}
     }
   } catch(e) {}
 }
@@ -101,8 +108,8 @@ client.on('ready', () => {
   recover();
 });
 
+/* Single message_create handler covers incoming and outgoing messages.
 client.on('message', async (msg) => {
-  return archive(msg);
   try {
     const chat = await msg.getChat();
     const selfWid = client.info && client.info.wid ? client.info.wid._serialized : '';
@@ -130,8 +137,9 @@ client.on('message', async (msg) => {
       });
     }
     console.log(JSON.stringify(entry));
-  } catch (e) { /* ignora */ }
+  } catch (e) { }
 });
+*/
 
 client.on('disconnected', () => {
   ready = false;
@@ -188,10 +196,16 @@ class WhatsAppBridge:
     def history_cutoff():
         from datetime import datetime, timedelta
         from zoneinfo import ZoneInfo
-        return datetime.now(ZoneInfo(config.TIMEZONE)).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        return datetime.now(ZoneInfo(config.TIMEZONE)).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=max(1,min(90,int(config.get('RECOVERY_DAYS','14')))))
 
-    def ack(self, identity):
-        (self.spool_dir / (identity.encode().hex() + '.json')).unlink(missing_ok=True)
+    def ack(self, identity, version=None):
+      path = self.spool_dir / (identity.encode().hex() + '.json')
+      try:
+        entry = json.loads(path.read_text())
+        if entry.get('enriched') and entry.get('version') == version:
+          path.unlink(missing_ok=True)
+      except (OSError, ValueError):
+        pass
 
     def start(self) -> bool:
         if not config.WHATSAPP_ENABLED:
@@ -276,11 +290,13 @@ class WhatsAppBridge:
       from datetime import datetime, timedelta
       from zoneinfo import ZoneInfo
       cutoff = self.history_cutoff()
-      end = cutoff + timedelta(days=2)
+      end = datetime.now(ZoneInfo(config.TIMEZONE)) + timedelta(minutes=5)
       msgs = []
-      for path in sorted(self.spool_dir.glob('*.json')):
+      for path in sorted(self.spool_dir.glob('*.json'))[:200]:
         try:
           m = json.loads(path.read_text())
+          if not m.get('enriched'):
+            continue
           dt = datetime.fromtimestamp(m['timestamp'], ZoneInfo(config.TIMEZONE))
           if not cutoff <= dt < end or m.get('chat_id') == 'status@broadcast':
             continue

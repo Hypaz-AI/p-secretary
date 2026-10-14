@@ -47,6 +47,9 @@ def snapshot():
         invoices = conn.execute('SELECT entity,month,count(*) FROM invoices GROUP BY 1,2 ORDER BY 2 DESC LIMIT 24').fetchall()
         appointments = conn.execute('SELECT count(*) FROM appointments WHERE NOT done').fetchone()[0]
         zips = conn.execute('SELECT entity,month,sent FROM monthly_zips ORDER BY month DESC LIMIT 12').fetchall()
+        pending_calendar = conn.execute("SELECT id,title,dt,sync_state FROM appointments WHERE sync_state NOT IN ('synced','cancelled') AND NOT done ORDER BY dt LIMIT 50").fetchall()
+        sent = conn.execute('SELECT count(*) FROM message_analysis WHERE notified').fetchone()[0]
+        task_counts = conn.execute('SELECT status,count(*) FROM tasks GROUP BY status').fetchall()
     settings = flows.settings()
     from connectors.telegram_account import readiness
     personal_readiness = readiness()
@@ -54,7 +57,10 @@ def snapshot():
     calendar_readiness = gcal_readiness()
     counts = [[r[0].isoformat(), *r[1:]] for r in counts]
     recent = [[r[0], r[1], r[2].isoformat() if r[2] else None, r[3]] for r in recent]
+    import jobs
     return {'timezone': config.TIMEZONE, 'today': today, 'counts': counts, 'recent': recent,
+            'jobs': jobs.metrics(), 'calendar_pending':pending_calendar, 'notifications_sent':sent,
+            'tasks':task_counts,
             'invoices': invoices, 'appointments': appointments, 'zips': zips,
             'flows': [{'id': k, 'label': v, 'enabled': settings[k],
                        'configuration': personal_readiness if k == 'telegram_user' else

@@ -85,7 +85,8 @@ def available() -> bool:
 
 def _conn():
     # Transaction-pooling endpoints cannot safely reuse named prepared statements.
-    return psycopg.connect(config.DATABASE_URL, autocommit=True, prepare_threshold=None)
+    return psycopg.connect(config.DATABASE_URL, autocommit=True, prepare_threshold=None,
+                          connect_timeout=10, options='-c statement_timeout=15000 -c lock_timeout=5000')
 
 
 def init(approved_reset: bool = False) -> int:
@@ -107,7 +108,12 @@ def init(approved_reset: bool = False) -> int:
                 f"pg_is_in_recovery={recovery}. "
                 "Il servizio richiede scritture; verificare endpoint e impostazioni "
                 "del database. Nessuna protezione read-only è stata disabilitata.")
-        return message_store.migrate(conn, SCHEMA, approved_reset)
+        if approved_reset:
+            raise RuntimeError('Destructive history resets are no longer supported')
+        result = message_store.migrate(conn, SCHEMA, False)
+        import jobs
+        jobs.migrate(conn)
+        return result
 
 
 # ------------------------------------------------------- comunicazioni ----
@@ -173,6 +179,26 @@ def communications_for_day(day=None) -> list:
                 "category", "priority", "needs_action", "action", "direction"]
         return [dict(zip(cols, r)) for r in rows]
 
+def communications_since(hours: int = 24) -> list:
+    """Tutte le comunicazioni delle ultime `hours` ore (finestra mobile).
+
+    Usata dal digest: l'invio non è legato al giorno di calendario ma alle
+    ultime 24 ore esatte, così nessun messaggio resta fuori. Il confronto
+    `ts >= now() - interval` lavora su istanti assoluti (timestamptz),
+    quindi è corretto a prescindere dal fuso orario della sessione.
+    """
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT ts, channel, sender, subject,
+                      COALESCE(summary, LEFT(body, 2000)) AS summary, category,
+                      priority, needs_action, action, direction
+               FROM communications
+               WHERE ts >= now() - %(hours)s * interval '1 hour'
+               ORDER BY ts""",
+            {"hours": int(hours)}).fetchall()
+        cols = ["ts", "channel", "sender", "subject", "summary", "category",
+                "priority", "needs_action", "action", "direction"]
+        return [dict(zip(cols, r)) for r in rows]
 
 # ------------------------------------------------------------ appuntamenti ----
 def add_appointment(title: str, dt: str, location: str = "", notes: str = "",
@@ -189,14 +215,14 @@ def add_appointment(title: str, dt: str, location: str = "", notes: str = "",
 def upcoming_appointments(days: int = 7) -> list:
     with _conn() as conn:
         rows = conn.execute(
-            """SELECT id, title, dt, location, notes
+            """SELECT id, title, dt, location, notes, event_id, sync_state
                FROM appointments
                WHERE done = FALSE
-                 AND dt::timestamp >= now()
-                 AND dt::timestamp <= now() + %(days)s * interval '1 day'
+                 AND (dt::timestamp AT TIME ZONE %(tz)s) >= now()
+                 AND (dt::timestamp AT TIME ZONE %(tz)s) <= now() + %(days)s * interval '1 day'
                ORDER BY dt""",
-            {"days": days}).fetchall()
-        return [dict(zip(["id", "title", "dt", "location", "notes"], r)) for r in rows]
+            {"days": days, "tz": config.TIMEZONE}).fetchall()
+        return [dict(zip(["id", "title", "dt", "location", "notes", "event_id", "sync_state"], r)) for r in rows]
 
 
 # ------------------------------------------------------------------- note ----

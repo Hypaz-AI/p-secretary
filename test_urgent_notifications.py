@@ -6,10 +6,16 @@ from unittest.mock import patch
 import brain
 import config
 import main
+import pipeline
+from unittest.mock import MagicMock
 
 
 class UrgentNotificationTests(unittest.TestCase):
     def setUp(self):
+        # Legacy classifier tests remain useful; durable pipeline has separate tests.
+        p = patch.object(main, 'process_message', main._legacy_process_message)
+        p.start()
+        self.addCleanup(p.stop)
         self.mocks = {}
         for name, kwargs in (
             ('brain._chat', {}),

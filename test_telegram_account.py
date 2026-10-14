@@ -23,6 +23,16 @@ def message(**changes):
 
 
 class AccountTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        for name, kwargs in (('recovery.scan_start', {'return_value':datetime(2000,1,1,tzinfo=timezone.utc)}),
+                             ('recovery.completed', {})):
+            p = patch(name, **kwargs)
+            p.start()
+            self.addCleanup(p.stop)
+        p = patch.dict('os.environ', {'RECOVERY_DAYS':'1'})
+        p.start()
+        self.addCleanup(p.stop)
+
     async def test_scoped_native_ingestion_and_edit(self):
         worker = tg.TelegramAccountWorker()
         worker.account = 'user:7'

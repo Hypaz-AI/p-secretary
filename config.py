@@ -132,7 +132,7 @@ for _i in range(1, 5):
         }
 
 # --- Riassunto giornaliero ---------------------------------------
-# Ora locale (HH:MM) a cui inviare il digest della giornata
+# Ora locale (HH:MM) a cui inviare il digest delle ultime 24 ore
 DIGEST_TIME = get("DIGEST_TIME", "21:00")
 # Politica di notifica in tempo reale:
 #   "mai"   -> nessuna notifica ordinaria immediata (resta il digest)

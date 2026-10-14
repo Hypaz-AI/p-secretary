@@ -88,12 +88,14 @@ def fetch_new_messages(account: dict, seen_uids: set) -> list:
         imap.select("INBOX", readonly=True)
         from datetime import datetime, timedelta
         from zoneinfo import ZoneInfo
-        cutoff = (datetime.now(ZoneInfo(config.TIMEZONE)) - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff = (datetime.now(ZoneInfo(config.TIMEZONE)) - timedelta(days=max(1,min(90,int(config.get('RECOVERY_DAYS','14')))))).replace(hour=0, minute=0, second=0, microsecond=0)
         validity_data = imap.response('UIDVALIDITY')[1]
         validity = validity_data[0].decode() if validity_data and validity_data[0] else None
         _, data = imap.uid('search', None, 'SINCE', cutoff.strftime('%d-%b-%Y'))
         uids = data[0].split()
         for uid in uids:
+            if len(messages) >= 100:
+                break
             uid_str = uid.decode()
             identity = json_identity(account['address'].lower(), 'INBOX', validity, uid_str)
             if uid_str in seen_uids or identity in seen_uids:

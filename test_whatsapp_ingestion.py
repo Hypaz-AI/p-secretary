@@ -81,19 +81,19 @@ class IngestionTests(unittest.TestCase):
         main.check_whatsapp({}, self.bridge)
         self.assertEqual(process.call_args.args[1], 'Anna (39333@c.us)')
 
-    def test_unenriched_text_available_immediately(self):
+    def test_unenriched_text_waits_for_attachments(self):
         self.put(enriched=False)
         self.bridge.proc = Mock()
         self.bridge.proc.poll.return_value = None
-        self.assertEqual(self.bridge.fetch_new_messages()[0]['id'], 'a')
+        self.assertEqual(self.bridge.fetch_new_messages(), [])
 
     @patch('main.db.communication_seen', return_value=False)
     @patch('main.process_message')
-    def test_cached_recovery_is_archival_only(self, process, seen):
+    def test_cached_recovery_queues_analysis(self, process, seen):
         self.put(recovered_cached=True)
         main.check_whatsapp({}, self.bridge)
         self.store.assert_called_once()
-        process.assert_not_called()
+        process.assert_called_once()
         self.assertEqual(self.bridge.fetch_new_messages(), [])
 
     @patch('main.brain.chat_with_user', side_effect=AssertionError('AI dialogue forbidden'))
@@ -126,7 +126,7 @@ class Client {
  initialize() {return Promise.resolve();}
  async getChats() { return [{id:{_serialized:'g@g.us'}, name:'Group',
    fetchMessages: async options => {
-     if (options.limit !== 0) throw Error('older history requested');
+    if (options.limit !== 200) throw Error('unbounded history requested');
      return [message('history')];
    }}]; }
 }
@@ -135,19 +135,19 @@ function message(id) {return {id:{_serialized:id, id}, timestamp:200,
  getChat:async()=>{throw Error('chat failed');},
  getContact:async()=>({pushname:'Marco', name:null}),
  downloadMedia:async()=>{throw Error('media failed');}};}
-const fs = {mkdirSync(){},writeFileSync:(p,v)=>files[p]=v,
+const fs = {mkdirSync(){},existsSync:p=>p in files,writeFileSync:(p,v)=>files[p]=v,
  renameSync:(a,b)=>{files[b]=files[a];delete files[a];}};
 const context = {Buffer, process:{env:{WA_SPOOL_DIR:'/spool',
  WA_MEDIA_DIR:'/media', WA_HISTORY_CUTOFF:'100'},stdin:{}},
  console:{log:v=>emitted.push(JSON.parse(v))},
  setTimeout:()=>({unref(){}}),setInterval:()=>({unref(){}}),
  require:n=> n==='whatsapp-web.js'?{Client,LocalAuth:class{}}:
- n==='fs'?fs:n==='path'?require('path'):
+ n==='fs'?fs:n==='path'?require('path'):n==='crypto'?require('crypto'):
  n==='readline'?{createInterface:()=>({on(){}})}:{} };
 vm.createContext(context);
 vm.runInContext(JSON.parse(require('fs').readFileSync(0,'utf8')), context);
 (async()=>{
- if (!events.message_create || !events.message) throw Error('wrong event');
+ if (!events.message_create || events.message) throw Error('duplicate event');
  await events.message_create(message('live'));
  await events.message_create({...message('native'),id:{$1:'native',id:'native'}});
  const native=JSON.parse(files['/spool/'+Buffer.from('native').toString('hex')+'.json']);

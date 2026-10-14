@@ -16,7 +16,7 @@ def history_window(now=None):
     now = now or datetime.now(ZoneInfo(config.TIMEZONE))
     now = now.astimezone(ZoneInfo(config.TIMEZONE))
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return today - timedelta(days=1), today + timedelta(days=1)
+    return today - timedelta(days=max(1,min(90,int(config.get('RECOVERY_DAYS','14'))))), today + timedelta(days=1)
 
 
 def session_path():
@@ -263,6 +263,9 @@ class TelegramAccountWorker:
                 break
             dialogs += 1
             count = 0
+            import recovery
+            key = 'mtproto:'+str(self.account)+':'+str(getattr(dialog, 'id', dialog.entity))
+            dialog_cutoff = max(cutoff, await asyncio.to_thread(recovery.scan_start, key))
             try:
                 async for message in self.client.iter_messages(
                         dialog.entity, limit=config.TELEGRAM_USER_MESSAGE_LIMIT, offset_date=end):
@@ -270,10 +273,12 @@ class TelegramAccountWorker:
                         break
                     count += 1
                     messages += 1
-                    if message.date and message.date < cutoff:
+                    if message.date and message.date < dialog_cutoff:
                         break
                     stored += bool(await self.archive(message, recovered=True))
                 capped += count == config.TELEGRAM_USER_MESSAGE_LIMIT
+                if count < config.TELEGRAM_USER_MESSAGE_LIMIT:
+                    await asyncio.to_thread(recovery.completed, key)
             except FloodWaitError:
                 # Stop the entire pass, not just this dialog. No further RPCs
                 # until the server-requested cooldown has elapsed.

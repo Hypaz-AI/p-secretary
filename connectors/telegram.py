@@ -152,9 +152,9 @@ def fetch_new_messages(offset: int, download_dir=None) -> tuple:
             from datetime import datetime, timedelta
             from zoneinfo import ZoneInfo
             now = datetime.now(ZoneInfo(config.TIMEZONE))
-            start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=max(1,min(90,int(config.get('RECOVERY_DAYS','14')))))
             dt = datetime.fromtimestamp(msg['date'], ZoneInfo(config.TIMEZONE)) if msg.get('date') else None
-            if dt and not start <= dt < start + timedelta(days=2):
+            if dt and not start <= dt < now + timedelta(minutes=5):
                 continue
             chat_id = str(msg["chat"]["id"])
             chat_name = _chat_name(msg.get("chat"))

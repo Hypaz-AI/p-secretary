@@ -1,3 +1,10 @@
+# Durable processing update
+
+See [OPERATIONS.md](OPERATIONS.md) for the current queue architecture, owner
+commands, Calendar proposal policy, recovery windows, deployment and restore
+procedure, and explicit delivery limitations. This supersedes older descriptions
+of synchronous actions and last-day-of-month ZIP delivery below.
+
 # Dashboard locale
 
 Dashboard integrata nel servizio principale tramite Flask/Waitress, senza nuovo

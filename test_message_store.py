@@ -8,11 +8,16 @@ import config
 import db
 import main
 import message_store
+import jobs
 from connectors import email, telegram
 
 
 class NativeTests(unittest.TestCase):
     def setUp(self):
+        for name in ('jobs.submit', 'jobs.set_cursor'):
+            p = patch(name)
+            p.start()
+            self.addCleanup(p.stop)
         switch = patch.object(main.flows, 'enabled', return_value=True)
         switch.start()
         self.addCleanup(switch.stop)
@@ -22,7 +27,7 @@ class NativeTests(unittest.TestCase):
         with patch.object(db, 'store_message', side_effect=lambda *a, **k: calls.append('store') or 42), \
              patch.object(db, 'communication_seen', side_effect=lambda *a: calls.append('seen') or True), \
              patch.object(main.brain, 'analyze') as ai:
-            main.process_message('whatsapp', 'sender', '', '', {}, source_id='native')
+            main._legacy_process_message('whatsapp', 'sender', '', '', {}, source_id='native')
         self.assertEqual(calls, ['store', 'seen'])
         ai.assert_not_called()
 
@@ -36,7 +41,8 @@ class NativeTests(unittest.TestCase):
              patch.object(main, '_handle_user_command', side_effect=lambda *a: calls.append('command') or True), \
              patch.object(db, 'log_communication'):
             main.check_telegram({})
-        self.assertEqual(calls, ['store', 'command'])
+        self.assertEqual(calls, ['store'])
+        jobs.submit.assert_called_once()
 
     def test_thirdparty_never_routes_owner_command(self):
         m = {'from': 'other', 'text': '/note', 'source_id': 'native', 'unauthorized': True}
@@ -70,7 +76,7 @@ class NativeTests(unittest.TestCase):
              patch.object(main.brain, 'analyze', side_effect=lambda *a: calls.append('ai') or (_ for _ in ()).throw(RuntimeError())), \
              patch.object(main.telegram, 'notify') as send:
             with self.assertRaises(RuntimeError):
-                main.process_message('telegram', 'third party', '', 'hello', {},
+                main._legacy_process_message('telegram', 'third party', '', 'hello', {},
                                      msg_date='2026-10-14T10:00:00+00:00')
             self.assertEqual(calls, ['stored', 'ai'])
             send.assert_not_called()

@@ -451,7 +451,7 @@ def list_calendars() -> list:
 
 def create_event(title: str, start: str, location: str = "", notes: str = "",
                  duration_min: int = None, source: str = "",
-                 reminder_minutes: int = None) -> dict:
+                 reminder_minutes: int = None, event_id: str = None) -> dict:
     """Crea un evento sul calendario configurato.
 
     start: ora locale 'YYYY-MM-DD HH:MM' nel fuso TIMEZONE.
@@ -481,9 +481,15 @@ def create_event(title: str, start: str, location: str = "", notes: str = "",
         description = f"{description}\n\nRegistrato da: {source}".strip()
     if description:
         body["description"] = description
+    if event_id:
+        body['id'] = event_id
     try:
         data = _api("POST", f"/calendars/{_cal_path()}/events", body=body)
     except Exception as exc:  # noqa: BLE001
+        if event_id and 'API 409:' in str(exc):
+            existing = _api('GET', f'/calendars/{_cal_path()}/events/{event_id}')
+            if existing.get('id') == event_id and existing.get('status') != 'cancelled':
+                return {'ok': True, 'event_id': event_id}
         return {"ok": False, "error": str(exc)}
     return {"ok": True, "event_id": data.get("id", ""),
             "link": data.get("htmlLink", "")}
@@ -532,6 +538,8 @@ def delete_event(event_id: str) -> dict:
              f"/calendars/{_cal_path()}/events/{urllib.parse.quote(event_id, safe='')}")
         return {"ok": True}
     except Exception as exc:  # noqa: BLE001
+        if 'API 404:' in str(exc) or 'API 410:' in str(exc):
+            return {'ok': True}
         return {"ok": False, "error": str(exc)}
 
 

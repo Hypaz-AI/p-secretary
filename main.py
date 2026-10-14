@@ -110,7 +110,7 @@ def _save_invoice_attachments(channel: str, sender: str, subject: str,
             flows.mark('invoices', 'failed')
 
 
-def process_message(channel: str, sender: str, subject: str, body: str,
+def _legacy_process_message(channel: str, sender: str, subject: str, body: str,
                     state: dict, attachments: list = None,
                     account: dict = None, uid: str = None,
                     msg_date: str = None, source_id=None, metadata=None,
@@ -186,6 +186,11 @@ def process_message(channel: str, sender: str, subject: str, body: str,
     return verdict
 
 
+def process_message(*args, **kwargs):
+    import pipeline
+    return pipeline.ingest(*args, **kwargs)
+
+
 def check_emails(state: dict):
     """Legge SOLO le email nuove: gli UID già letti vivono nel DB (tabella
     email_seen), così il backlog non si rianalizza mai due volte."""
@@ -211,6 +216,8 @@ def check_emails(state: dict):
             )
             # registra l'UID come letto nel DB (idempotente)
             db.mark_email_seen(key, msg.get('source_id') or msg['uid'])
+        # UID identities are the authoritative durable email cursor. The
+        # recovery scan itself intentionally overlaps the configured window.
     # pulizia periodica della tabella di tracciamento
     db.prune_email_seen()
 
@@ -248,6 +255,9 @@ def _handle_user_command(text: str) -> bool:
     Ritorna True se il testo era un comando ed è stato gestito."""
     t = text.strip()
     low = t.lower()
+    import pipeline
+    if pipeline.owner_commands(text):
+        return True
 
     if low in ("/start", "/stop"):
         return True
@@ -264,7 +274,11 @@ def _handle_user_command(text: str) -> bool:
         if appts is None:  # fallback: agenda interna del segretario
             appts = db.upcoming_appointments()
             source_label = "agenda interna"
+        else:
+            from pipeline import merge_agenda
+            appts = merge_agenda(appts, db.upcoming_appointments())
         lines = [f"• {telegram.escape_html(a['dt'])} — {telegram.escape_html(a['title'])}"
+                 + (f" [#{a['id']} {telegram.escape_html(a.get('sync_state','local'))}]" if a.get('id') else '')
                  + (f" @ {telegram.escape_html(a['location'])}" if a.get("location") else "")
                  for a in appts]
         reply = (f"📅 <b>Prossimi appuntamenti</b> ({telegram.escape_html(source_label)}):\n"
@@ -346,7 +360,8 @@ def handle_user_chat(text: str, channel: str = "telegram") -> None:
     _chat_history.append({"role": "user", "content": text})
     _chat_history.append({"role": "assistant", "content": reply})
     _chat_history = _chat_history[-10:]  # tieni gli ultimi scambi
-    telegram.notify(reply, html=False)
+    if not telegram.notify(reply, html=False):
+        raise RuntimeError('Owner reply not acknowledged')
 
 
 def _create_chat_appointments(events: list) -> str:
@@ -362,20 +377,18 @@ def _create_chat_appointments(events: list) -> str:
             continue
         try:
             ev = gcal.validate_event(ev)
-            db.add_appointment(title=ev["title"], dt=ev["dt"],
-                               location=ev.get("location", ""),
-                               notes=ev.get("notes", ""), source="dialogo utente")
+            import pipeline
+            import jobs
+            key = 'owner:'+str(getattr(_owner_context, 'message_id', 'manual'))+':'+jobs.event_id(str(sorted(ev.items())))
+            with db._conn() as conn, conn.transaction():
+                identity = pipeline.save_event(conn, ev, key, 'dialogo utente')
         except Exception as exc:  # noqa: BLE001
             confirmations.append(f"⚠️ Non sono riuscito a fissare «{ev['title']}»: {exc}")
             continue
-        line = f"✅ «{ev['title']}» fissato per il {ev['dt']}"
+        line = f"📅 #{identity} «{ev['title']}» salvato localmente per il {ev['dt']}"
         if ev.get("location"):
             line += f" @ {ev['location']}"
-        res = _sync_appointment_to_gcal(ev, source="dialogo utente")
-        if res.get("ok"):
-            line += " — Inserito su Google Calendar (promemoria popup)"
-        else:
-            line += f" — Salvato in agenda soltanto; promemoria Calendar non creato: {res.get('error')}"
+        line += ' — sincronizzazione Calendar in coda, non ancora confermata'
         confirmations.append(line)
     return "\n".join(confirmations)
 
@@ -432,11 +445,9 @@ def check_telegram(state: dict):
             )
             continue
         # comandi rapidi / regole insegnate dall'utente
-        if m.get("text") and _handle_user_command(m["text"]):
-            continue
-        # messaggio diretto dell'utente: DIALOGO (non analisi)
         if m.get("text") and not m.get('attachments'):
-            handle_user_chat(m["text"], channel="telegram")
+            import jobs
+            jobs.submit('owner', f'owner:{mid}', {'text':m['text'], 'message_id':mid})
             continue
         # solo file/allegato senza testo: analisi normale (fattura ecc.)
         if not flows.enabled('telegram_bot'):
@@ -451,6 +462,8 @@ def check_telegram(state: dict):
             msg_date=m.get('msg_date'), source_id=m.get('source_id'),
             metadata=m.get('metadata'), message_id=mid,
         )
+    import jobs
+    jobs.set_cursor('telegram_bot_offset', offset)
     state["telegram_offset"] = offset
     if flows.observed().get('telegram_bot', {}).get('status') == 'running':
         flows.mark('telegram_bot', 'idle' if config.TELEGRAM_BOT_TOKEN else 'not_configured')
@@ -466,8 +479,8 @@ def check_whatsapp(state: dict, bridge: WhatsAppBridge):
             mid = db.store_message('whatsapp', sender, f'WhatsApp · {chat_name}', m.get('text', ''),
                 ts=m.get('msg_date'), source_id=m.get('id'), metadata=m.get('metadata'),
                 attachments=m.get('attachments'))
-            if m.get('recovered_cached') or db.communication_seen('whatsapp', m['id']):
-                bridge.ack(m['id'])
+            if db.communication_seen('whatsapp', m['id']):
+                bridge.ack(m['id'], m.get('version'))
                 continue
             if m.get('from_me'):
                 db.log_communication('whatsapp', sender, f'WhatsApp · {chat_name}', m.get('text', ''),
@@ -477,7 +490,7 @@ def check_whatsapp(state: dict, bridge: WhatsAppBridge):
                 process_message('whatsapp', sender, f'WhatsApp · {chat_name}', m.get('text', ''),
                     state, attachments=m.get('attachments', []), msg_date=m.get('msg_date'),
                     source_id=m['id'], metadata=m.get('metadata'), message_id=mid)
-            bridge.ack(m['id'])
+            bridge.ack(m['id'], m.get('version'))
         except Exception as exc:
             flows.mark('whatsapp', 'failed')
             print(f'[whatsapp] message deferred ({type(exc).__name__})')
@@ -498,6 +511,16 @@ def sync_workers(wa, personal):
                 flows.mark(flow, status)
         elif not worker.thread or not worker.thread.is_alive():
             worker.start()
+
+
+import threading
+_owner_context = threading.local()
+
+
+def _owner_job(payload):
+    _owner_context.message_id = payload['message_id']
+    if not _handle_user_command(payload['text']):
+        handle_user_chat(payload['text'])
 
 
 def main():
@@ -528,69 +551,65 @@ def main():
         sys.exit(1)
 
     state = actions.load_state()
+    import jobs
+    import pipeline
+    state['telegram_offset'] = jobs.cursor('telegram_bot_offset', state.get('telegram_offset', 0))
     flows.init()
     web_server = dashboard.start()
     wa = WhatsAppBridge()
     personal = TelegramAccountWorker()
 
+    workers = [jobs.Worker('analysis', pipeline.analyze).start(),
+               jobs.Worker('action', pipeline.action).start(),
+               jobs.Worker('owner', _owner_job).start()]
+    periodic = {}
+    def launch(name, callback):
+        old = periodic.get(name)
+        if old and old.is_alive():
+            return
+        def run():
+            try:
+                callback()
+            except Exception as exc:
+                print(f'[main] {name} failed ({type(exc).__name__})')
+        periodic[name] = threading.Thread(target=run, name=name, daemon=True)
+        periodic[name].start()
+
     last_cycle = 0
     last_user_check = 0
-    while running:
-        try:
-            now = time.time()
-            sync_workers(wa, personal)
-            # i messaggi dell'utente (Telegram/WhatsApp) si controllano
-            # ogni 15 secondi: la risposta deve arrivare subito
-            if now - last_user_check >= 15:
-                last_user_check = now
-                check_telegram(state)
-                if config.WHATSAPP_ENABLED and flows.enabled('whatsapp'):
-                    flows.run('whatsapp', lambda: check_whatsapp(state, wa))
-                actions.save_state(state)
-
-            if now - last_cycle >= config.POLL_INTERVAL:
-                last_cycle = now
-                # le email in arrivo (lente: una chiamata AI ciascuna)
-                if config.EMAIL_ACCOUNTS:
-                    flows.run('email', lambda: check_emails(state))
-                else:
-                    flows.mark('email', 'not_configured')
-
-                # stato del flusso Google Calendar (nessun polling: si attiva
-                # su richiesta del dialogo o quando l'AI rileva appuntamenti)
-                if not flows.enabled('gcal'):
-                    flows.mark('gcal', 'paused')
-                elif gcal.readiness() != 'ready':
-                    flows.mark('gcal', gcal.readiness())
-                else:
-                    flows.mark('gcal', 'idle')
-
-                # pipeline 1: riassunto giornaliero all'ora giusta
-                flows.run('digest', lambda: digest.maybe_send_digest(state))
-
-                # pipeline 5: ultimo giorno del mese -> zip fatture via Telegram
-                if not flows.enabled('monthly_zip'):
-                    flows.mark('monthly_zip', 'paused')
-                elif not invoices.is_month_end():
-                    flows.mark('monthly_zip', 'scheduled_month_end')
-                if not flows.enabled('invoices'):
-                    flows.mark('invoices', 'paused')
-                if flows.enabled('monthly_zip') and invoices.is_month_end():
-                    report = flows.run('monthly_zip', invoices.send_monthly_zips)
-                    for entity, esito in report.items():
-                        print(f"[main] 📦 zip {entity}: {esito}")
-
-                actions.save_state(state)
-                print(f"[main] ciclo completato {datetime.now().strftime('%H:%M:%S')}")
-        except Exception as exc:  # noqa: BLE001
-            print(f"[main] errore nel ciclo: {exc}")
-        # Piccola pausa per non saturare la CPU del Raspberry
-        time.sleep(5)
-
-    wa.stop()
-    personal.stop()
-    web_server.close()
-    actions.save_state(state)
+    try:
+        while running:
+            try:
+                now = time.time()
+                sync_workers(wa, personal)
+                if now - last_user_check >= 15:
+                    last_user_check = now
+                    check_telegram(state)
+                    if config.WHATSAPP_ENABLED and flows.enabled('whatsapp'):
+                        launch('whatsapp', lambda: flows.run('whatsapp', lambda: check_whatsapp(state, wa)))
+                    actions.save_state(state)
+                if now - last_cycle >= config.POLL_INTERVAL:
+                    last_cycle = now
+                    if config.EMAIL_ACCOUNTS:
+                        launch('email', lambda: flows.run('email', lambda: check_emails(state)))
+                    launch('digest', lambda: digest.maybe_send_digest(dict(state)))
+                    launch('schedule', pipeline.schedule)
+                    flows.mark('gcal', gcal.readiness() if flows.enabled('gcal') else 'paused')
+            except Exception as exc:
+                print(f'[main] cycle failed ({type(exc).__name__})')
+            time.sleep(1)
+    finally:
+        for worker in workers:
+            worker.stop()
+        for close in (wa.stop, personal.stop, web_server.close):
+            try:
+                close()
+            except Exception as exc:
+                print(f'[main] shutdown error ({type(exc).__name__})')
+        deadline = time.monotonic()+35
+        for thread in [w.thread for w in workers]+list(periodic.values()):
+            thread.join(timeout=max(0, deadline-time.monotonic()))
+        actions.save_state(state)
     print("[main] arrivederci!")
 
 

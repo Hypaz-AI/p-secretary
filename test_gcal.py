@@ -362,7 +362,7 @@ class ChatAppointmentTests(unittest.TestCase):
              patch.object(main.db, 'add_appointment') as add, \
              patch.object(main.gcal, 'create_event') as create, \
              patch.object(main.telegram, 'notify'):
-            main.process_message('email', 'Marco', '', 'scade il 20 ottobre', {})
+            main._legacy_process_message('email', 'Marco', '', 'scade il 20 ottobre', {})
         add.assert_not_called()
         create.assert_not_called()
         self.assertFalse(verdict['appointment_results'][0]['ok'])
@@ -390,10 +390,22 @@ class ChatAppointmentTests(unittest.TestCase):
             main.handle_user_chat('ricordami il pagamento')
         text = send.call_args.args[0]
         self.assertNotIn('Fatto', text)
-        self.assertIn('non creato', text)
+        self.assertIn('non ancora confermata', text)
         self.assertEqual(main._chat_history[-1]['content'], text)
 
     def setUp(self):
+        from datetime import datetime as RealDateTime
+        class FrozenDateTime(RealDateTime):
+            @classmethod
+            def now(cls, tz=None):
+                value = cls(2026, 10, 14, 12, tzinfo=ZoneInfo(config.TIMEZONE))
+                return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+        from zoneinfo import ZoneInfo
+        for name, kwargs in (('connectors.gcal.datetime', {'new':FrozenDateTime}),
+                     ('main.db._conn', {}), ('pipeline.save_event', {'return_value':1})):
+            p = patch(name, **kwargs)
+            p.start()
+            self.addCleanup(p.stop)
         switch = patch.object(main.flows, 'enabled', return_value=True)
         switch.start()
         self.addCleanup(switch.stop)
@@ -407,11 +419,11 @@ class ChatAppointmentTests(unittest.TestCase):
              patch.object(main.db, 'add_appointment', return_value=1) as add, \
              patch.object(main.telegram, 'notify') as send:
             main.handle_user_chat('mettimi un appuntamento domani dal dentista')
-        add.assert_called_once()
-        create.assert_called_once()
+        add.assert_not_called()
+        create.assert_not_called()
         text = send.call_args[0][0]
         self.assertNotIn('@@EVENTO@@', text)
-        self.assertIn('Inserito su Google Calendar', text)
+        self.assertIn('sincronizzazione Calendar in coda', text)
 
     def test_marker_without_calendar_saves_local_agenda(self):
         reply = "Ok\n@@EVENTO@@ Cena | 2026-10-15 20:00"
@@ -422,8 +434,8 @@ class ChatAppointmentTests(unittest.TestCase):
              patch.object(main.telegram, 'notify') as send:
             main.handle_user_chat('ricordimi la cena')
         create.assert_not_called()
-        add.assert_called_once()
-        self.assertIn('Salvato in agenda', send.call_args[0][0])
+        add.assert_not_called()
+        self.assertIn('salvato localmente', send.call_args[0][0])
 
     def test_invalid_marker_warns_user(self):
         reply = "Fatto!\n@@EVENTO@@ Cena | domani sera"
@@ -450,7 +462,7 @@ class ChatAppointmentTests(unittest.TestCase):
              patch.object(main.gcal, 'is_active', return_value=True), \
              patch.object(main.gcal, 'create_event', return_value={'ok': True}) as create, \
              patch.object(main.telegram, 'notify'):
-            main.process_message('email (test)', 'mittente', 'oggetto', 'testo', {})
+            main._legacy_process_message('email (test)', 'mittente', 'oggetto', 'testo', {})
         create.assert_called_once()
         self.assertEqual(create.call_args.kwargs['reminder_minutes'], 0)
         self.assertTrue(verdict['appointment_results'][0]['ok'])
@@ -459,6 +471,7 @@ class ChatAppointmentTests(unittest.TestCase):
         events = [{'dt': '2026-10-15 15:00', 'title': 'Dentista',
                    'location': 'Studio', 'all_day': False, 'event_id': '1'}]
         with patch.object(main.gcal, 'is_active', return_value=True), \
+               patch.object(main.db, 'upcoming_appointments', return_value=[]), \
              patch.object(main.gcal, 'upcoming_events', return_value=events), \
              patch.object(main.telegram, 'notify') as send:
             self.assertTrue(main._handle_user_command('/appuntamenti'))
