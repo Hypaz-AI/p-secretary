@@ -1,0 +1,324 @@
+"""Allowlisted, staged dashboard configuration. No runtime mutation or shell API.
+
+The env file is the sole commit point. Calendar keys are immutable content-addressed
+private files: publishing the env pointer last makes a batch atomic, even on crash.
+"""
+import hashlib
+import hmac
+import imaplib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import smtplib
+import socket
+import ssl
+import threading
+from urllib.parse import urlsplit, quote, urlencode
+from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
+
+import config
+from connectors.storage import FileLock, atomic_write
+from installer import read_env, valid_preference
+
+_lock = threading.Lock()
+_revision_key = os.urandom(32)
+DEPLOYMENT = {
+    'PI_SECRETARY_CONFIG_FILE', 'DATA_DIR', 'INVOICE_DIR', 'TELEGRAM_USER_SESSION',
+    'DASHBOARD_CREDENTIAL_FILE', 'DASHBOARD_BIND', 'DASHBOARD_PORT',
+    'DASHBOARD_HOSTNAME', 'DASHBOARD_COOKIE_SECURE', 'WA_CHROMIUM_PATH',
+    'GCAL_SERVICE_ACCOUNT_FILE',
+}
+INTERACTIVE = {
+    'WHATSAPP_ENABLED': 'Autorizzazione QR: setup_whatsapp.py nel terminale del deployment.',
+    'TELEGRAM_USER_ENABLED': 'Sessione personale: setup_telegram_account.py nel terminale del deployment.',
+    'TELEGRAM_API_ID': 'Credenziali e login: configure / setup_telegram_account.py nel terminale.',
+    'TELEGRAM_API_HASH': 'Credenziali e login: configure / setup_telegram_account.py nel terminale.',
+    'TELEGRAM_PHONE': 'Credenziali e login: configure / setup_telegram_account.py nel terminale.',
+    'TELEGRAM_CHAT_ID': 'Autorizzazione proprietario: setup_telegram.py nel terminale; non modificabile dal web.',
+}
+
+
+def schema():
+    groups = {
+        'Identità e AI': ['AGENT_NAME', 'OPENROUTER_API_KEY', 'OPENROUTER_MODEL'],
+        'Database': ['DATABASE_URL'],
+        'Telegram e WhatsApp': ['TELEGRAM_BOT_TOKEN', *INTERACTIVE,
+            'TELEGRAM_USER_DIALOG_LIMIT', 'TELEGRAM_USER_MESSAGE_LIMIT', 'TELEGRAM_USER_RECOVERY_INTERVAL'],
+        'Calendar': ['GCAL_ENABLED', 'GCAL_CALENDAR_ID', 'GCAL_EVENT_DURATION', 'GCAL_SERVICE_ACCOUNT_JSON'],
+        'Preferenze': ['TIMEZONE', 'LANGUAGE', 'DIGEST_TIME', 'NOTIFY_PRIORITY_THRESHOLD', 'POLL_INTERVAL'],
+        'Deployment (sola lettura)': sorted(DEPLOYMENT),
+    }
+    for i in range(1, 51):
+        groups[f'Email {i}'] = [f'EMAIL{i}_{s}' for s in (
+            'NAME', 'PROVIDER', 'ADDRESS', 'PASSWORD', 'AUTH', 'CLIENT_ID',
+            'IMAP_HOST', 'IMAP_PORT', 'SMTP_HOST', 'SMTP_PORT')]
+    for i in range(1, 5):
+        groups[f'Entità fatture {i}'] = [f'INVOICE_ENTITY{i}_{s}' for s in ('NAME', 'VAT', 'DESC')]
+    return {key: {'group': group, 'secret': secret(key)} for group, keys in groups.items() for key in keys}
+
+
+def secret(key):
+    return key in ('DATABASE_URL', 'GCAL_SERVICE_ACCOUNT_JSON') or any(s in key for s in ('PASSWORD', 'TOKEN', 'API_KEY', 'API_HASH'))
+
+
+def readonly(key):
+    if key in DEPLOYMENT or key in config.DEPLOYMENT_ENV_KEYS:
+        return 'Imposto dal deployment/ambiente: modificare esternamente e ricreare il container; il file non prevale su Docker.'
+    return INTERACTIVE.get(key, '')
+
+
+def revision(raw):
+    return hmac.new(_revision_key, raw, hashlib.sha256).hexdigest()
+
+
+def raw_file():
+    return config.CONFIG_FILE.read_bytes() if config.CONFIG_FILE.exists() else b''
+
+
+def effective(saved):
+    # os.environ contains the startup dotenv too; only inherited keys override
+    # the latest file, otherwise a second edit would validate stale credentials.
+    return {**saved, **{k: os.environ[k] for k in config.DEPLOYMENT_ENV_KEYS if k in os.environ}}
+
+
+def describe():
+    with _lock, FileLock(str(config.CONFIG_FILE) + '.lock'):
+        raw = raw_file()
+        values = effective(read_env(config.CONFIG_FILE))
+        fields = []
+        for key, spec in schema().items():
+            value = values.get(key, '')
+            if key == 'GCAL_SERVICE_ACCOUNT_JSON':
+                from connectors import gcal
+                value = 'configured' if Path(values.get('GCAL_SERVICE_ACCOUNT_FILE') or gcal.service_account_file()).is_file() else ''
+            fields.append(dict(spec, key=key, configured=bool(value),
+                               value=None if spec['secret'] else value, readonly=readonly(key)))
+        return {'revision': revision(raw), 'fields': fields,
+                'apply': 'Salvataggio per il prossimo avvio. Runtime invariato. Riavvio/ricreazione manuale; nessuna migrazione DB. Autorizzazioni QR/OTP/OAuth solo da terminale.'}
+
+
+class Conflict(ValueError):
+    pass
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        raise ValueError('Redirect refused')
+
+
+def remote_json(url, headers=None, data=None):
+    # Fixed vendor HTTPS URLs only. Never follow redirects carrying credentials
+    # and never use ambient HTTP proxies for credential verification.
+    opener = build_opener(ProxyHandler({}), NoRedirect())
+    with opener.open(Request(url, headers=headers or {}, data=data), timeout=10) as response:
+        return json.loads(response.read(262145))
+
+
+def public_host(host, port):
+    if not host or not re.fullmatch(r'[A-Za-z0-9.:-]+', host):
+        raise ValueError('Host non valido')
+    addresses = {item[4][0] for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)}
+    if not addresses or any(not ipaddress.ip_address(addr).is_global for addr in addresses):
+        raise ValueError('La verifica web consente solo host pubblici; destinazioni locali/private richiedono il terminale.')
+    return sorted(addresses)[0]
+
+
+def verify_database(uri):
+    import psycopg
+    parsed = urlsplit(uri)
+    if parsed.scheme not in ('postgres', 'postgresql') or not parsed.hostname or parsed.query or parsed.fragment:
+        raise ValueError('Usare URI PostgreSQL senza opzioni query; DB privati/opzioni TLS avanzate dal terminale.')
+    # Pin the vetted IP; libpq must not resolve the hostname again (DNS rebinding).
+    address = public_host(parsed.hostname, parsed.port or 5432)
+    with psycopg.connect(uri, hostaddr=address, connect_timeout=8,
+                         options='-c default_transaction_read_only=on -c statement_timeout=5000',
+                         sslmode='verify-full', sslrootcert='/etc/ssl/certs/ca-certificates.crt') as conn:
+        if conn.execute('SELECT 1').fetchone() != (1,):
+            raise ValueError('Database non verificato')
+
+
+def verify_email(values, prefix):
+    provider = values.get(prefix + 'PROVIDER', 'custom')
+    if provider not in config._EMAIL_PRESETS:
+        raise ValueError('Provider email non valido')
+    ih, ip, sh, sp, auth = config._EMAIL_PRESETS[provider]
+    auth = values.get(prefix + 'AUTH') or auth
+    if auth != 'basic':
+        raise ValueError('Email OAuth richiede setup_ms_auth.py nel terminale; nessuna autorizzazione simulata.')
+    address, password = values.get(prefix + 'ADDRESS', ''), values.get(prefix + 'PASSWORD', '')
+    if not address or not password:
+        raise ValueError('Indirizzo e password email obbligatori')
+    ih, sh = values.get(prefix + 'IMAP_HOST') or ih, values.get(prefix + 'SMTP_HOST') or sh
+    ip, sp = int(values.get(prefix + 'IMAP_PORT') or ip), int(values.get(prefix + 'SMTP_PORT') or sp)
+    if ip != 993 or sp not in (465, 587):
+        raise ValueError('Verifica email solo IMAPS 993 e SMTP TLS 465/587')
+    # Only fixed provider endpoints: custom host probes cannot safely pin IMAP
+    # and SMTP DNS using stdlib without replacing transport internals.
+    if (ih, sh) not in {(p[0], p[2]) for p in config._EMAIL_PRESETS.values() if p[0]}:
+        raise ValueError('Host email personalizzati: verifica dal terminale (protezione SSRF).')
+    context = ssl.create_default_context()
+    with imaplib.IMAP4_SSL(ih, ip, ssl_context=context, timeout=10) as conn:
+        conn.login(address, password)
+        conn.logout()
+    client = smtplib.SMTP_SSL(sh, sp, timeout=10, context=context) if sp == 465 else smtplib.SMTP(sh, sp, timeout=10)
+    with client as conn:
+        if sp == 587:
+            conn.ehlo()
+            conn.starttls(context=context)
+            conn.ehlo()
+        conn.login(address, password)
+
+
+def verify_calendar(values, raw):
+    from connectors import gcal
+    import time
+    if raw:
+        sa = gcal.validate_service_account(json.loads(raw))
+    else:
+        path = Path(values.get('GCAL_SERVICE_ACCOUNT_FILE') or gcal.service_account_file())
+        sa = gcal.validate_service_account(json.loads(path.read_text()))
+    calendar = values.get('GCAL_CALENDAR_ID', '')
+    if not calendar or calendar.lower() == 'primary':
+        raise ValueError('Serve ID calendario esplicito')
+    # Isolated candidate signing: do NOT touch the live gcal token cache or config.
+    now = int(time.time())
+    claims = {'iss': sa['client_email'], 'scope': gcal.SCOPES, 'aud': gcal.TOKEN_URL, 'iat': now, 'exp': now + 3600}
+    segments = gcal._b64url(b'{"alg":"RS256","typ":"JWT"}') + '.' + gcal._b64url(json.dumps(claims).encode())
+    n, d = gcal._parse_rsa_private_key(sa['private_key'])
+    assertion = segments + '.' + gcal._b64url(gcal._rsa_sign_sha256(segments.encode(), n, d))
+    token = remote_json('https://oauth2.googleapis.com/token',
+                        {'Content-Type': 'application/x-www-form-urlencoded'},
+                        urlencode({'grant_type': 'urn:ietf:params:oauth:grant-type:jwt-bearer', 'assertion': assertion}).encode())['access_token']
+    headers = {'Authorization': 'Bearer ' + token}
+    remote_json('https://www.googleapis.com/calendar/v3/calendars/' + quote(calendar, safe=''), headers)
+    # CalendarList exposes accessRole without creating events or changing ACLs.
+    entry = remote_json('https://www.googleapis.com/calendar/v3/users/me/calendarList/' + quote(calendar, safe=''), headers)
+    if entry.get('accessRole') not in ('writer', 'owner'):
+        raise ValueError('Calendar richiede accesso writer/owner e presenza in CalendarList')
+    return sa
+
+
+def validate(changes, values):
+    for key, value in changes.items():
+        if not valid_preference(key, value):
+            raise ValueError('Preferenza non valida: ' + key)
+        if key in ('GCAL_ENABLED',) and value not in ('true', 'false'):
+            raise ValueError('Booleano non valido')
+        if key.endswith(('_PORT', '_LIMIT', '_INTERVAL', '_DURATION')) or key == 'POLL_INTERVAL':
+            if not value.isdecimal() or not 1 <= int(value) <= 65535:
+                raise ValueError('Intero fuori intervallo: ' + key)
+        if key == 'NOTIFY_PRIORITY_THRESHOLD' and value not in ('mai', 'bassa', 'media', 'alta'):
+            raise ValueError('Soglia non valida')
+        if re.fullmatch(r'INVOICE_ENTITY[1-4]_NAME', key) and value and not re.fullmatch(r'[A-Za-z0-9_-]+', value):
+            raise ValueError('Nome cartella entità non valido')
+    if 'DATABASE_URL' in changes:
+        verify_database(values['DATABASE_URL'])
+    if 'OPENROUTER_API_KEY' in changes:
+        result = remote_json('https://openrouter.ai/api/v1/key', {'Authorization': 'Bearer ' + values['OPENROUTER_API_KEY']})
+        if not isinstance(result.get('data'), dict):
+            raise ValueError('Chiave AI non verificata')
+    if 'TELEGRAM_BOT_TOKEN' in changes:
+        token = values['TELEGRAM_BOT_TOKEN']
+        if not re.fullmatch(r'\d+:[A-Za-z0-9_-]+', token):
+            raise ValueError('Token bot non valido')
+        # Owner authorization is immutable via web. Never getUpdates/sendMessage.
+        if not values.get('TELEGRAM_CHAT_ID'):
+            raise ValueError('Configurare prima il proprietario con setup_telegram.py')
+        result = remote_json('https://api.telegram.org/bot' + token + '/getMe')
+        if not result.get('ok') or not result.get('result', {}).get('is_bot'):
+            raise ValueError('Bot non verificato')
+        # A different bot identity requires explicit pairing via the terminal.
+        # getMe alone cannot establish ownership of a newly selected bot.
+        previous = effective(read_env(config.CONFIG_FILE)).get('TELEGRAM_BOT_TOKEN', '')
+        if not previous or previous.split(':', 1)[0] != token.split(':', 1)[0]:
+            raise ValueError('Cambio identità bot: usare setup_telegram.py per autorizzare il proprietario')
+    for prefix in sorted({m.group(0) for key in changes if (m := re.match(r'EMAIL\d+_', key))}):
+        verify_email(values, prefix)
+    if 'GCAL_SERVICE_ACCOUNT_JSON' in changes or 'GCAL_CALENDAR_ID' in changes or changes.get('GCAL_ENABLED') == 'true':
+        return verify_calendar(values, changes.get('GCAL_SERVICE_ACCOUNT_JSON'))
+    return None
+
+
+def save(payload):
+    if not isinstance(payload, dict) or not isinstance(payload.get('changes'), dict) or not isinstance(payload.get('revision'), str):
+        raise ValueError('Richiesta non valida')
+    changes = payload['changes']
+    allowed = schema()
+    if not changes or len(changes) > 100:
+        raise ValueError('Inviare da 1 a 100 campi modificati')
+    for key, value in changes.items():
+        if key not in allowed or readonly(key):
+            raise ValueError('Campo non modificabile: ' + (key if key in allowed else 'sconosciuto'))
+        if not isinstance(value, str) or len(value) > (131072 if key == 'GCAL_SERVICE_ACCOUNT_JSON' else 4096):
+            raise ValueError('Valore non valido')
+        if key != 'GCAL_SERVICE_ACCOUNT_JSON' and any(ord(c) < 32 for c in value):
+            raise ValueError('Caratteri di controllo vietati')
+        if secret(key) and not value:
+            raise ValueError('Segreto vuoto: omettere il campo per mantenerlo')
+    # Serializes admin requests and wizard writers throughout validation and commit.
+    with _lock, FileLock(str(config.CONFIG_FILE) + '.lock'):
+        before = raw_file()
+        if not hmac.compare_digest(payload['revision'], revision(before)):
+            raise Conflict('Configurazione cambiata: ricaricare prima di riprovare')
+        saved = read_env(config.CONFIG_FILE)
+        values = effective({**saved, **changes})
+        sa = validate(changes, values)
+        staged = {k: v for k, v in changes.items() if k != 'GCAL_SERVICE_ACCOUNT_JSON'}
+        candidate_path = None
+        created = False
+        try:
+            if sa is not None and 'GCAL_SERVICE_ACCOUNT_JSON' in changes:
+                if 'GCAL_SERVICE_ACCOUNT_FILE' in config.DEPLOYMENT_ENV_KEYS:
+                    raise ValueError('Percorso chiave Calendar imposto dal deployment')
+                text = json.dumps(sa, sort_keys=True) + '\n'
+                # Outside general file-browser roots: private config directory.
+                directory = config.CONFIG_FILE.parent / '.calendar-keys'
+                directory.mkdir(mode=0o700, exist_ok=True)
+                if directory.is_symlink():
+                    raise ValueError('Directory chiavi symlink vietata')
+                directory.chmod(0o700)
+                candidate_path = directory / (hashlib.sha256(text.encode()).hexdigest() + '.json')
+                if candidate_path.is_symlink():
+                    raise ValueError('Chiave symlink vietata')
+                created = not candidate_path.exists()
+                if created:
+                    atomic_write(candidate_path, text)
+                elif candidate_path.read_text() != text:
+                    raise ValueError('Chiave esistente non corrispondente')
+                candidate_path.chmod(0o600)
+                staged['GCAL_SERVICE_ACCOUNT_FILE'] = str(candidate_path.resolve())
+            if raw_file() != before:
+                raise Conflict('Configurazione cambiata durante la verifica')
+            lines = [line for line in before.decode().splitlines()
+                     if line.strip().partition('=')[0].strip() not in staged]
+            lines.extend(k + '=' + json.dumps(v, ensure_ascii=False) for k, v in staged.items())
+            atomic_write(config.CONFIG_FILE, '\n'.join(lines) + '\n')
+        except BaseException:
+            if candidate_path and created:
+                candidate_path.unlink(missing_ok=True)
+            raise
+    return {'ok': True, 'restart_required': True, 'applied_live': False}
+
+
+def register(app):
+    from flask import jsonify, request
+
+    @app.get('/api/configuration')
+    def configuration():
+        try:
+            return jsonify(describe())
+        except Exception:
+            return jsonify(error='Configurazione non disponibile'), 503
+
+    @app.post('/api/configuration')
+    def update():
+        try:
+            return jsonify(save(request.get_json(silent=True)))
+        except Conflict:
+            return jsonify(error='Conflitto: ricaricare configurazione e riprovare'), 409
+        except Exception:
+            # Neither provider error bodies, URLs, candidate values nor private
+            # keys enter responses/logs, including exception tracebacks.
+            return jsonify(error='Verifica/salvataggio fallito. Nessun valore sostituito. Controllare formato, provider, permessi o usare il setup da terminale per host privati/OAuth.'), 400

@@ -7,6 +7,9 @@ from connectors.storage import FileLock, atomic_write
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = Path(os.environ.get('PI_SECRETARY_CONFIG_FILE') or BASE_DIR / '.env').expanduser().resolve()
+# Preserve provenance before dotenv fills the process environment. Dashboard
+# edits must never claim to override values injected by the deployment.
+DEPLOYMENT_ENV_KEYS = frozenset(os.environ)
 
 
 def _load_dotenv(path: Path) -> None:

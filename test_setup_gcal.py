@@ -20,9 +20,10 @@ class CalendarSetupTests(unittest.TestCase):
             self.assertEqual(setup.supply_service_account(), saved)
             hidden.assert_not_called()
         with patch.object(setup.gcal, '_load_service_account', return_value={}), \
-             patch('builtins.input', return_value='f'), patch.object(setup, 'hidden_json') as hidden:
+             patch('builtins.input') as choice, patch.object(setup, 'hidden_json', return_value='') as hidden:
             self.assertIsNone(setup.supply_service_account())
-            hidden.assert_not_called()
+            hidden.assert_called_once()
+            choice.assert_not_called()
 
     def test_hidden_compact_and_multiline(self):
         for lines in (['{"private":"SECRET"}', 'FINE'], ['{', '"private":"SECRET"', '}', 'FINE']):
@@ -49,11 +50,12 @@ class CalendarSetupTests(unittest.TestCase):
                  patch.object(setup.gcal, '_load_service_account', return_value={}), \
                  patch.object(setup.gcal, 'validate_service_account', side_effect=lambda data: data):
                 target = target.parent / 'gcal_service_account.json'
-                with patch('builtins.input', side_effect=['i']), patch.object(setup, 'hidden_json', return_value=source.read_text()):
+                with patch('builtins.input') as choice, patch.object(setup, 'hidden_json', return_value=source.read_text()):
                     setup.supply_service_account()
+                    choice.assert_not_called()
                 self.assertEqual(target.stat().st_mode & 0o777, 0o600)
                 before = target.read_bytes()
-                with patch('builtins.input', side_effect=['i', 'n']), \
+                with patch('builtins.input', side_effect=['n']), \
                      patch.object(setup, 'hidden_json', return_value='{"private_key":"NEW"}'):
                     self.assertIsNone(setup.supply_service_account())
                 self.assertEqual(target.read_bytes(), before)
@@ -69,9 +71,14 @@ class CalendarSetupTests(unittest.TestCase):
                     with self.assertRaises(ValueError) as error:
                         setup.supply_service_account()
                     self.assertNotIn('SECRET', str(error.exception))
-                with patch('builtins.input', return_value=''):
+                with patch.object(setup, 'hidden_json', return_value=''):
                     self.assertIsNone(setup.supply_service_account())
                 self.assertFalse(target.exists())
+
+    def test_initial_blank_cancels_direct_paste(self):
+        with patch('getpass.getpass', return_value='') as hidden:
+            self.assertEqual(setup.hidden_json(), '')
+            hidden.assert_called_once()
 
     def test_primary_rejected_without_network(self):
         with patch.object(setup, 'supply_service_account', return_value={'client_email': 'test@example.com'}), \

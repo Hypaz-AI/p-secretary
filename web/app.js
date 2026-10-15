@@ -10,7 +10,62 @@ async function api(path, data) {
   if (!response.ok) { if (response.status === 401) show(false); throw Error(result.error || 'Richiesta fallita'); }
   return result;
 }
-function show(connected) { el('login').hidden = connected; el('dashboard').hidden = !connected; el('logout').hidden = !connected; }
+function show(connected) {
+  el('login').hidden = connected; el('dashboard').hidden = !connected; el('logout').hidden = !connected;
+  if (!connected) {el('config-fields').replaceChildren(); el('config-save').hidden = true; configRevision = '';}
+}
+let configRevision = '';
+el('config-load').onclick = async () => {
+  try {
+    const result = await api('/api/configuration');
+    configRevision = result.revision;
+    el('config-info').textContent = result.apply;
+    el('config-fields').replaceChildren();
+    const groups = new Map();
+    result.fields.forEach(field => {
+      if (!groups.has(field.group)) {
+        const details = node('details', ''); details.append(node('summary', field.group));
+        groups.set(field.group, details); el('config-fields').append(details);
+      }
+      const label = node('label', field.key);
+      const input = node(field.key === 'GCAL_SERVICE_ACCOUNT_JSON' ? 'textarea' : 'input', '');
+      if (input.tagName === 'INPUT') input.type = field.secret ? 'password' : 'text';
+      input.autocomplete = 'off'; input.spellcheck = false;
+      input.dataset.key = field.key; input.dataset.original = field.secret ? '' : (field.value || '');
+      input.dataset.secret = String(field.secret);
+      input.value = field.secret ? '' : (field.value || '');
+      input.disabled = !!field.readonly;
+      input.placeholder = field.secret ? (field.configured ? 'Configurato · vuoto mantiene il segreto' : 'Non configurato') : 'Non impostato (default applicazione)';
+      label.append(input);
+      if (field.readonly) label.append(node('small', field.readonly));
+      groups.get(field.group).append(label);
+    });
+    el('config-save').hidden = false; el('config-status').textContent = 'Modificare solo i campi necessari. Le verifiche di rete sono senza invii o pairing; OAuth e sessioni richiedono il terminale.';
+  } catch(e) {el('config-status').textContent = e.message;}
+};
+el('config-form').onsubmit = async event => {
+  event.preventDefault();
+  const changes = {};
+  const inputs = [...el('config-fields').querySelectorAll('input,textarea')];
+  inputs.filter(input => !input.disabled).forEach(input => {
+    if (input.value !== input.dataset.original && (input.dataset.secret !== 'true' || input.value)) changes[input.dataset.key] = input.value;
+  });
+  if (!Object.keys(changes).length) {el('config-status').textContent = 'Nessuna modifica.'; return;}
+  if (!confirm('Verificare i candidati tramite rete e salvare il batch per il prossimo avvio? Nessun riavvio o migrazione automatica.')) return;
+  el('config-save').disabled = true; el('config-load').disabled = true;
+  el('config-status').textContent = 'Verifica in corso… nessuna modifica live.';
+  try {
+    await api('/api/configuration', {revision: configRevision, changes});
+    // A successful revision is deliberately invalidated: reload before another edit.
+    el('config-fields').replaceChildren(); el('config-save').hidden = true; configRevision = '';
+    el('config-status').textContent = 'Batch salvato atomicamente. Runtime invariato: riavviare manualmente quando opportuno. Nessuna migrazione DB eseguita.';
+  } catch(e) {el('config-status').textContent = e.message;}
+  finally {
+    inputs.filter(input => input.dataset.secret === 'true').forEach(input => {input.value = '';});
+    Object.keys(changes).forEach(key => {delete changes[key];});
+    el('config-save').disabled = false; el('config-load').disabled = false;
+  }
+};
 let filePath = '';
 const fileQuery = path => new URLSearchParams({root: el('file-root').value, path}).toString();
 async function browseFiles() {

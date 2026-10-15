@@ -97,6 +97,7 @@ assert not errors, errors
         identity = jobs.event_id('source:42')
         self.assertRegex(identity,r'^[0-9a-f]{64}$')
         with patch.object(gcal,'validate_event', return_value={'dt':'2099-01-01 10:00','duration_min':60,'reminder_minutes':30}), \
+               patch.object(gcal,'_cal_path', return_value='offline-shared-calendar'), \
              patch.object(gcal,'_api',side_effect=[RuntimeError('Google Calendar API 409: conflict'),{'id':identity}]):
             result = gcal.create_event('X','2099-01-01 10:00',event_id=identity)
         self.assertTrue(result['ok'])

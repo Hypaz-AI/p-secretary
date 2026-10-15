@@ -19,13 +19,15 @@ def confirm(prompt):
 
 def hidden_json():
     print('Incolla JSON compatto o multilinea (input nascosto).')
-    print('Termina con una riga contenente solo FINE, poi INVIO. Ctrl-C annulla.')
+    print('Termina con una riga contenente solo FINE, poi INVIO. INVIO iniziale o Ctrl-C annulla.')
     lines = []
     # getpass altrimenti ripiega su stdin con echo: vietato per chiavi private.
     with warnings.catch_warnings():
         warnings.simplefilter('error', getpass.GetPassWarning)
         while True:
             line = getpass.getpass('JSON> ')
+            if not lines and not line.strip():
+                return ''
             if line.strip() == 'FINE':
                 return '\n'.join(lines)
             lines.append(line)
@@ -42,10 +44,9 @@ def supply_service_account():
     existing = gcal._load_service_account()
     if existing and not confirm('Una chiave valida è già presente. Sostituirla?'):
         return existing
-    choice = input('Chiave IAM: [i] incolla nascosto, INVIO annulla: ').strip().lower()
-    if choice != 'i':
-        return None
     raw = hidden_json()
+    if not raw.strip():
+        return None
     path = config.DATA_DIR / 'gcal_service_account.json'
     try:
         data = gcal.validate_service_account(json.loads(raw))

@@ -70,7 +70,7 @@ with patch.object(ms.config, 'EMAIL_ACCOUNTS', []):
     assert ms.main() == 2
 with patch.object(ms.config, 'EMAIL_ACCOUNTS', [{'auth':'oauth2','name':'Fake','address':'fake@example.invalid'}]), patch.object(ms.ms_oauth, 'authorize', side_effect=RuntimeError('private')):
     assert ms.main() == 1
-with patch.object(cal.gcal, '_load_service_account', return_value=None), patch('builtins.input', return_value='n'):
+with patch.object(cal.gcal, '_load_service_account', return_value=None), patch.object(cal, 'hidden_json', return_value=''):
     assert cal.main() == 2
 with patch('getpass.getpass', return_value=''):
     assert tg.main() == 2

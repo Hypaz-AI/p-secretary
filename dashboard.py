@@ -92,6 +92,8 @@ def create_app(auth=None):
     app.config['MAX_CONTENT_LENGTH'] = 4096
     import file_browser
     file_browser.register(app)
+    import admin_config
+    admin_config.register(app)
     sessions, attempts = {}, {}
     lock = threading.Lock()
 
@@ -119,6 +121,8 @@ def create_app(auth=None):
         if request.method != 'GET' and not hmac.compare_digest(request.headers.get('X-CSRF-Token', ''), session['csrf']):
             return jsonify(error='CSRF refused'), 403
         request.dashboard_session = session
+        if request.path == '/api/configuration' and request.method == 'POST':
+            request.max_content_length = 196608
         if request.path == '/api/files/upload' and request.method == 'POST':
             request.max_content_length = file_browser.MAX_UPLOAD
 
