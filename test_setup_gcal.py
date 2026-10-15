@@ -13,6 +13,17 @@ import setup_gcal as setup
 
 
 class CalendarSetupTests(unittest.TestCase):
+    def test_file_import_removed_and_saved_key_reused(self):
+        saved = {'client_email': 'saved@example.invalid'}
+        with patch.object(setup.gcal, '_load_service_account', return_value=saved), \
+             patch('builtins.input', return_value='n'), patch.object(setup, 'hidden_json') as hidden:
+            self.assertEqual(setup.supply_service_account(), saved)
+            hidden.assert_not_called()
+        with patch.object(setup.gcal, '_load_service_account', return_value={}), \
+             patch('builtins.input', return_value='f'), patch.object(setup, 'hidden_json') as hidden:
+            self.assertIsNone(setup.supply_service_account())
+            hidden.assert_not_called()
+
     def test_hidden_compact_and_multiline(self):
         for lines in (['{"private":"SECRET"}', 'FINE'], ['{', '"private":"SECRET"', '}', 'FINE']):
             output = io.StringIO()
@@ -33,10 +44,12 @@ class CalendarSetupTests(unittest.TestCase):
             target = Path(tmp) / 'nested/key.json'
             source = Path(tmp) / 'source.json'
             source.write_text('{"private_key":"SECRET"}')
-            with patch.object(setup.gcal, 'service_account_file', return_value=target), \
+            with patch.object(setup.config, 'DATA_DIR', target.parent), patch.object(setup.config, 'set_env'), \
+                 patch.object(setup.gcal, 'service_account_file', return_value=target), \
                  patch.object(setup.gcal, '_load_service_account', return_value={}), \
                  patch.object(setup.gcal, 'validate_service_account', side_effect=lambda data: data):
-                with patch('builtins.input', side_effect=['f', str(source)]):
+                target = target.parent / 'gcal_service_account.json'
+                with patch('builtins.input', side_effect=['i']), patch.object(setup, 'hidden_json', return_value=source.read_text()):
                     setup.supply_service_account()
                 self.assertEqual(target.stat().st_mode & 0o777, 0o600)
                 before = target.read_bytes()

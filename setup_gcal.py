@@ -38,21 +38,15 @@ def supply_service_account():
     print(f'Percorso JSON nel processo corrente: {path}')
     print('Docker: il default /var/lib/pi-secretary/gcal_service_account.json corrisponde a')
     print('PI_SECRETARY_HOME/data/gcal_service_account.json sull’host.')
-    print('Import file: usare un percorso visibile al processo/container; in alternativa incollare.')
-    print('Percorsi personalizzati: GCAL_SERVICE_ACCOUNT_FILE deve essere visibile anche al runtime.')
+    print('Incolla il contenuto JSON, non il percorso del file sul PC.')
     existing = gcal._load_service_account()
     if existing and not confirm('Una chiave valida è già presente. Sostituirla?'):
         return existing
-    choice = input('Chiave IAM: [i] incolla nascosto, [f] importa file, INVIO annulla: ').strip().lower()
-    if choice not in ('i', 'f'):
+    choice = input('Chiave IAM: [i] incolla nascosto, INVIO annulla: ').strip().lower()
+    if choice != 'i':
         return None
-    if choice == 'i':
-        raw = hidden_json()
-    else:
-        source = Path(input('Percorso file JSON da importare: ').strip()).expanduser()
-        if source.stat().st_size > 131072:
-            raise ValueError('JSON troppo grande')
-        raw = source.read_text(encoding='utf-8')
+    raw = hidden_json()
+    path = config.DATA_DIR / 'gcal_service_account.json'
     try:
         data = gcal.validate_service_account(json.loads(raw))
     except (ValueError, TypeError):
@@ -63,6 +57,7 @@ def supply_service_account():
         if path.exists() and not confirm('Confermi la sovrascrittura del file chiave esistente?'):
             return None
         atomic_write(path, json.dumps(data, indent=2) + '\n')
+    config.set_env('GCAL_SERVICE_ACCOUNT_FILE', str(path))
     gcal._sa_token_cache.update(token='', expires_at=0.0)
     print('Chiave validata e salvata privatamente (0600).')
     return data
@@ -111,7 +106,7 @@ def _setup():
     if not verified:
         return 2 if verified is None else 1
     config.set_env('GCAL_ENABLED', 'true')
-    print('✅ Calendar configurato. Ricaricare separatamente il servizio; nessun avvio automatico.')
+    print('✅ Calendar configurato. Prosegui il wizard; nessun avvio automatico.')
     return 0
 
 

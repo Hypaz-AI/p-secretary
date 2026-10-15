@@ -119,7 +119,8 @@ def configure_email(config, edit=False):
                 continue
         provider = prompt_missing(config, prefix + 'PROVIDER', 'Provider: gmail/outlook/m365/zimbra_ovh/custom',
                                   choices=('gmail', 'outlook', 'm365', 'zimbra_ovh', 'custom'), edit=edit)
-        guide('outlook' if provider == 'm365' else provider or 'custom')
+        if not existing or edit:
+            guide('outlook' if provider == 'm365' else provider or 'custom')
         prompt_missing(config, prefix + 'NAME', f'Nome account {i}', edit=edit)
         prompt_missing(config, prefix + 'ADDRESS', f'Indirizzo email {i}', edit=edit)
         if provider not in ('outlook', 'm365'):
@@ -144,6 +145,17 @@ def configure_preferences(config, edit=False):
                 continue
         for suffix, label in [('NAME', 'Nome entità/cartella'), ('VAT', 'Partita IVA'), ('DESC', 'Descrizione entità')]:
             prompt_missing(config, prefix + suffix, label, edit=edit)
+
+
+def run_setup(script):
+    import config
+    env = os.environ.copy()
+    for key in read_env(config.CONFIG_FILE):
+        if key not in ('PI_SECRETARY_CONFIG_FILE', 'DATA_DIR', 'INVOICE_DIR',
+                       'DASHBOARD_BIND', 'DASHBOARD_PORT', 'DASHBOARD_CREDENTIAL_FILE',
+                       'TELEGRAM_USER_SESSION'):
+            env.pop(key, None)
+    return subprocess.run([sys.executable, str(ROOT / script)], env=env)
 
 
 def wizard(edit=False):
@@ -194,15 +206,19 @@ def wizard(edit=False):
         configure_preferences(config, edit=edit)
     if 'email' in sections:
         configure_email(config, edit=edit)
+        values = read_env(config.CONFIG_FILE)
+        if any(values.get(f'EMAIL{i}_PROVIDER') in ('outlook', 'm365') for i in range(1, 51)):
+            print('Email Microsoft: autorizzazione degli account configurati; riuso token validi.')
+            result = run_setup('setup_ms_auth.py')
+            state['microsoft'] = {0: 'ready', 2: 'skipped'}.get(result.returncode, 'failed')
+            private_write(state_file, json.dumps(state))
     setups = [('telegram', 'setup_telegram.py'), ('telegram_account', 'setup_telegram_account.py'),
-              ('whatsapp', 'setup_whatsapp.py'), ('gcal', 'setup_gcal.py'),
-              ('microsoft', 'setup_ms_auth.py')]
+              ('whatsapp', 'setup_whatsapp.py'), ('gcal', 'setup_gcal.py')]
     print('Gli script opzionali possono effettuare login o chiamate di rete; seguire le loro richieste di consenso.')
-    print('Calendar: solo service account IAM, JSON con incolla nascosto o import file; nessun login utente.')
+    print('Calendar: solo service account IAM, JSON con incolla nascosto; nessun login utente.')
     for name, script in setups:
         if 'setups' in sections and confirm('Eseguire setup ' + name + (f' ({state[name]})' if state.get(name) else '') + '?'):
             if name == 'telegram_account':
-                guide('telegram_account')
                 for key, label, secret in [('TELEGRAM_API_ID', 'Telegram personale API_ID', False),
                                            ('TELEGRAM_API_HASH', 'Telegram personale API_HASH', True),
                                            ('TELEGRAM_PHONE', 'Telefono con prefisso internazionale', False)]:
@@ -213,13 +229,7 @@ def wizard(edit=False):
                     private_write(state_file, json.dumps(state))
                     continue
             # Remove loaded config keys so setdefault sees newly written values.
-            env = os.environ.copy()
-            for key in read_env(config.CONFIG_FILE):
-                if key not in ('PI_SECRETARY_CONFIG_FILE', 'DATA_DIR', 'INVOICE_DIR',
-                               'DASHBOARD_BIND', 'DASHBOARD_PORT', 'DASHBOARD_CREDENTIAL_FILE',
-                               'TELEGRAM_USER_SESSION'):
-                    env.pop(key, None)
-            result = subprocess.run([sys.executable, str(ROOT / script)], env=env)
+            result = run_setup(script)
             state[name] = {0: 'ready', 2: 'skipped'}.get(result.returncode, 'failed')
             private_write(state_file, json.dumps(state))
         else:
@@ -228,6 +238,8 @@ def wizard(edit=False):
     section('Riepilogo · configurazione, non readiness runtime')
     for name, _ in setups:
         print(f'  {name}: {state[name]}')
+    if 'microsoft' in state:
+        print(f"  microsoft: {state['microsoft']}")
     if not confirm('Confermare la configurazione (nessun avvio automatico)?'):
         return 1
     state['complete'] = True
@@ -299,8 +311,6 @@ def launch(args):
             compose('stop', 'app')
             compose('build', 'app')
             compose('run', '--rm', '--no-deps', 'app', 'python', 'installer.py', '_configure' if args.command == 'configure' else '_wizard')
-            if not confirm('Avviare il DB locale se scelto e verificare la connessione con SELECT 1?'):
-                return 0
             database()
             if doctor():
                 return 1

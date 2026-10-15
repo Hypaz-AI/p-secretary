@@ -96,7 +96,7 @@ class InstallerTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0)
             with patch.dict(sys.modules, {'config': config}), \
                     patch('installer.configure_preferences'), patch('installer.configure_email'), \
-                    patch('installer.confirm', side_effect=[False, True, False, False, False, True]), \
+                    patch('installer.confirm', side_effect=[False, True, False, False, True]), \
                     patch('builtins.input', side_effect=['Agent', '12345', '+391234']), \
                     patch('installer.getpass.getpass', return_value='hidden-hash'), \
                     patch('installer.subprocess.run', side_effect=setup) as run:

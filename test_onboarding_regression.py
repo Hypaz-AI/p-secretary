@@ -28,7 +28,7 @@ class LauncherRegression(unittest.TestCase):
                 if '_wizard' in cmd:
                     (Path(tmp) / 'config/progress.json').write_text(json.dumps({'database': 'external', 'complete': True}))
                 return SimpleNamespace(returncode=0)
-            with patch('installer.subprocess.run', side_effect=execute) as run, patch('installer.confirm', side_effect=[True, False]):
+            with patch('installer.subprocess.run', side_effect=execute) as run, patch('installer.confirm', side_effect=[False]):
                 self.assertEqual(installer.launch(SimpleNamespace(command='setup')), 0)
             probe = next(c.args[0] for c in run.call_args_list if '_probe' in c.args[0])
             self.assertIn(str(installer.ROOT / 'compose.external.yaml'), probe)

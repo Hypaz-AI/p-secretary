@@ -46,7 +46,7 @@ GUIDES = {
         'Apri https://myaccount.google.com/apppasswords, crea una password per questa app e copiala nel prompt nascosto, non usare la password Google.',
         'Se la voce manca, policy Workspace o protezioni dell’account possono impedirla: consulta https://support.google.com/accounts/answer/185833 o l’amministratore.')),
     'outlook': ('Email Microsoft · OAuth', (
-        'Non inserire password per app o password della casella: salva l’indirizzo e scegli poi il setup microsoft.',
+        'Non inserire password per app o password della casella: dopo gli indirizzi il wizard esegue subito OAuth Microsoft.',
         'Per outlook usa l’account personale; per m365 l’account lavoro/scuola. Il consenso verrà completato nel browser.')),
     'zimbra_ovh': ('Email OVH · verifica la casella', (
         'Accedi al pannello ufficiale https://www.ovh.com/manager/ → Web Cloud → servizio email e verifica indirizzo, password casella e server.',
@@ -77,9 +77,9 @@ GUIDES = {
         'Apri https://console.cloud.google.com/ e seleziona o crea un progetto; in API e servizi → Libreria abilita Google Calendar API.',
         'Metodo service account: IAM e amministrazione → Account di servizio → Crea (nessun ruolo di progetto necessario), poi Chiavi → Aggiungi chiave → JSON.',
         'Guida ufficiale: https://cloud.google.com/iam/docs/creating-managing-service-account-keys — rispetta eventuali policy che vietano chiavi.',
-        'Solo service account IAM: incolla il JSON con input nascosto (riga FINE per terminare) oppure importa un file visibile al processo; salvataggio atomico con permessi 600, mai upload dalla dashboard.',
+        'Solo service account IAM: incolla il contenuto JSON con input nascosto (riga FINE per terminare), non un percorso file; salvataggio atomico con permessi 600 nei dati persistenti.',
         'Su https://calendar.google.com → Impostazioni del calendario → Condividi con persone specifiche: aggiungi client_email del JSON con “Apportare modifiche agli eventi”.',
-        'Da Integra calendario copia l’ID calendario: per un service account NON usare primary. Poi rilancia il setup; l’evento di prova richiede consenso separato.')),
+        'Da Integra calendario copia l’ID calendario: per un service account NON usare primary. Prosegui qui; l’evento di prova richiede consenso separato.')),
     'microsoft': ('Microsoft · accesso nel browser', (
         'Configura prima almeno una email con provider outlook o m365; il setup autorizza ogni account separatamente e riusa i token ancora validi (--force per rifare il login).',
         'Apri https://microsoft.com/devicelogin su un dispositivo fidato, inserisci il codice temporaneo mostrato e accedi con l’indirizzo indicato.',
@@ -89,7 +89,7 @@ GUIDES = {
         'Salva l’ID applicazione in EMAILn_CLIENT_ID nel file privato, non un client secret. Guida: https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code',
         'I token sono salvati privatamente e rinnovati quando possibile; accessi revocati o codice scaduto richiedono un nuovo setup.')),
     'dashboard': ('Dashboard · primo accesso dopo l’avvio', (
-        'Questo wizard non avvia l’app: conferma la configurazione e scegli separatamente se verificare il DB e avviare.',
+        'Il launcher verifica automaticamente il DB scelto; l’app parte solo con il successivo consenso esplicito.',
         'Dopo l’avvio apri http://127.0.0.1:8080 sul server; da remoto usa un tunnel SSH come descritto nel README, non pubblicare HTTP su Internet.',
         'Docker: apri privatamente PI_SECRETARY_HOME/config/dashboard.json sull’host con un editor locale e leggi username/password generati al primo avvio, poi inseriscili nella pagina login.',
         'Non stampare né condividere il file. Verifica gli interruttori dei connettori: configurazione completata non significa servizio pronto o login ancora valido.')),
