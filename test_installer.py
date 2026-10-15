@@ -22,13 +22,14 @@ class InstallerTests(unittest.TestCase):
             installer.private_write(path, ''.join(k + '=' + json.dumps(v) + '\n' for k, v in values.items()))
         return SimpleNamespace(CONFIG_FILE=path, get=lambda key: installer.read_env(path).get(key, ''), set_env=save)
 
-    def test_prompt_preserves_existing_even_empty(self):
+    def test_prompt_reprompts_empty_with_default(self):
         with tempfile.TemporaryDirectory() as temp:
             config = self.fake_config(temp)
             config.set_env('LANGUAGE', '')
-            with patch('builtins.input') as prompt:
+            with patch('builtins.input', return_value='') as prompt:
                 installer.prompt_missing(config, 'LANGUAGE', 'Lingua')
-                prompt.assert_not_called()
+                prompt.assert_called_once()
+            self.assertEqual(config.get('LANGUAGE'), 'it')
 
     def test_custom_email_hidden_password_and_resume(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -96,7 +97,7 @@ class InstallerTests(unittest.TestCase):
             with patch.dict(sys.modules, {'config': config}), \
                     patch('installer.configure_preferences'), patch('installer.configure_email'), \
                     patch('installer.confirm', side_effect=[False, True, False, False, False, True]), \
-                    patch('builtins.input', side_effect=['', '12345', '+391234']), \
+                    patch('builtins.input', side_effect=['Agent', '12345', '+391234']), \
                     patch('installer.getpass.getpass', return_value='hidden-hash'), \
                     patch('installer.subprocess.run', side_effect=setup) as run:
                 self.assertEqual(installer.wizard(), 0)

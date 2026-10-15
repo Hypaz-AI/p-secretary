@@ -5,6 +5,8 @@ import fcntl
 import getpass
 import json
 import os
+import re
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 import secrets
 import subprocess
@@ -38,7 +40,11 @@ def confirm(prompt):
 
 def progress(path):
     try:
-        return json.loads(path.read_text())
+        state = json.loads(path.read_text())
+        for key in ('telegram', 'telegram_account', 'whatsapp', 'gcal', 'microsoft'):
+            if type(state.get(key)) is bool:
+                state[key] = 'ready' if state[key] else 'failed'
+        return state
     except FileNotFoundError:
         return {}
 
@@ -62,46 +68,68 @@ def provision_database(config_dir, existing, external=None):
     return 'postgresql://secretary:' + quote(password, safe='') + '@db:5432/secretary', 'local'
 
 
-def prompt_missing(config, key, label, secret=False, choices=None):
+def valid_preference(key, value):
+    if key == 'TIMEZONE':
+        try:
+            ZoneInfo(value)
+        except (ValueError, ZoneInfoNotFoundError):
+            return False
+    if key == 'DIGEST_TIME':
+        return bool(re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', value))
+    if key == 'LANGUAGE':
+        return bool(re.fullmatch(r'[a-z]{2,3}(?:-[A-Za-z]{2,8})?', value))
+    if key == 'OPENROUTER_MODEL':
+        return bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./:-]*', value))
+    return True
+
+
+def prompt_missing(config, key, label, secret=False, choices=None, edit=False):
     """Save answers immediately, without replacing existing settings."""
-    if key in read_env(config.CONFIG_FILE) or config.get(key):
-        return config.get(key)
+    saved = read_env(config.CONFIG_FILE).get(key, '')
+    if saved and not edit and valid_preference(key, saved):
+        return saved
+    defaults = {'TIMEZONE': 'Europe/Rome', 'LANGUAGE': 'it',
+                'OPENROUTER_MODEL': 'meta-llama/llama-3.3-70b-instruct', 'DIGEST_TIME': '21:00'}
+    default = saved or defaults.get(key, '')
     while True:
-        value = (getpass.getpass if secret else input)(label + ' (INVIO = salta): ').strip()
+        hint = 'mantieni salvato' if secret and saved else default if not secret and default else 'salta'
+        value = (getpass.getpass if secret else input)(label + f' (INVIO = {hint}): ').strip() or default
         if not value:
             return ''
-        if choices and value not in choices:
-            print('Valori ammessi: ' + ', '.join(choices))
+        if (choices and value not in choices) or not valid_preference(key, value):
+            print('Valore non valido' + (': ' + ', '.join(choices) if choices else ''))
             continue
         config.set_env(key, value)
         return value
 
 
-def configure_email(config):
+def configure_email(config, edit=False):
     print('Email: fino a 50 account; password/app password con input nascosto.')
     add_new = True
     for i in range(1, 51):
         prefix = f'EMAIL{i}_'
         existing = any(key.startswith(prefix) for key in read_env(config.CONFIG_FILE))
+        if existing and edit and not confirm(f'Modificare account email {i} (nessun valore segreto mostrato)?'):
+            continue
         if not existing:
             if not add_new or not confirm(f'Aggiungere account email {i}?'):
                 add_new = False
                 continue
         provider = prompt_missing(config, prefix + 'PROVIDER', 'Provider: gmail/outlook/m365/zimbra_ovh/custom',
-                                  choices=('gmail', 'outlook', 'm365', 'zimbra_ovh', 'custom'))
-        prompt_missing(config, prefix + 'NAME', f'Nome account {i}')
-        prompt_missing(config, prefix + 'ADDRESS', f'Indirizzo email {i}')
+                                  choices=('gmail', 'outlook', 'm365', 'zimbra_ovh', 'custom'), edit=edit)
+        prompt_missing(config, prefix + 'NAME', f'Nome account {i}', edit=edit)
+        prompt_missing(config, prefix + 'ADDRESS', f'Indirizzo email {i}', edit=edit)
         if provider not in ('outlook', 'm365'):
-            prompt_missing(config, prefix + 'PASSWORD', 'Password o password per app', secret=True)
+            prompt_missing(config, prefix + 'PASSWORD', 'Password o password per app', secret=True, edit=edit)
         if provider in ('', 'custom'):
             for suffix, label in [('IMAP_HOST', 'Host IMAP'), ('SMTP_HOST', 'Host SMTP')]:
-                prompt_missing(config, prefix + suffix, label)
+                prompt_missing(config, prefix + suffix, label, edit=edit)
 
 
-def configure_preferences(config):
+def configure_preferences(config, edit=False):
     for key, label in [('TIMEZONE', 'Timezone (es. Europe/Rome)'), ('LANGUAGE', 'Lingua (es. it)'),
                        ('OPENROUTER_MODEL', 'Modello OpenRouter'), ('DIGEST_TIME', 'Ora digest (HH:MM)')]:
-        prompt_missing(config, key, label)
+        prompt_missing(config, key, label, edit=edit)
     add_new = True
     for i in range(1, 5):
         prefix = f'INVOICE_ENTITY{i}_'
@@ -111,15 +139,25 @@ def configure_preferences(config):
                 add_new = False
                 continue
         for suffix, label in [('NAME', 'Nome entità/cartella'), ('VAT', 'Partita IVA'), ('DESC', 'Descrizione entità')]:
-            prompt_missing(config, prefix + suffix, label)
+            prompt_missing(config, prefix + suffix, label, edit=edit)
 
 
-def wizard():
+def wizard(edit=False):
     # Import only inside the container: each setup gets a fresh config module.
     import config
     directory = config.CONFIG_FILE.parent
     state_file = directory / 'progress.json'
     state = progress(state_file)
+    sections = {'identity', 'preferences', 'email', 'database', 'setups'}
+    if edit:
+        print('Configure: 1 identità/OpenRouter, 2 preferenze/entità, 3 email, 4 database, 5 setup opzionali, INVIO tutto')
+        while True:
+            choice = input('Sezione: ').strip()
+            if choice in ('', '1', '2', '3', '4', '5'):
+                break
+            print('Scegliere 1-5 oppure INVIO.')
+        if choice:
+            sections = [{ '1': 'identity', '2': 'preferences', '3': 'email', '4': 'database', '5': 'setups'}[choice]]
     state['complete'] = False
     private_write(state_file, json.dumps(state))
     if not config.DATABASE_URL:
@@ -133,15 +171,26 @@ def wizard():
     private_write(state_file, json.dumps(state))
     for key, label, secret in [('AGENT_NAME', 'Nome agente', False),
                                ('OPENROUTER_API_KEY', 'Chiave OpenRouter', True)]:
-        prompt_missing(config, key, label, secret)
-    configure_preferences(config)
-    configure_email(config)
+        if 'identity' in sections:
+            prompt_missing(config, key, label, secret, edit=edit)
+    if edit and 'database' in sections:
+        print('Modifica sicura: INVIO preserva i valori salvati; nessuna migrazione DB.')
+        if confirm('Modificare destinazione database (i dati NON vengono migrati)?'):
+            candidate = getpass.getpass('URI PostgreSQL (INVIO = mantieni): ').strip()
+            if candidate:
+                uri, mode = provision_database(directory, '', candidate)
+                config.set_env('DATABASE_URL', uri)
+                state['database'] = mode
+    if 'preferences' in sections:
+        configure_preferences(config, edit=edit)
+    if 'email' in sections:
+        configure_email(config, edit=edit)
     setups = [('telegram', 'setup_telegram.py'), ('telegram_account', 'setup_telegram_account.py'),
               ('whatsapp', 'setup_whatsapp.py'), ('gcal', 'setup_gcal.py'),
               ('microsoft', 'setup_ms_auth.py')]
     print('Gli script opzionali possono effettuare login o chiamate di rete; seguire le loro richieste di consenso.')
     for name, script in setups:
-        if confirm('Eseguire setup ' + name + (' (già eseguito)' if state.get(name) else '') + '?'):
+        if 'setups' in sections and confirm('Eseguire setup ' + name + (f' ({state[name]})' if state.get(name) else '') + '?'):
             if name == 'telegram_account':
                 for key, label, secret in [('TELEGRAM_API_ID', 'Telegram personale API_ID', False),
                                            ('TELEGRAM_API_HASH', 'Telegram personale API_HASH', True),
@@ -149,6 +198,8 @@ def wizard():
                     prompt_missing(config, key, label, secret)
                 if not all(config.get(key) for key in ('TELEGRAM_API_ID', 'TELEGRAM_API_HASH', 'TELEGRAM_PHONE')):
                     print('Setup Telegram personale rinviato: completare API_ID, API_HASH e telefono.')
+                    state[name] = 'skipped'
+                    private_write(state_file, json.dumps(state))
                     continue
             # Remove loaded config keys so setdefault sees newly written values.
             env = os.environ.copy()
@@ -158,8 +209,13 @@ def wizard():
                                'TELEGRAM_USER_SESSION'):
                     env.pop(key, None)
             result = subprocess.run([sys.executable, str(ROOT / script)], env=env)
-            state[name] = result.returncode == 0
+            state[name] = {0: 'ready', 2: 'skipped'}.get(result.returncode, 'failed')
             private_write(state_file, json.dumps(state))
+        else:
+            state.setdefault(name, 'skipped')
+    print('Configurazione (non readiness runtime):')
+    for name, _ in setups:
+        print(f'  {name}: {state[name]}')
     if not confirm('Confermare la configurazione (nessun avvio automatico)?'):
         return 1
     state['complete'] = True
@@ -202,13 +258,23 @@ def launch(args):
         state_file = home / 'config/progress.json'
         state = progress(state_file)
         base = ['docker', 'compose', '--project-directory', str(ROOT), '-f', str(ROOT / 'compose.yaml')]
-        if state.get('database') == 'external':
-            base += ['-f', str(ROOT / 'compose.external.yaml')]
         def compose(*items, check=True):
-            return subprocess.run(base + list(items), check=check)
+            current = progress(state_file)
+            uri = read_env(home / 'config/secretary.env').get('DATABASE_URL', '')
+            if uri:
+                _, current['database'] = provision_database(home / 'config', uri)
+                private_write(state_file, json.dumps(current))
+            selected = base + (['-f', str(ROOT / 'compose.external.yaml')] if current.get('database') == 'external' else [])
+            return subprocess.run(selected + list(items), check=check)
         def database():
-            if progress(state_file).get('database') == 'local':
+            uri = read_env(home / 'config/secretary.env').get('DATABASE_URL', '')
+            mode = provision_database(home / 'config', uri)[1] if uri else progress(state_file).get('database')
+            if mode == 'local':
                 compose('--profile', 'local', 'up', '-d', '--wait', '--wait-timeout', '120', 'db')
+        def start():
+            if not read_env(home / 'config/secretary.env').get('OPENROUTER_API_KEY', '').strip():
+                raise ValueError('OPENROUTER_API_KEY obbligatoria: usare configure e inserire la chiave OpenRouter prima di up.')
+            compose('up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'app')
         def doctor():
             return compose('run', '--rm', '--no-deps', '-T', 'app', 'python', 'installer.py', '_probe', check=False).returncode
         if args.command in ('setup', 'configure'):
@@ -220,21 +286,23 @@ def launch(args):
                 provision_database(home / 'config', '')
             compose('stop', 'app')
             compose('build', 'app')
-            compose('run', '--rm', '--no-deps', 'app', 'python', 'installer.py', '_wizard')
+            compose('run', '--rm', '--no-deps', 'app', 'python', 'installer.py', '_configure' if args.command == 'configure' else '_wizard')
             if not confirm('Avviare il DB locale se scelto e verificare la connessione con SELECT 1?'):
                 return 0
             database()
             if doctor():
                 return 1
             if confirm('Avviare ora app?'):
-                compose('up', '-d', '--no-deps', 'app')
+                start()
         elif args.command == 'up':
             if not state.get('complete'):
                 raise ValueError('Eseguire setup e confermare prima di avviare app')
+            if not read_env(home / 'config/secretary.env').get('OPENROUTER_API_KEY', '').strip():
+                raise ValueError('OPENROUTER_API_KEY obbligatoria: usare configure prima di up.')
             database()
             if doctor():
                 return 1
-            compose('up', '-d', '--no-deps', 'app')
+            start()
         elif args.command == 'doctor':
             return doctor()
         elif args.command == 'status':
@@ -250,11 +318,14 @@ def launch(args):
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['setup', 'configure', 'status', 'up', 'down', 'logs', 'doctor', '_wizard', '_probe'])
+    parser.add_argument('command', choices=['setup', 'configure', 'status', 'up', 'down', 'logs', 'doctor', '_wizard', '_configure', '_probe'])
     args = parser.parse_args()
     try:
-        return wizard() if args.command == '_wizard' else probe() if args.command == '_probe' else launch(args)
-    except (OSError, ValueError, subprocess.CalledProcessError):
+        return wizard(edit=args.command == '_configure') if args.command in ('_wizard', '_configure') else probe() if args.command == '_probe' else launch(args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except (OSError, subprocess.CalledProcessError):
         print('Operazione fallita: verificare Docker Compose, permessi, lock e configurazione. Nessun sudo automatico.', file=sys.stderr)
         return 1
 

@@ -63,7 +63,7 @@ function row(parent, left, right) { const r = node('div', ''); r.className = 'ro
 async function refresh() {
   try {
     const d = await api('/api/dashboard'); show(true);
-    el('status').textContent = `● Collegato · ${d.timezone} · ultimo aggiornamento ${new Date().toLocaleTimeString('it')}`;
+    el('status').textContent = `● ${d.agent_name} · Collegato · ${d.timezone} · ultimo aggiornamento ${new Date().toLocaleTimeString('it')}`;
     const today = d.today;
     const sum = (direction) => d.counts.filter(r => String(r[0]).slice(0,10) === today && r[2] === direction).reduce((s,r)=>s+r[3],0);
     el('kpis').replaceChildren();

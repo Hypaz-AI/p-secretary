@@ -24,7 +24,7 @@ async def authorize():
         me = await client.get_me()
         if me.bot:
             raise ValueError('Personal account required, not a bot')
-        print('Session authorized. TELEGRAM_USER_ENABLED remains unchanged.')
+        print('Session authorized. Enable ingestion only with explicit consent.')
     finally:
         await client.disconnect()
         secure_session(path)
@@ -42,6 +42,9 @@ def main():
     except (Exception, KeyboardInterrupt) as exc:
         print(f'Authorization failed ({type(exc).__name__}). Check credentials/dependencies; no secrets logged.')
         return 1
+    if input('Abilitare acquisizione Telegram personale? [s/N] ').strip().lower() not in ('s', 'si', 'sì', 'y', 'yes'):
+        return 2
+    config.set_env('TELEGRAM_USER_ENABLED', 'true')
     return 0
 
 

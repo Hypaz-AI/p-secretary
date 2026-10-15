@@ -53,7 +53,7 @@ def _setup() -> None:
         )
     except FileNotFoundError:
         print("❌ node non trovato: installalo con  sudo apt install nodejs npm")
-        sys.exit(1)
+        return 1
 
     ready = False
     try:
@@ -83,24 +83,26 @@ def _setup() -> None:
         print("   - QR non scansionato in tempo (rilancia lo script)")
         print("   - dipendenze mancanti: cd data && npm install")
         print("   - guarda i messaggi d'errore qui sopra")
-        sys.exit(1)
+        return 1
 
     if proc.returncode != 0:
         print('❌ Arresto del bridge non pulito; configurazione non abilitata.')
-        return
+        return 1
     config.set_env("WHATSAPP_ENABLED", "true")
     print("\n✅ WhatsApp connesso! Sessione salvata in data/wa_session")
     print("   WHATSAPP_ENABLED=true scritto nel .env")
-    print("\nRiavvia il segretario: sudo systemctl restart pi-secretary")
+    print("\nRicaricare con il launcher up (Docker) o riavviare il servizio host.")
+    return 0
 
 
 def main():
     try:
         with FileLock(config.DATA_DIR / 'wa_session/.owner.lock', blocking=False):
-            _setup()
-    except OSError:
+            return _setup()
+    except (Exception, KeyboardInterrupt):
         print('❌ Sessione occupata o non accessibile; fermare runtime/setup concorrente.')
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

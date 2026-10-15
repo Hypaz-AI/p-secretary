@@ -59,16 +59,24 @@ def snapshot():
     personal_readiness = readiness()
     from connectors.gcal import readiness as gcal_readiness
     calendar_readiness = gcal_readiness()
+    configuration = {
+        'telegram_user': personal_readiness, 'gcal': calendar_readiness,
+        'email': 'configured' if config.EMAIL_ACCOUNTS else 'missing_configuration',
+        'telegram_bot': 'configured' if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID else 'missing_configuration',
+        'whatsapp': 'configured' if config.WHATSAPP_ENABLED else 'disabled_in_config',
+        'digest': 'configured' if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID else 'missing_configuration',
+        'invoices': 'configured',
+        'monthly_zip': 'configured' if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID else 'missing_configuration',
+    }
     counts = [[r[0].isoformat(), *r[1:]] for r in counts]
     recent = [[r[0], r[1], r[2].isoformat() if r[2] else None, r[3]] for r in recent]
     import jobs
-    return {'timezone': config.TIMEZONE, 'today': today, 'counts': counts, 'recent': recent,
+    return {'agent_name': config.AGENT_NAME, 'timezone': config.TIMEZONE, 'today': today, 'counts': counts, 'recent': recent,
             'jobs': jobs.metrics(), 'calendar_pending':pending_calendar, 'notifications_sent':sent,
             'tasks':task_counts,
             'invoices': invoices, 'appointments': appointments, 'zips': zips,
             'flows': [{'id': k, 'label': v, 'enabled': settings[k],
-                       'configuration': personal_readiness if k == 'telegram_user' else
-                                        calendar_readiness if k == 'gcal' else None,
+                       'configuration': configuration[k],
                        'health': ({'status': 'paused'} if not settings[k] else
                                   {'status': personal_readiness} if k == 'telegram_user' and personal_readiness != 'ready' else
                                   {'status': calendar_readiness} if k == 'gcal' and calendar_readiness != 'ready' else
@@ -98,7 +106,7 @@ def create_app(auth=None):
             origin = request.headers.get('Origin')
             if origin and origin != request.host_url.rstrip('/'):
                 return jsonify(error='Origin refused'), 403
-        if request.path in ('/', '/app.js', '/style.css', '/api/login'):
+        if request.path in ('/', '/app.js', '/style.css', '/api/login', '/healthz'):
             return
         with lock:
             now = time.time()
@@ -124,6 +132,11 @@ def create_app(auth=None):
     @app.get('/')
     def index():
         return send_from_directory(config.BASE_DIR / 'web', 'index.html')
+
+    @app.get('/healthz')
+    def healthz():
+        # Only the serving app process: no DB, connector or external checks.
+        return jsonify(status='started')
 
     @app.get('/<name>')
     def asset(name):

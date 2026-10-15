@@ -1,3 +1,14 @@
+# Readiness e riconfigurazione
+
+Usare Compose v2 con supporto `up --wait --wait-timeout`. L'healthcheck app usa
+solo urllib della standard library contro `/healthz` con Host `localhost`.
+Segnala il processo HTTP avviato, non disponibilità dei connettori.
+Il launcher `up` forza la ricreazione app e attende al massimo 120 secondi;
+prima dell'avvio richiede OpenRouter e verifica il DB con SELECT 1.
+`configure` non migra dati quando cambia la destinazione DB. I setup eseguiti
+nel container indicano di ricaricare con launcher up, non tramite systemctl.
+La configurazione confermata non implica che tutti i setup opzionali siano ready.
+
 # Docker: configurazione e risoluzione dei problemi
 
 Per il primo avvio parti dal [README principale](../README.md).

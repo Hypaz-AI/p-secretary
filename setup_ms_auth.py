@@ -15,23 +15,25 @@ import config
 from connectors import ms_oauth
 
 
-def main() -> None:
+def main() -> int:
     force = "--force" in sys.argv[1:]
     accounts = [a for a in config.EMAIL_ACCOUNTS if a.get("auth") == "oauth2"]
     if not accounts:
         print("Nessun account Microsoft nel .env "
               "(serve EMAIL{n}_PROVIDER=outlook oppure m365).")
-        return
+        return 2
     print(f"Account Microsoft da autorizzare: {len(accounts)}")
+    failed = False
     for acc in accounts:
         print(f"\n{'=' * 55}\n{acc['name']} — {acc['address']}\n{'=' * 55}")
         try:
             ms_oauth.authorize(acc, force=force)
         except Exception as exc:  # noqa: BLE001
-            print(f"❌ errore su {acc['address']}: {exc}")
-    print("\nFatto. I token sono salvati in data/ms_tokens.json.")
-    print("Verifica con:  python3 test_emails.py")
+            failed = True
+            print(f"❌ Autorizzazione fallita ({type(exc).__name__}); riprovare il setup.")
+    print("\nSetup incompleto: riprovare gli account falliti." if failed else "\nAutorizzazione completata.")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

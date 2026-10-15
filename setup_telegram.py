@@ -9,6 +9,7 @@ Uso:
     python3 setup_telegram.py
 """
 import json
+import os
 import getpass
 import secrets
 import subprocess
@@ -33,6 +34,9 @@ def tg_call(token: str, method: str, params: dict = None) -> dict:
 
 def warn_if_service_running() -> None:
     """Il bot può leggere i messaggi da un solo processo alla volta."""
+    if os.environ.get('PI_SECRETARY_CONTAINER'):
+        print('Fermare app con il launcher prima del setup concorrente.')
+        return
     try:
         r = subprocess.run(
             ["systemctl", "is-active", "pi-secretary"],
@@ -58,11 +62,16 @@ def main() -> None:
     print("3. Scegli uno username che finisce con 'bot'")
     print("4. BotFather ti darà un TOKEN tipo '123456789:AAE...'")
     token = getpass.getpass("\nIncolla qui il TOKEN: ").strip()
+    if not token:
+        return 2
     try:
         with FileLock(bot_lock_path(token), blocking=False):
-            pair(token)
-    except OSError:
+            if not token:
+                return 2
+            return pair(token)
+    except (Exception, KeyboardInterrupt):
         print('❌ Polling occupato o lock non accessibile: fermare runtime/setup concorrente.')
+        return 1
 
 
 def owner_matches(msg, nonce):
@@ -80,7 +89,7 @@ def pair(token):
         print(f"\n✅ Token valido! Il tuo bot è @{bot_username}")
     except Exception as exc:  # noqa: BLE001
         print(f"❌ Token non valido ({type(exc).__name__})")
-        sys.exit(1)
+        return 1
 
     nonce = 'pair-' + secrets.token_urlsafe(24)
     print(f'\nInvia dalla tua chat privata a @{bot_username} questo codice monouso:')
@@ -109,7 +118,7 @@ def pair(token):
         print("\n⚠️  Nessun messaggio ricevuto entro 120 secondi.")
         print("    Riprova più tardi o scrivi il chat_id a mano nel .env")
         print("    (lo trovi su https://api.telegram.org/bot<TOKEN>/getUpdates)")
-        sys.exit(1)
+        return 1
 
     config.set_env("TELEGRAM_BOT_TOKEN", token)
     config.set_env("TELEGRAM_CHAT_ID", str(chat_id))
@@ -121,10 +130,12 @@ def pair(token):
             "text": "🤖 Segretario virtuale: Telegram configurato correttamente!",
         })
         print("\n🎉 Fatto! Ti ho appena mandato un messaggio di test.")
-        print("   Riavvia il segretario: sudo systemctl restart pi-secretary")
+        print("   Ricaricare la configurazione con il launcher up (Docker) o riavviare il servizio host.")
+        return 0
     except Exception as exc:  # noqa: BLE001
         print(f"\n⚠️  Invio del test fallito ({type(exc).__name__})")
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -1,3 +1,23 @@
+# Contratto onboarding Docker
+
+I setup opzionali restituiscono `0` (ready), `2` (skipped/consenso rifiutato),
+`1` (failed). Ready indica il risultato del setup, non una garanzia permanente
+di connettività. `progress.json` contiene questi stati; i booleani legacy vengono
+normalizzati. `complete` significa soltanto configurazione confermata.
+
+`configure` permette modifiche preservando i valori con INVIO; i segreti non
+vengono mostrati. I campi vuoti vengono riproposti. Timezone, lingua, modello e
+orario digest sono validati. Cambiare URI DB non migra i dati.
+OpenRouter è obbligatoria prima dell'avvio app: se manca, usare `configure`.
+Telegram personale viene abilitato soltanto dopo autorizzazione e consenso.
+
+Il launcher rilegge la modalità DB dopo il wizard e ricrea app con la nuova
+configurazione. Attende fino a 120 secondi con Compose `--wait`.
+`/healthz` è pubblico, soggetto al controllo Host, e restituisce solo
+`{"status":"started"}`: nessun dato personale, DB o chiamata esterna.
+Non certifica i connettori: dashboard distingue configurazione, interruttore
+enabled e salute osservata dai worker. `configured` non significa ready.
+
 # Pi Secretary
 
 Segretario personale per Linux: raccoglie email, WhatsApp e Telegram, analizza
