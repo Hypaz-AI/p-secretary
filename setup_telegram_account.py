@@ -17,6 +17,36 @@ class LoginCancelled(Exception):
     """Expected interactive cancellation, not a credential failure."""
 
 
+class AuthorizationFailure(ValueError):
+    """Safe diagnostic without credentials or raw Telegram responses."""
+
+
+def normalize_phone(value):
+    return re.sub(r'\D', '', str(value or ''))
+
+
+def masked_phone(value):
+    digits = normalize_phone(value)
+    return '+***' + digits[-3:] if len(digits) >= 7 else 'non disponibile'
+
+
+def verify_identity(me, phone):
+    if me is None:
+        raise AuthorizationFailure('Verifica sessione fallita: Telegram non restituisce un account autorizzato.')
+    if getattr(me, 'bot', False):
+        raise AuthorizationFailure('Serve un account personale, non un bot.')
+    expected = normalize_phone(phone)
+    actual = normalize_phone(getattr(me, 'phone', None))
+    if not expected or not actual:
+        raise AuthorizationFailure('Verifica account impossibile: numero configurato o numero della sessione non disponibile; acquisizione non abilitata.')
+    if expected != actual:
+        raise AuthorizationFailure(
+            f'Sessione di un altro account: configurato {masked_phone(expected)}, '
+            f'autenticato {masked_phone(actual)}. La password 2FA non è la causa; '
+            'controllare l’account sul telefono e usare un percorso sessione separato. '
+            'Acquisizione non abilitata.')
+
+
 def delivery_unavailable():
     print('Telegram rifiuta ulteriori metodi di consegna per questa richiesta.')
     print('Non è possibile forzare SMS o garantire l’arrivo del codice.')
@@ -27,11 +57,21 @@ def delivery_unavailable():
 async def password_login(client):
     from telethon import errors
     for _ in range(3):
+        password = getpass.getpass('Password verifica in due passaggi (Ctrl-C annulla): ')
+        # Empty input skips Telethon's password branch and raises a local ValueError.
+        if not password:
+            print('Password 2FA vuota: nessuna verifica inviata a Telegram; riprovare o Ctrl-C.')
+            continue
         try:
-            return await client.sign_in(password=getpass.getpass(
-                'Password verifica in due passaggi (Ctrl-C annulla): '))
+            return await client.sign_in(password=password)
         except errors.PasswordHashInvalidError:
-            print('Password 2FA non valida; riprovare o Ctrl-C.')
+            print('Telegram ha rifiutato la password 2FA (PasswordHashInvalidError); riprovare o Ctrl-C.')
+        except ValueError:
+            raise AuthorizationFailure(
+                'Errore locale Telethon durante la verifica 2FA (ValueError), '
+                'non un rifiuto della password da Telegram. Verificare compatibilità delle dipendenze.') from None
+        finally:
+            del password
     raise LoginCancelled('Tentativi password esauriti; riprovare più tardi.')
 
 
@@ -101,13 +141,14 @@ async def authorize():
         print('Controlla il numero configurato nel wizard e apri il relativo account Telegram.')
         print('Se questa sessione è già autorizzata, non sarà richiesto alcun codice.')
         await client.connect()
+        phone = config.TELEGRAM_PHONE
         me = await client.get_me()
         if me is None:
-            phone = config.TELEGRAM_PHONE
             while True:
-                phone = input(f'Telefono [{phone or "non configurato"}] (INVIO conferma, q annulla): ').strip() or phone
+                phone = input(f'Telefono [{masked_phone(phone)}] (INVIO conferma, q annulla): ').strip() or phone
                 if phone.lower() == 'q':
                     raise KeyboardInterrupt()
+                phone = '+' + normalize_phone(phone)
                 if re.fullmatch(r'\+[1-9]\d{6,14}', phone):
                     break
                 print('Inserire + e numero completo, senza spazi.')
@@ -166,14 +207,9 @@ async def authorize():
                 raise LoginCancelled('Tentativi esauriti; attendi prima di riprovare.')
         else:
             print('Sessione autorizzata esistente riutilizzata; nessun codice richiesto.')
-            expected = re.sub(r'\D', '', config.TELEGRAM_PHONE or '')
-            if expected and expected != getattr(me, 'phone', None):
-                raise ValueError('Sessione di un altro account: usare un percorso sessione separato')
-        expected = re.sub(r'\D', '', config.TELEGRAM_PHONE or '')
-        if expected and expected != getattr(me, 'phone', None):
-            raise ValueError('Sessione di un altro account: revocarla da Dispositivi e usare un percorso sessione separato')
-        if me.bot:
-            raise ValueError('Serve un account personale, non un bot')
+        verify_identity(me, phone)
+        # Check the session itself, not only the login result.
+        verify_identity(await client.get_me(), phone)
         print('Sessione autorizzata. L’acquisizione richiede il consenso esplicito finale.')
     finally:
         await client.disconnect()
@@ -213,6 +249,9 @@ def main():
     except (LoginCancelled, KeyboardInterrupt) as exc:
         print(str(exc) if isinstance(exc, LoginCancelled) else 'Accesso annullato; nessun reinvio automatico.')
         return 2
+    except AuthorizationFailure as exc:
+        print(f'Autorizzazione non completata: {exc}')
+        return 1
     except (Exception, KeyboardInterrupt) as exc:
         if type(exc).__name__ in ('FloodWaitError', 'PhoneNumberFloodError', 'PhonePasswordFloodError'):
             print('Limite Telegram: interrompere i tentativi e attendere prima di riprovare.')
