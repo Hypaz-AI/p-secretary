@@ -19,8 +19,10 @@ def confirm(prompt):
 
 def hidden_json():
     print('Incolla JSON compatto o multilinea (input nascosto).')
-    print('Termina con una riga contenente solo FINE, poi INVIO. INVIO iniziale o Ctrl-C annulla.')
+    print('Un oggetto JSON completo termina automaticamente; FINE è opzionale per terminare manualmente.')
+    print('INVIO iniziale salta Calendar; Ctrl-C annulla il wizard. Nessun contenuto viene mostrato.')
     lines = []
+    size = 0
     # getpass altrimenti ripiega su stdin con echo: vietato per chiavi private.
     with warnings.catch_warnings():
         warnings.simplefilter('error', getpass.GetPassWarning)
@@ -29,10 +31,36 @@ def hidden_json():
             if not lines and not line.strip():
                 return ''
             if line.strip() == 'FINE':
-                return '\n'.join(lines)
-            lines.append(line)
-            if sum(map(len, lines)) > 131072:
+                raw = '\n'.join(lines)
+                if not raw.strip():
+                    return ''
+                return _json_object(raw, final=True)
+            size += len(line) + 1
+            if size > 131072:
                 raise ValueError('JSON troppo grande')
+            lines.append(line)
+            raw = '\n'.join(lines)
+            if _json_object(raw) is not None:
+                return raw
+
+
+def _json_object(raw, final=False):
+    """Recognize JSON prefixes without decoding escapes or exposing parser details."""
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        tail = raw[exc.pos:].strip()
+        incomplete = (not tail or exc.msg.startswith('Unterminated string') or
+                      (exc.msg == 'Expecting value' and
+                       any(word.startswith(tail) for word in ('true', 'false', 'null'))))
+        if incomplete and not final:
+            return None
+        raise ValueError('JSON malformato; nessun file modificato.') from None
+    except (ValueError, RecursionError):
+        raise ValueError('JSON non valido; nessun file modificato.') from None
+    if not isinstance(value, dict):
+        raise ValueError('Serve un oggetto JSON; nessun file modificato.')
+    return raw
 
 
 def supply_service_account():
@@ -114,7 +142,13 @@ def _setup():
 def main():
     try:
         return _setup()
-    except (Exception, KeyboardInterrupt) as exc:
+    except KeyboardInterrupt:
+        print('Configurazione Calendar annullata; wizard interrotto. Impostazioni già salvate preservate.')
+        return 130
+    except EOFError:
+        print('Input terminato; configurazione Calendar annullata e wizard interrotto.')
+        return 130
+    except Exception as exc:
         print(f'Setup Calendar fallito ({type(exc).__name__}); nessun dettaglio privato mostrato.')
         return 1
 

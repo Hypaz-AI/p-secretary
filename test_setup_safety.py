@@ -2,6 +2,64 @@ from test_config_portability import ConfigPortabilityTests
 
 
 class SetupSafetyTests(ConfigPortabilityTests):
+    def test_hidden_json_completion_and_escapes(self):
+        self.run_code(r'''
+import json
+import setup_gcal as setup
+from unittest.mock import patch
+compact = r'{"private_key":"fake\nline\n","type":"service_account"}'
+for lines in ([compact], ['{', '"private_key": "fake\\nline\\n",', '"type": "service_account"', '}']):
+    with patch.object(setup.getpass, 'getpass', side_effect=lines) as hidden:
+        raw = setup.hidden_json()
+        assert json.loads(raw) == json.loads(compact)
+        assert r'\n' in raw
+        assert hidden.call_count == len(lines)
+with patch.object(setup.getpass, 'getpass', return_value='') as hidden:
+    assert setup.hidden_json() == ''
+    hidden.assert_called_once()
+''')
+
+    def test_hidden_json_invalid_bounded_and_redacted(self):
+        self.run_code(r'''
+import io, contextlib, getpass
+import setup_gcal as setup
+from unittest.mock import patch
+cases = [(['{"fake-secret": bad}'], 1), (['{"fake-secret":', 'FINE'], 2),
+         (['[]'], 1), (['{"fake-secret":"' + 'x' * 131072], 1),
+         (['{"fake-secret":"oops\\z"}'], 1), (['{"fake-secret":1} trailing'], 1)]
+for lines, count in cases:
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output), patch.object(setup.getpass, 'getpass', side_effect=lines) as hidden:
+        try:
+            setup.hidden_json()
+        except ValueError as exc:
+            assert 'fake-secret' not in str(exc)
+        else:
+            raise AssertionError('invalid input accepted')
+        assert hidden.call_count == count
+    assert 'fake-secret' not in output.getvalue()
+with patch.object(setup.getpass, 'getpass', side_effect=getpass.GetPassWarning):
+    try:
+        setup.hidden_json()
+    except getpass.GetPassWarning:
+        pass
+    else:
+        raise AssertionError('echo fallback accepted')
+''')
+
+    def test_calendar_interrupt_does_not_write(self):
+        self.run_code('''
+import setup_gcal as setup
+from unittest.mock import patch
+for interruption in (KeyboardInterrupt, EOFError):
+    with patch.object(setup, 'guide'), patch.object(setup.gcal, '_load_service_account', return_value=None), \\
+            patch.object(setup.getpass, 'getpass', side_effect=interruption), \\
+            patch.object(setup.config, 'set_env') as save, patch.object(setup, 'atomic_write') as write:
+        assert setup.main() == 130
+        save.assert_not_called()
+        write.assert_not_called()
+''')
+
     def test_calendar_consent_and_delete(self):
         self.run_code('''
 import setup_gcal as setup

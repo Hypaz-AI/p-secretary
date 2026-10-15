@@ -9,6 +9,7 @@ import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 import secrets
+import signal
 import subprocess
 import sys
 from urllib.parse import quote, urlsplit
@@ -155,10 +156,39 @@ def run_setup(script):
                        'DASHBOARD_BIND', 'DASHBOARD_PORT', 'DASHBOARD_CREDENTIAL_FILE',
                        'TELEGRAM_USER_SESSION'):
             env.pop(key, None)
-    return subprocess.run([sys.executable, str(ROOT / script)], env=env)
+    # Keep the foreground process group: terminal SIGINT reaches both processes.
+    with subprocess.Popen([sys.executable, str(ROOT / script)], env=env) as child:
+        try:
+            code = child.wait()
+        except KeyboardInterrupt:
+            # Also handle SIGINT delivered only to the parent. Reap before returning
+            # control to the shell; never resume prompts after cancellation.
+            previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+            try:
+                if child.poll() is None:
+                    child.send_signal(signal.SIGINT)
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+            finally:
+                signal.signal(signal.SIGINT, previous)
+            raise
+    if code in (130, -signal.SIGINT):
+        raise KeyboardInterrupt
+    return subprocess.CompletedProcess(child.args, code)
 
 
 def wizard(edit=False):
+    try:
+        return _wizard(edit)
+    except (KeyboardInterrupt, EOFError):
+        print('Wizard annullato; impostazioni già salvate preservate. Nessuna prosecuzione o avvio automatico.')
+        return 130
+
+
+def _wizard(edit=False):
     # Import only inside the container: each setup gets a fresh config module.
     import config
     guide('welcome')
@@ -344,10 +374,19 @@ def main():
     args = parser.parse_args()
     try:
         return wizard(edit=args.command == '_configure') if args.command in ('_wizard', '_configure') else probe() if args.command == '_probe' else launch(args)
+    except (KeyboardInterrupt, EOFError):
+        print('Operazione annullata; nessuna prosecuzione o avvio automatico.', file=sys.stderr)
+        return 130
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    except (OSError, subprocess.CalledProcessError):
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode in (130, -signal.SIGINT):
+            print('Wizard annullato; nessuna prosecuzione o avvio automatico.', file=sys.stderr)
+            return 130
+        print('Operazione Docker fallita; nessuna prosecuzione automatica.', file=sys.stderr)
+        return 1
+    except OSError:
         print('Operazione fallita: verificare Docker Compose, permessi, lock e configurazione. Nessun sudo automatico.', file=sys.stderr)
         return 1
 

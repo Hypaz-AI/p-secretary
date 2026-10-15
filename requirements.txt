@@ -1,6 +1,7 @@
 # Pi Secretary — dipendenze
 # Connettore account personale Telegram (opzionale a runtime).
 Telethon>=1.36,<2
+qrcode>=7.4,<9
 Flask>=3.1,<4
 waitress>=3,<4
 psycopg[binary]>=3.2,<4

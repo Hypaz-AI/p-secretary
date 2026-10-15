@@ -99,7 +99,7 @@ class InstallerTests(unittest.TestCase):
                     patch('installer.confirm', side_effect=[False, True, False, False, True]), \
                     patch('builtins.input', side_effect=['Agent', '12345', '+391234']), \
                     patch('installer.getpass.getpass', return_value='hidden-hash'), \
-                    patch('installer.subprocess.run', side_effect=setup) as run:
+                    patch('installer.run_setup', side_effect=setup) as run:
                 self.assertEqual(installer.wizard(), 0)
                 run.assert_called_once()
             self.assertNotIn('hidden-hash', (Path(temp) / 'progress.json').read_text())
@@ -113,6 +113,57 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual((directory / 'postgres.env').stat().st_mode & 0o777, 0o600)
             self.assertEqual(installer.provision_database(directory, '')[0], uri)
             self.assertGreater(len(urlsplit(uri).password), 32)
+
+    def test_run_setup_parent_interrupt_reaps_child(self):
+        from unittest.mock import MagicMock
+        import signal
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout), tempfile.TemporaryDirectory() as temp:
+                child = MagicMock()
+                child.poll.return_value = None
+                child.wait.side_effect = ([KeyboardInterrupt, installer.subprocess.TimeoutExpired('fake', 5), 0]
+                                          if timeout else [KeyboardInterrupt, 130])
+                with patch.dict(sys.modules, {'config': self.fake_config(temp)}), \
+                        patch('installer.subprocess.Popen') as spawn, \
+                        patch('installer.signal.signal', return_value=signal.default_int_handler) as handler:
+                    spawn.return_value.__enter__.return_value = child
+                    with self.assertRaises(KeyboardInterrupt):
+                        installer.run_setup('setup_gcal.py')
+                    child.send_signal.assert_called_once_with(signal.SIGINT)
+                    self.assertEqual(child.kill.call_count, int(timeout))
+                    self.assertEqual(handler.call_args_list[-1].args,
+                                     (signal.SIGINT, signal.default_int_handler))
+
+    def test_child_cancellation_never_resumes_wizard(self):
+        from unittest.mock import MagicMock
+        import signal
+        for code in (130, -signal.SIGINT):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as temp:
+                config = self.fake_config(temp)
+                config.DATABASE_URL = 'postgresql://user:fake@example.invalid/db'
+                child = MagicMock()
+                child.wait.return_value = code
+                with patch.dict(sys.modules, {'config': config}), \
+                        patch('installer.subprocess.Popen') as spawn, \
+                        patch('installer.configure_preferences'), patch('installer.configure_email'), \
+                        patch('installer.prompt_missing'), patch('installer.confirm', return_value=True) as prompt:
+                    spawn.return_value.__enter__.return_value = child
+                    self.assertEqual(installer.wizard(), 130)
+                    prompt.assert_called_once()
+                    spawn.assert_called_once()
+                state = json.loads((Path(temp) / 'progress.json').read_text())
+                self.assertFalse(state['complete'])
+                self.assertFalse(config.CONFIG_FILE.exists())
+
+    def test_wizard_input_interrupt_and_launcher_interrupt(self):
+        with patch('installer._wizard', side_effect=KeyboardInterrupt):
+            self.assertEqual(installer.wizard(), 130)
+        with patch.object(sys, 'argv', ['installer.py', 'configure']), \
+                patch('installer.launch', side_effect=KeyboardInterrupt):
+            self.assertEqual(installer.main(), 130)
+        with patch.object(sys, 'argv', ['installer.py', 'configure']), \
+                patch('installer.launch', side_effect=installer.subprocess.CalledProcessError(130, ['fake'])):
+            self.assertEqual(installer.main(), 130)
 
     def test_password_percent_encoded(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -157,6 +208,8 @@ class InstallerTests(unittest.TestCase):
         dockerfile = (installer.ROOT / 'Dockerfile').read_text()
         self.assertNotIn('COPY . ', dockerfile)
         self.assertIn('npm ci', dockerfile)
+        self.assertIn('pip install --no-cache-dir -r requirements.txt', dockerfile)
+        self.assertIn('qrcode>=7.4,<9', (installer.ROOT / 'requirements.txt').read_text())
         compose = (installer.ROOT / 'compose.yaml').read_text()
         self.assertIn('127.0.0.1:8080:8080', compose)
         self.assertNotIn('5432:5432', compose)
