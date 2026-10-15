@@ -77,15 +77,9 @@ GUIDES = {
         'Apri https://console.cloud.google.com/ e seleziona o crea un progetto; in API e servizi → Libreria abilita Google Calendar API.',
         'Metodo service account: IAM e amministrazione → Account di servizio → Crea (nessun ruolo di progetto necessario), poi Chiavi → Aggiungi chiave → JSON.',
         'Guida ufficiale: https://cloud.google.com/iam/docs/creating-managing-service-account-keys — rispetta eventuali policy che vietano chiavi.',
-        'Copia privatamente il JSON nel percorso mostrato sotto (Docker: PI_SECRETARY_HOME/data/gcal_service_account.json sull’host); permessi 600, mai upload dalla dashboard.',
+        'Solo service account IAM: incolla il JSON con input nascosto (riga FINE per terminare) oppure importa un file visibile al processo; salvataggio atomico con permessi 600, mai upload dalla dashboard.',
         'Su https://calendar.google.com → Impostazioni del calendario → Condividi con persone specifiche: aggiungi client_email del JSON con “Apportare modifiche agli eventi”.',
         'Da Integra calendario copia l’ID calendario: per un service account NON usare primary. Poi rilancia il setup; l’evento di prova richiede consenso separato.')),
-    'gcal_oauth': ('Google Calendar · alternativa OAuth', (
-        'Nel progetto Google Cloud configura Google Auth Platform: branding, pubblico e accesso dati Calendar; in Testing aggiungi il tuo account tra gli utenti di test.',
-        'In Client crea un ID OAuth di tipo “TV e dispositivi con input limitato”; copia Client ID e Client secret nei prompt, mai in chat.',
-        'Guida ufficiale: https://developers.google.com/identity/protocols/oauth2/limited-input-device',
-        'Dopo il consenso il setup mostra un codice temporaneo: apri https://www.google.com/device, inserisci il codice e accedi all’account del calendario.',
-        'Verifica nome app e permessi prima di consentire. Mantieni aperto il terminale; se neghi o scade il codice, ripeti il setup. In Testing il token può scadere dopo 7 giorni.')),
     'microsoft': ('Microsoft · accesso nel browser', (
         'Configura prima almeno una email con provider outlook o m365; il setup autorizza ogni account separatamente e riusa i token ancora validi (--force per rifare il login).',
         'Apri https://microsoft.com/devicelogin su un dispositivo fidato, inserisci il codice temporaneo mostrato e accedi con l’indirizzo indicato.',

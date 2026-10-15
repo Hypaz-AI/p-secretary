@@ -111,12 +111,10 @@ TELEGRAM_USER_DIALOG_LIMIT = int(get('TELEGRAM_USER_DIALOG_LIMIT', '100'))
 TELEGRAM_USER_MESSAGE_LIMIT = int(get('TELEGRAM_USER_MESSAGE_LIMIT', '200'))
 TELEGRAM_USER_RECOVERY_INTERVAL = int(get('TELEGRAM_USER_RECOVERY_INTERVAL', '900'))
 
-# --- Google Calendar (OAuth2 device flow, vedi setup_gcal.py) ----
+# --- Google Calendar (solo service account IAM, vedi setup_gcal.py) ----
 GCAL_ENABLED = get_bool("GCAL_ENABLED", False)
-GCAL_CLIENT_ID = get("GCAL_CLIENT_ID")
-GCAL_CLIENT_SECRET = get("GCAL_CLIENT_SECRET")
-# calendario da usare: 'primary' (il principale) o un ID calendario
-GCAL_CALENDAR_ID = get("GCAL_CALENDAR_ID", "primary")
+# ID esplicito del calendario condiviso; primary non è supportato.
+GCAL_CALENDAR_ID = get("GCAL_CALENDAR_ID", "")
 # durata predefinita degli eventi fissati dall'agente (minuti)
 GCAL_EVENT_DURATION = int(get("GCAL_EVENT_DURATION", "60"))
 

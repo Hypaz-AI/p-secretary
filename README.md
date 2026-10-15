@@ -20,6 +20,34 @@ enabled e salute osservata dai worker. `configured` non significa ready.
 
 # Pi Secretary
 
+## Google Calendar: solo service account IAM
+
+Calendar non supporta login OAuth utente. In Google Cloud abilita Calendar API,
+crea un account in IAM → Account di servizio (nessun ruolo di progetto richiesto),
+poi Chiavi → Aggiungi chiave → JSON. Rispetta le policy dell’organizzazione.
+Il setup Calendar nel wizard permette **incolla nascosto** (JSON compatto o
+multilinea, termina con una riga `FINE`) oppure importazione da file. Serve un
+terminale con input nascosto; se non disponibile, l’incolla viene bloccato.
+Non inserire chiavi in chat, argomenti di shell o dashboard.
+
+La chiave viene validata localmente e salvata atomicamente con permessi `0600`;
+ogni sostituzione richiede consenso. Il default Docker è
+`/var/lib/pi-secretary/gcal_service_account.json`, corrispondente a
+`PI_SECRETARY_HOME/data/gcal_service_account.json` sull’host. Il file da importare
+deve essere visibile **dentro il container**: un percorso del PC non basta.
+L’incolla evita di dover trasferire il file. `GCAL_SERVICE_ACCOUNT_FILE` indica
+un percorso visibile sia al setup sia all’app; montare separatamente eventuali
+percorsi personalizzati fuori dalla directory dati.
+
+Condividi il calendario con `client_email` del JSON, autorizzando “Apportare
+modifiche agli eventi”. Da Impostazioni → Integra calendario copia l’ID esplicito:
+**non usare `primary`**. Il setup richiede consenso per la verifica di rete e,
+separatamente, per creare/cancellare l’evento di prova prima di abilitare Calendar.
+Le vecchie variabili `GCAL_CLIENT_ID` / `GCAL_CLIENT_SECRET` e il file
+`gcal_tokens.json` sono ignorati: revocare eventuali vecchie autorizzazioni
+Google e rimuovere privatamente quei residui se non più necessari.
+L’OAuth delle **email Microsoft** rimane invariato.
+
 Segretario personale per Linux: raccoglie email, WhatsApp e Telegram, analizza
 con OpenRouter, prepara riepiloghi, archivia fatture e gestisce attività e
 proposte di appuntamento. Le integrazioni sono opzionali: l'AI richiede una

@@ -51,7 +51,6 @@ class SetupUITests(unittest.TestCase):
             'telegram_account': ('my.telegram.org', 'api_hash', 'consenso'),
             'whatsapp': ('faq.whatsapp.com', 'QR', 'revocarla'),
             'gcal': ('console.cloud.google.com', 'client_email', 'NON usare primary'),
-            'gcal_oauth': ('limitato', 'google.com/device', '7 giorni'),
             'microsoft': ('devicelogin', 'MFA', 'EMAILn_CLIENT_ID'),
             'dashboard': ('dashboard.json', 'primo avvio', 'tunnel SSH'),
         }.items():

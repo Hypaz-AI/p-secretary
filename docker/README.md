@@ -200,10 +200,13 @@ amministrazione, poi chiave JSON. Importala privatamente via filesystem host,
 Percorsi fuori da `config/` e `data/` richiedono un mount aggiuntivo esplicito.
 La chiave vale fino a revoca; condivisioni e policy possono comunque cambiare.
 
-**OAuth alternativo:** se manca la chiave, setup propone device flow con consenso
-separato. Serve client OAuth «TV e dispositivi con input limitato», ID/secret;
-segui <https://www.google.com/device>. Token in `data/gcal_tokens.json`;
-modalità Testing può richiedere nuovo consenso dopo sette giorni.
+**Solo service account IAM:** nessuna alternativa OAuth utente. Nel setup puoi
+incollare il JSON con input nascosto (compatto o multilinea, riga `FINE` per
+terminare) oppure importare un file visibile al container. Il salvataggio è
+atomico con permessi `0600`; sovrascrivere un file esistente richiede consenso.
+Senza terminale con input nascosto l’incolla è bloccato. Vecchi token e client
+OAuth Calendar sono ignorati; revocarli/rimuoverli privatamente se inutilizzati.
+Il login OAuth per email Microsoft resta supportato e invariato.
 
 Gli appuntamenti rilevati nelle comunicazioni sono proposte di default:
 collegare Calendar non significa abilitare creazione automatica.

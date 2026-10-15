@@ -198,6 +198,7 @@ def wizard(edit=False):
               ('whatsapp', 'setup_whatsapp.py'), ('gcal', 'setup_gcal.py'),
               ('microsoft', 'setup_ms_auth.py')]
     print('Gli script opzionali possono effettuare login o chiamate di rete; seguire le loro richieste di consenso.')
+    print('Calendar: solo service account IAM, JSON con incolla nascosto o import file; nessun login utente.')
     for name, script in setups:
         if 'setups' in sections and confirm('Eseguire setup ' + name + (f' ({state[name]})' if state.get(name) else '') + '?'):
             if name == 'telegram_account':

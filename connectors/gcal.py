@@ -1,4 +1,4 @@
-"""Connettore Google Calendar: service account o OAuth2 device flow.
+"""Connettore Google Calendar: esclusivamente service account IAM.
 
 Il segretario usa questo modulo per:
   - fissare appuntamenti su richiesta dell'utente: l'AI del dialogo lascia
@@ -9,19 +9,13 @@ Il segretario usa questo modulo per:
   - leggere i prossimi eventi (l'agenda "vera") per il contesto dei
     dialoghi, il digest serale e il comando /appuntamenti.
 
-DUE modalità di autenticazione:
-
-1. SERVICE ACCOUNT (consigliata per un server: nessun login, nessun
+SERVICE ACCOUNT (nessun login, nessun
    consenso, nessuna scadenza). Su Google Cloud Console crea un account
    di servizio, scarica la chiave JSON e salvala come
    data/gcal_service_account.json; poi condividi il tuo calendario con
    l'indirizzo email dell'account di servizio (quello che finisce per
    @<progetto>.iam.gserviceaccount.com), come faresti con una persona.
    L'access token viene richiesto via JWT RS256 firmato con la chiave.
-
-2. OAUTH2 DEVICE FLOW (fallback): login su https://www.google.com/device,
-   token in data/gcal_tokens.json rinnovati in automatico. Con l'app in
-   modalità Testing il consenso scade dopo 7 giorni.
 
 Nessuna dipendenza esterna: urllib + firma RS256 implementata in puro
 Python (hashlib e parsing DER), così setup e servizio funzionano anche
@@ -42,12 +36,9 @@ from zoneinfo import ZoneInfo
 import config
 import flows
 
-DEVICE_URL = "https://oauth2.googleapis.com/device/code"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 API_ROOT = "https://www.googleapis.com/calendar/v3"
-# Il flusso device di Google accetta solo un sottoinsieme di scope: quello
-# più mirato 'calendar.events' viene rifiutato con 'invalid_scope'.
-# 'calendar' è l'unico scope Calendar con accesso in scrittura supportato.
+# Accesso limitato ai calendari condivisi tramite ACL.
 SCOPES = "https://www.googleapis.com/auth/calendar"
 
 # marker che l'AI del dialogo può lasciare per fissare un appuntamento:
@@ -57,10 +48,6 @@ _MARKER = re.compile(r"^[ \t]*@@EVENTO@@[ \t]*(.*?)[ \t]*$\n?",
 
 _DT_FORMATS = ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
                "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S")
-
-
-def token_file() -> Path:
-    return config.DATA_DIR / "gcal_tokens.json"
 
 
 def service_account_file() -> Path:
@@ -85,8 +72,28 @@ def _load_service_account() -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return {}
-    if data.get("type") != "service_account" or not data.get("private_key"):
+    try:
+        validate_service_account(data)
+    except ValueError:
         return {}
+    return data
+
+
+def validate_service_account(data):
+    """Validazione locale; gli errori non contengono mai il JSON privato."""
+    try:
+        if not isinstance(data, dict) or data.get('type') != 'service_account':
+            raise ValueError
+        for key in ('client_email', 'private_key', 'project_id', 'private_key_id'):
+            if not isinstance(data.get(key), str) or not data[key].strip():
+                raise ValueError
+        if not re.fullmatch(r'[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.iam\.gserviceaccount\.com', data['client_email']):
+            raise ValueError
+        n, d = _parse_rsa_private_key(data['private_key'])
+        if n.bit_length() < 1024 or d <= 1:
+            raise ValueError
+    except Exception:
+        raise ValueError('JSON service account IAM non valido; controllare tipo, campi e chiave RSA.') from None
     return data
 
 
@@ -202,30 +209,11 @@ def _service_account_token(sa: dict, force_refresh: bool = False) -> str:
             "assertion": jwt,
         })
     except urllib.error.HTTPError as exc:
-        detail = _http_error_detail(exc)
-        raise RuntimeError(
-            f"scambio JWT rifiutato: {detail or exc}") from None
+        # Non ripetere payload remoti che potrebbero includere l'assertion.
+        raise RuntimeError(f'scambio JWT rifiutato (HTTP {exc.code})') from None
     _sa_token_cache["token"] = token["access_token"]
     _sa_token_cache["expires_at"] = time.time() + int(token.get("expires_in", 3600))
     return token["access_token"]
-
-
-# ------------------------------------------------------------------ OAuth2 ----
-def _load_tokens() -> dict:
-    path = token_file()
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {}
-    return {}
-
-
-def _save_tokens(entry: dict) -> None:
-    from connectors.storage import FileLock, atomic_write
-    path = token_file()
-    with FileLock(str(path) + '.lock'):
-        atomic_write(path, json.dumps(entry, indent=2))
 
 
 def _post(url: str, data: dict) -> dict:
@@ -246,122 +234,12 @@ def _http_error_detail(exc: urllib.error.HTTPError) -> str:
         return ""
 
 
-def _client_credentials() -> tuple[str, str]:
-    """Credenziali OAuth lette al volo da os.environ.
-
-    config.set_env (usato da setup_gcal.py) aggiorna .env e os.environ
-    ma NON gli attributi del modulo config, già valutati all'import:
-    leggere config.GCAL_CLIENT_ID qui vedrebbe il valore di prima del
-    setup anche a inserimento appena concluso.
-    """
-    return config.get("GCAL_CLIENT_ID"), config.get("GCAL_CLIENT_SECRET")
-
-
-def _store(token: dict) -> dict:
-    old = _load_tokens()
-    entry = {
-        "access_token": token["access_token"],
-        # Google non rimanda sempre un refresh_token nuovo: tieni il vecchio
-        "refresh_token": token.get("refresh_token") or old.get("refresh_token", ""),
-        "expires_at": time.time() + int(token.get("expires_in", 3600)),
-    }
-    if old.get("account"):
-        entry["account"] = old["account"]
-    _save_tokens(entry)
-    return entry
-
-
-def authorize(force: bool = False) -> dict:
-    """Flusso device-code: stampa le istruzioni e attende il login utente."""
-    data = _load_tokens()
-    if (not force and data.get("refresh_token")
-            and time.time() < data.get("expires_at", 0) - 120):
-        print("[gcal] token già valido, salto (usa --force per rifare il login)")
-        return data
-    client_id, client_secret = _client_credentials()
-    if not client_id or not client_secret:
-        raise RuntimeError(
-            "GCAL_CLIENT_ID / GCAL_CLIENT_SECRET mancanti nel .env: "
-            "segui i prerequisiti in testa a setup_gcal.py")
-    try:
-        flow = _post(DEVICE_URL, {"client_id": client_id, "scope": SCOPES})
-    except urllib.error.HTTPError as exc:
-        detail = _http_error_detail(exc)
-        raise RuntimeError(
-            f"richiesta del device code rifiutata: {detail or exc}") from None
-    url = flow.get("verification_url") or "https://www.google.com/device"
-    print(f"\n👉 Apri  {url}  e inserisci il codice:  {flow['user_code']}")
-    print("   Poi accedi con l'account Google del tuo calendario")
-    interval = int(flow.get("interval", 5))
-    deadline = time.time() + int(flow.get("expires_in", 1800))
-    while time.time() < deadline:
-        time.sleep(interval)
-        try:
-            token = _post(TOKEN_URL, {
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                "device_code": flow["device_code"],
-            })
-        except urllib.error.HTTPError as exc:
-            try:
-                body = json.loads(exc.read().decode())
-            except Exception:  # noqa: BLE001
-                raise RuntimeError(f"errore HTTP {exc.code}") from None
-            err = body.get("error", "")
-            if err == "authorization_pending":
-                continue
-            if err == "slow_down":
-                interval += 5
-                continue
-            raise RuntimeError(body.get("error_description", err)) from None
-        entry = _store(token)
-        print("✅ Google Calendar autorizzato, token salvato")
-        return entry
-    raise RuntimeError("tempo scaduto per il login: riesegui setup_gcal.py")
-
-
 def get_access_token(force_refresh: bool = False) -> str:
-    """Access token valido per la modalità configurata.
-
-    Service account: JWT firmato al volo e cachato per 1 ora (niente da
-    rinnovare a mano, niente che scade). Device flow: token rinnovato se
-    vicino alla scadenza.
-    """
+    """Solo JWT service account; vecchi token utente non vengono letti."""
     sa = _load_service_account()
-    if sa:
-        return _service_account_token(sa, force_refresh=force_refresh)
-    data = _load_tokens()
-    if not data:
-        raise RuntimeError(
-            "Google Calendar non autorizzato: esegui  python3 setup_gcal.py")
-    if not force_refresh and time.time() < data.get("expires_at", 0) - 120:
-        return data["access_token"]
-    refresh_token = data.get("refresh_token")
-    if not refresh_token:
-        raise RuntimeError(
-            "token Google senza refresh: esegui  python3 setup_gcal.py")
-    client_id, client_secret = _client_credentials()
-    try:
-        token = _post(TOKEN_URL, {
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        })
-    except urllib.error.HTTPError as exc:
-        # es. consenso in modalità Testing scaduto: invalid_grant
-        detail = _http_error_detail(exc)
-        raise RuntimeError(
-            f"rinnovo del token rifiutato: {detail or exc}") from None
-    return _store(token)["access_token"]
-
-
-def remember_account(email: str) -> None:
-    """Annota nel file token l'account collegato (solo informativo)."""
-    data = _load_tokens()
-    data["account"] = email
-    _save_tokens(data)
+    if not sa:
+        raise RuntimeError('Chiave service account mancante/non valida: esegui setup_gcal.py')
+    return _service_account_token(sa, force_refresh=force_refresh)
 
 
 # ------------------------------------------------------------------- stato ----
@@ -369,13 +247,10 @@ def readiness() -> str:
     """Stato locale, senza rete: per banner, log e dashboard."""
     if not config.GCAL_ENABLED:
         return "config_disabled"
-    if _load_service_account():
-        return "ready"
-    client_id, client_secret = _client_credentials()
-    if not client_id or not client_secret:
+    if not _load_service_account():
         return "credentials_missing"
-    if not token_file().is_file():
-        return "token_missing"
+    if config.get('GCAL_CALENDAR_ID').strip().lower() in ('', 'primary'):
+        return 'calendar_missing'
     return "ready"
 
 
@@ -391,7 +266,10 @@ def is_active() -> bool:
 
 def calendar_id() -> str:
     # lettura al volo: setup_gcal.py può cambiare il calendario a runtime
-    return (config.get("GCAL_CALENDAR_ID", "primary") or "primary").strip()
+    calendar = config.get('GCAL_CALENDAR_ID').strip()
+    if calendar.lower() in ('', 'primary'):
+        raise ValueError('Configurare l’ID esplicito del calendario condiviso, non primary')
+    return calendar
 
 
 def _cal_path() -> str:
@@ -428,12 +306,8 @@ def _api(method: str, path: str, params: dict = None, body: dict = None) -> dict
 
 
 def whoami() -> dict:
-    """Info del calendario primario: 'id' è l'email dell'account.
-
-    Solo per la modalità OAuth2: un service account non ha un calendario
-    «primary», vede solo quelli condivisi (vedi list_calendars).
-    """
-    return _api("GET", "/calendars/primary")
+    """Info del calendario condiviso configurato, mai del calendario primary."""
+    return _api("GET", "/calendars/" + _cal_path())
 
 
 def list_calendars() -> list:

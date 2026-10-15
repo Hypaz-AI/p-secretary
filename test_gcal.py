@@ -88,7 +88,7 @@ class ServiceAccountTests(unittest.TestCase):
             l for l in priv.save_pkcs1(format='PEM').decode().splitlines()
             if '-----' not in l))
         self.priv_pem = _pkcs8_pem_from_pkcs1_der(pkcs1_der)
-        self.sa = {'type': 'service_account', 'project_id': 'proj',
+        self.sa = {'type': 'service_account', 'project_id': 'proj', 'private_key_id': 'test-key',
                    'private_key': self.priv_pem,
                    'client_email': 'bot@proj.iam.gserviceaccount.com'}
         self.sa_path = Path(self.tmp.name) / 'gcal_service_account.json'
@@ -157,19 +157,16 @@ class ServiceAccountTests(unittest.TestCase):
             self.assertEqual(gcal.get_access_token(force_refresh=True), 'tok2')
         self.assertEqual(len(calls), 2)
 
-    def test_readiness_prefers_service_account(self):
+    def test_readiness_requires_service_account(self):
         with patch.object(config, 'GCAL_ENABLED', True), \
              patch.object(gcal, 'service_account_file', return_value=self.sa_path), \
-             patch.dict(os.environ, {'GCAL_CLIENT_ID': '',
-                                     'GCAL_CLIENT_SECRET': ''}):
-            # anche senza credenziali OAuth: la chiave basta
+             patch.dict(os.environ, {'GCAL_CALENDAR_ID': 'shared@example.com'}):
+            # Chiave valida e ID esplicito bastano, senza login utente.
             self.assertEqual(gcal.readiness(), 'ready')
 
     def test_service_account_skips_device_flow_tokens(self):
         # con la chiave presente il vecchio file token non viene mai letto
         with patch.object(gcal, 'service_account_file', return_value=self.sa_path), \
-             patch.object(gcal, '_load_tokens',
-                          side_effect=AssertionError('device flow usato')), \
              patch.object(gcal, '_post', return_value={'access_token': 'tok'}):
             self.assertEqual(gcal.get_access_token(), 'tok')
 
@@ -239,6 +236,11 @@ class MarkerTests(unittest.TestCase):
 
 
 class ApiTests(unittest.TestCase):
+    def setUp(self):
+        self.env = patch.dict(os.environ, {'GCAL_CALENDAR_ID': 'shared@example.com'})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
     def test_create_event_builds_rfc3339_body(self):
         with patch.object(gcal, '_api',
                           return_value={'id': 'evt1', 'htmlLink': 'L'}) as api:
@@ -282,18 +284,14 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(events[1]['dt'], '2026-10-16')
         self.assertTrue(events[1]['all_day'])
 
-    def test_expired_token_is_refreshed(self):
-        # device flow: isola dalla chiave service account reale in data/
+    def test_legacy_credentials_do_not_enable_calendar(self):
+        # Credenziali legacy non autorizzano alcuna chiamata.
         with patch.object(gcal, '_load_service_account', return_value={}), \
-             patch.object(gcal, '_load_tokens',
-                          return_value={'access_token': 'old', 'refresh_token': 'r',
-                                        'expires_at': 100.0}), \
-             patch.object(gcal, '_save_tokens') as save, \
-             patch.object(gcal, '_post',
-                          return_value={'access_token': 'new', 'expires_in': 3600}) as post:
-            self.assertEqual(gcal.get_access_token(), 'new')
-        post.assert_called_once()
-        save.assert_called_once()
+             patch.object(gcal, '_post') as post, \
+             patch.dict(os.environ, {'GCAL_CLIENT_ID': 'old', 'GCAL_CLIENT_SECRET': 'old'}):
+            with self.assertRaises(RuntimeError):
+                gcal.get_access_token()
+        post.assert_not_called()
 
     def test_readiness_states(self):
         # isola dalla chiave service account reale in data/
@@ -301,45 +299,18 @@ class ApiTests(unittest.TestCase):
             with patch.object(config, 'GCAL_ENABLED', False):
                 self.assertEqual(gcal.readiness(), 'config_disabled')
             with patch.object(config, 'GCAL_ENABLED', True), \
-                 patch.dict(os.environ, {'GCAL_CLIENT_ID': 'id',
-                                         'GCAL_CLIENT_SECRET': 'secret'}), \
-                 patch.object(gcal, 'token_file') as tf:
-                tf.return_value.is_file.return_value = False
-                self.assertEqual(gcal.readiness(), 'token_missing')
-                tf.return_value.is_file.return_value = True
-                self.assertEqual(gcal.readiness(), 'ready')
-            with patch.object(config, 'GCAL_ENABLED', True), \
                  patch.dict(os.environ, {'GCAL_CLIENT_ID': '',
                                          'GCAL_CLIENT_SECRET': ''}):
                 self.assertEqual(gcal.readiness(), 'credentials_missing')
 
-    def test_authorize_reads_credentials_written_by_setenv(self):
-        # regressione: config.set_env aggiorna os.environ ma non gli
-        # attributi del modulo config; authorize deve leggere le
-        # credenziali al volo per vedere quelle appena scritte dal setup
-        stored = {'access_token': 'tok', 'refresh_token': 'r',
-                  'expires_at': 4102444800.0}
-        with patch.object(config, 'GCAL_CLIENT_ID', ''), \
-             patch.object(config, 'GCAL_CLIENT_SECRET', ''), \
-             patch.dict(os.environ, {'GCAL_CLIENT_ID': 'cid',
-                                     'GCAL_CLIENT_SECRET': 'csec'}), \
-             patch.object(gcal, '_store', return_value=stored), \
-             patch.object(gcal.time, 'sleep'), \
-             patch.object(gcal, '_post') as post:
-            post.side_effect = [
-                {'device_code': 'dev', 'user_code': 'ABC-DEF',
-                 'verification_url': 'https://www.google.com/device',
-                 'interval': 0, 'expires_in': 60},
-                {'access_token': 'tok', 'expires_in': 3600},
-            ]
-            entry = gcal.authorize(force=True)
-        self.assertEqual(entry, stored)
-        first, second = post.call_args_list
-        self.assertEqual(first.args[1], {'client_id': 'cid', 'scope': gcal.SCOPES})
-        self.assertEqual(second.args[1], {
-            'client_id': 'cid', 'client_secret': 'csec',
-            'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
-            'device_code': 'dev'})
+    def test_user_oauth_removed_and_calendar_required(self):
+        self.assertFalse(hasattr(gcal, 'authorize'))
+        self.assertFalse(hasattr(gcal, '_load_tokens'))
+        with patch.object(config, 'GCAL_ENABLED', True), \
+             patch.object(gcal, '_load_service_account', return_value={'type': 'service_account'}):
+            for calendar in ('', 'primary'):
+                with patch.dict(os.environ, {'GCAL_CALENDAR_ID': calendar}):
+                    self.assertEqual(gcal.readiness(), 'calendar_missing')
 
     def test_is_active_requires_flow_switch(self):
         with patch.object(config, 'GCAL_ENABLED', True), \
