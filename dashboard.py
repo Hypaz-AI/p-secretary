@@ -18,7 +18,11 @@ import flows
 CREDENTIAL_FILE = Path.home() / '.config' / 'pi-secretary' / 'dashboard.json'
 
 
-def credential(path=CREDENTIAL_FILE):
+def credential(path=None):
+    if path is None:
+        configured = Path(config.get('DASHBOARD_CREDENTIAL_FILE', str(CREDENTIAL_FILE)))
+        path = CREDENTIAL_FILE if not configured.exists() and CREDENTIAL_FILE.exists() else configured
+    path = Path(path)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if not path.exists():
         value = {'username': 'admin', 'password': secrets.token_urlsafe(32)}
@@ -78,12 +82,15 @@ def create_app(auth=None):
     username = auth['username']
     app = Flask(__name__, static_folder=None)
     app.config['MAX_CONTENT_LENGTH'] = 4096
+    import file_browser
+    file_browser.register(app)
     sessions, attempts = {}, {}
     lock = threading.Lock()
 
     @app.before_request
     def guard():
-        if request.host.split(':')[0] not in {'192.168.1.119', '127.0.0.1', 'localhost', config.get('DASHBOARD_HOSTNAME', 'pi-secretary.local')}:
+        host = request.host.rsplit(':', 1)[0] if request.host.count(':') == 1 else request.host
+        if host not in {'127.0.0.1', 'localhost', '[::1]', config.get('DASHBOARD_HOSTNAME', 'pi-secretary.local'), config.get('DASHBOARD_BIND', '127.0.0.1')}:
             return jsonify(error='Host not allowed'), 400
         if request.method != 'GET':
             if request.headers.get('Sec-Fetch-Site') == 'cross-site':
@@ -104,6 +111,8 @@ def create_app(auth=None):
         if request.method != 'GET' and not hmac.compare_digest(request.headers.get('X-CSRF-Token', ''), session['csrf']):
             return jsonify(error='CSRF refused'), 403
         request.dashboard_session = session
+        if request.path == '/api/files/upload' and request.method == 'POST':
+            request.max_content_length = file_browser.MAX_UPLOAD
 
     @app.after_request
     def headers(response):
@@ -182,7 +191,7 @@ def create_app(auth=None):
 
 
 def start():
-    server = create_server(create_app(), host=config.get('DASHBOARD_BIND', '0.0.0.0'),
-                           port=int(config.get('DASHBOARD_PORT', '80')), threads=4)
+    server = create_server(create_app(), host=config.get('DASHBOARD_BIND', '127.0.0.1'),
+                           port=int(config.get('DASHBOARD_PORT', '8080')), threads=4)
     threading.Thread(target=server.run, name='dashboard', daemon=True).start()
     return server

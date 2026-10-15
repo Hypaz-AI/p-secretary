@@ -1,8 +1,12 @@
 """Carica la configurazione dal file .env (senza dipendenze esterne)."""
 import os
+import json
+import re
 from pathlib import Path
+from connectors.storage import FileLock, atomic_write
 
 BASE_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = Path(os.environ.get('PI_SECRETARY_CONFIG_FILE') or BASE_DIR / '.env').expanduser().resolve()
 
 
 def _load_dotenv(path: Path) -> None:
@@ -13,10 +17,19 @@ def _load_dotenv(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        value = value.strip()
+        if value.startswith('"') and value.endswith('"'):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                value = value[1:-1]
+        elif value.startswith("'") and value.endswith("'"):
+            value = value[1:-1]
+        os.environ.setdefault(key.strip(), value)
 
 
-_load_dotenv(BASE_DIR / ".env")
+_load_dotenv(CONFIG_FILE)
+DATA_DIR = Path(os.environ.get('DATA_DIR') or str(BASE_DIR / 'data')).expanduser()
 
 
 def get(key: str, default: str = "") -> str:
@@ -25,23 +38,17 @@ def get(key: str, default: str = "") -> str:
 
 def set_env(key: str, value: str) -> None:
     """Aggiorna una variabile nel .env (usato dagli script di setup)."""
-    import re
-    path = BASE_DIR / ".env"
-    if not path.exists():
-        path.write_text(f"{key}={value}\n", encoding="utf-8")
-        os.environ[key] = value
-        return
-    text = path.read_text(encoding="utf-8")
-    pattern = re.compile(rf"^{re.escape(key)}=.*$", re.MULTILINE)
-    if pattern.search(text):
-        text = pattern.sub(f"{key}={value}", text)
-    else:
-        # assicura un newline prima di aggiungere, per non incollare
-        # la nuova chiave in fondo all'ultima riga esistente
-        if text and not text.endswith("\n"):
-            text += "\n"
-        text += f"{key}={value}\n"
-    path.write_text(text, encoding="utf-8")
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key):
+        raise ValueError('Invalid environment key')
+    if any(c in value for c in ('\n', '\r', '\x00')):
+        raise ValueError('Multiline environment values are not supported')
+    path = CONFIG_FILE
+    with FileLock(str(path) + '.lock'):
+        text = path.read_text(encoding='utf-8') if path.exists() else ''
+        lines = [line for line in text.splitlines()
+                 if not re.match(rf'^\s*{re.escape(key)}\s*=', line)]
+        lines.append(key + '=' + json.dumps(value, ensure_ascii=False))
+        atomic_write(path, '\n'.join(lines) + '\n')
     os.environ[key] = value
 
 
@@ -99,7 +106,7 @@ TELEGRAM_USER_ENABLED = get_bool('TELEGRAM_USER_ENABLED', False)
 TELEGRAM_API_ID = get('TELEGRAM_API_ID')
 TELEGRAM_API_HASH = get('TELEGRAM_API_HASH')
 TELEGRAM_PHONE = get('TELEGRAM_PHONE')
-TELEGRAM_USER_SESSION = get('TELEGRAM_USER_SESSION', 'data/telegram_account/personal.session')
+TELEGRAM_USER_SESSION = get('TELEGRAM_USER_SESSION', str(DATA_DIR.resolve() / 'telegram_account/personal.session'))
 TELEGRAM_USER_DIALOG_LIMIT = int(get('TELEGRAM_USER_DIALOG_LIMIT', '100'))
 TELEGRAM_USER_MESSAGE_LIMIT = int(get('TELEGRAM_USER_MESSAGE_LIMIT', '200'))
 TELEGRAM_USER_RECOVERY_INTERVAL = int(get('TELEGRAM_USER_RECOVERY_INTERVAL', '900'))
@@ -119,7 +126,7 @@ DATABASE_URL = get("DATABASE_URL")
 
 # --- Fatture ----------------------------------------------------
 # Cartella base dove salvare le fatture ricevute
-INVOICE_DIR = Path(get("INVOICE_DIR", "/home/ale/invoices"))
+INVOICE_DIR = Path(get("INVOICE_DIR", str(DATA_DIR / 'invoices')))
 # Le due partite IVA dell'utente: nome cartella -> descrizione
 INVOICE_ENTITIES = {}
 for _i in range(1, 5):
@@ -145,7 +152,6 @@ NOTIFY_PRIORITY_THRESHOLD = get("NOTIFY_PRIORITY_THRESHOLD", "media").lower()
 POLL_INTERVAL = int(get("POLL_INTERVAL", "300"))
 TIMEZONE = get("TIMEZONE", "Europe/Rome")
 LANGUAGE = get("LANGUAGE", "it")
-DATA_DIR = Path(get("DATA_DIR", str(BASE_DIR / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 EMAIL_ATTACHMENTS_DIR = DATA_DIR / "email_attachments"
 

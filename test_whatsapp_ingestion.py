@@ -137,7 +137,7 @@ function message(id) {return {id:{_serialized:id, id}, timestamp:200,
  downloadMedia:async()=>{throw Error('media failed');}};}
 const fs = {mkdirSync(){},existsSync:p=>p in files,writeFileSync:(p,v)=>files[p]=v,
  renameSync:(a,b)=>{files[b]=files[a];delete files[a];}};
-const context = {Buffer, process:{env:{WA_SPOOL_DIR:'/spool',
+const context = {Buffer, process:{on(){}, env:{WA_SPOOL_DIR:'/spool',
  WA_MEDIA_DIR:'/media', WA_HISTORY_CUTOFF:'100'},stdin:{}},
  console:{log:v=>emitted.push(JSON.parse(v))},
  setTimeout:()=>({unref(){}}),setInterval:()=>({unref(){}}),

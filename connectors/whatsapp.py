@@ -18,6 +18,7 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
+const AUTH_ONLY = process.env.WA_AUTH_ONLY === '1';
 
 const MEDIA_DIR = process.env.WA_MEDIA_DIR;
 if (MEDIA_DIR) fs.mkdirSync(MEDIA_DIR, { recursive: true });
@@ -46,6 +47,7 @@ function cutoff() {
   return Math.max(Number(process.env.WA_HISTORY_CUTOFF || 0), 0);
 }
 async function archive(msg, recovered_cached=false) {
+  if (AUTH_ONLY || !SPOOL) return;
   const id = msg.id && (msg.id._serialized || msg.id.id);
   if (!id || msg.from==='status@broadcast' || msg.timestamp < cutoff()) return;
   if (INFLIGHT.has(id)) return;
@@ -84,7 +86,7 @@ async function archive(msg, recovered_cached=false) {
   } finally { INFLIGHT.delete(id); }
 }
 async function recover() {
-  if(!ready) return;
+  if(!ready || AUTH_ONLY) return;
   try {
     const chats=await client.getChats();
     // prima riempi la mappa dei nomi (rapida), poi il fetch lento
@@ -98,6 +100,10 @@ client.on('message_create', msg => archive(msg));
 setInterval(recover,900000).unref();
 
 client.on('qr', (qr) => {
+  if (process.env.WA_SHOW_QR !== '1') {
+    console.log(JSON.stringify({type:'reauth_required'}));
+    return;
+  }
   console.log(JSON.stringify({ type: 'qr', qr }));
   require('qrcode-terminal').generate(qr, { small: true });
 });
@@ -147,6 +153,17 @@ client.on('disconnected', () => {
 });
 
 client.initialize();
+let stopping = false;
+async function shutdown() {
+  if (stopping) return;
+  stopping = true;
+  ready = false;
+  const deadline = setTimeout(() => process.exit(1), 15000);
+  try { await client.destroy(); clearTimeout(deadline); process.exit(0); }
+  catch (e) { clearTimeout(deadline); process.exit(1); }
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
 
 const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', async (line) => {
@@ -159,6 +176,44 @@ rl.on('line', async (line) => {
   } catch (e) { /* ignora */ }
 });
 """
+
+
+def bridge_path():
+  """Generated executable outside DATA_DIR; supports read-only installs via cache."""
+  import os
+  import hashlib
+  from connectors.storage import FileLock, atomic_write
+  cache = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'pi-secretary'
+  target = cache / ('wa_bridge-' + hashlib.sha256(NODE_BRIDGE.encode()).hexdigest()[:16] + '.js')
+  with FileLock(str(target) + '.lock'):
+    if not target.exists():
+      atomic_write(target, NODE_BRIDGE)
+  return target
+
+
+def bridge_env(auth_only=False):
+  import os
+  env = dict(os.environ, WA_SESSION_DIR=str(config.DATA_DIR / 'wa_session'),
+         WA_SPOOL_DIR=str(config.DATA_DIR / 'wa_pending'),
+         WA_MEDIA_DIR=str(config.DATA_DIR / 'wa_media'),
+         WA_AUTH_ONLY='1' if auth_only else '0',
+         WA_SHOW_QR='1' if auth_only else '0')
+  # Preserve Docker-provided NODE_PATH; keep legacy data/node_modules working.
+  env['NODE_PATH'] = os.pathsep.join(filter(None, [os.environ.get('NODE_PATH'),
+    config.get('WA_NODE_MODULES'), str(config.BASE_DIR / 'data/node_modules')]))
+  chromium = config.get('WA_CHROMIUM_PATH') or _find_system_chromium()
+  if chromium:
+    env['WA_CHROMIUM_PATH'] = chromium
+  return env
+
+
+def stop_process(proc):
+  proc.terminate()
+  try:
+    proc.wait(timeout=20)
+  except subprocess.TimeoutExpired:
+    proc.kill()
+    proc.wait(timeout=5)
 
 
 def _find_system_chromium() -> str:
@@ -185,6 +240,7 @@ class WhatsAppBridge:
 
     def __init__(self):
         self.proc = None
+        self.session_lock = None
         self.ready = False
         self.self_wid = ""          # numero del dispositivo collegato
         self.incoming = []          # messaggi ricevuti in attesa di essere letti
@@ -217,42 +273,47 @@ class WhatsAppBridge:
         session_dir.mkdir(parents=True, exist_ok=True)
         media_dir = config.DATA_DIR / "wa_media"
         media_dir.mkdir(parents=True, exist_ok=True)
-        bridge_path = config.DATA_DIR / "wa_bridge.js"
-        bridge_path.write_text(NODE_BRIDGE, encoding="utf-8")
+        from connectors.storage import FileLock
+        if self.proc:
+          return True
+        try:
+          self.session_lock = FileLock(session_dir / '.owner.lock', blocking=False)
+          self.session_lock.__enter__()
+        except OSError:
+          self.session_lock = None
+          print('[whatsapp] sessione occupata; setup/runtime già attivo')
+          return False
 
-        env = dict(os.environ,
-                   WA_SESSION_DIR=str(session_dir),
-                   WA_SPOOL_DIR=str(self.spool_dir),
-                   WA_HISTORY_CUTOFF=str(self.history_cutoff().timestamp()),
-                   WA_MEDIA_DIR=str(media_dir))
+        env = bridge_env()
+        env['WA_HISTORY_CUTOFF'] = str(self.history_cutoff().timestamp())
         # Su ARM64 Puppeteer scariva binari x86: punta al Chromium di sistema
         chromium = _find_system_chromium()
         if chromium:
             env["WA_CHROMIUM_PATH"] = chromium
         try:
             self.proc = subprocess.Popen(
-                ["node", str(bridge_path)],
+                ["node", str(bridge_path())],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, env=env,
                 cwd=str(config.DATA_DIR),
             )
-        except FileNotFoundError:
-            print("[whatsapp] node non trovato: installalo con `sudo apt install nodejs npm`")
+        except (OSError, ValueError):
+            self.session_lock.__exit__()
+            self.session_lock = None
+            print('[whatsapp] avvio fallito; controllare Node, cache e dipendenze')
             return False
 
         threading.Thread(target=self._reader, daemon=True).start()
-        print("[whatsapp] ponte avviato — se è la prima volta, scansiona il QR qui sopra")
+        print('[whatsapp] ponte avviato; per autenticare usare setup_whatsapp.py')
         return True
 
     def stop(self) -> None:
         if self.proc:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(timeout=5)
+            stop_process(self.proc)
             self.proc = None
+        if self.session_lock:
+          self.session_lock.__exit__()
+          self.session_lock = None
         self.ready = False
 
     # ---- lettura eventi --------------------------------------
@@ -269,6 +330,9 @@ class WhatsAppBridge:
             etype = event.get("type")
             if etype == "qr":
                 pass  # il QR è già stampato dal bridge
+            elif etype == 'reauth_required':
+              self.ready = False
+              print('[whatsapp] riautenticazione necessaria: eseguire setup_whatsapp.py')
             elif etype == "ready":
                 self.ready = True
                 self.self_wid = event.get("self") or ""

@@ -1,0 +1,5 @@
+# db remains excluded because the launcher never enables the local profile.
+services:
+  app:
+    environment:
+      PI_SECRETARY_DATABASE_MODE: external

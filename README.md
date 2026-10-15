@@ -1,3 +1,18 @@
+# Installazione Docker e gestione file
+
+È disponibile un installer CLI per Linux headless: vedere
+[`docker/README.md`](docker/README.md). Il wizard propone PostgreSQL locale
+tramite Compose quando non si fornisce un URI esterno. Non importa o modifica
+automaticamente l'installazione systemd esistente.
+
+La dashboard include la pagina **File** per navigare e scaricare i contenuti
+consentiti di `DATA_DIR` e dell'archivio fatture, caricare file in `uploads/`
+e cancellare file non referenziati dal database. Token, sessioni, chiavi,
+spool e configurazioni sono esclusi. L'upload è limitato a 20 MiB e non
+sovrascrive file esistenti; non attiva automaticamente l'analisi AI.
+I file referenziati dal database non possono essere eliminati dalla pagina.
+La cancellazione è bloccata anche quando il database non è disponibile.
+
 # Durable processing update
 
 See [OPERATIONS.md](OPERATIONS.md) for the current queue architecture, owner

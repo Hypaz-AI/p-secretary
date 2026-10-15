@@ -108,6 +108,15 @@ class TelegramAccountWorker:
                 print('[telegram-account] shutdown still pending')
 
     def _run(self):
+        from connectors.storage import FileLock
+        try:
+            with FileLock(str(session_path()) + '.owner.lock', blocking=False):
+                self._run_locked()
+        except OSError:
+            flows.mark('telegram_user', 'session_busy')
+            print('[telegram-account] session occupied or inaccessible')
+
+    def _run_locked(self):
         flows.mark('telegram_user', 'connecting')
         # SQLite creates journals with session permissions; do NOT change the
         # process-wide umask in this background thread.

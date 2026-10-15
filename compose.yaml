@@ -1,0 +1,38 @@
+name: pi-secretary
+services:
+  app:
+    build: .
+    image: pi-secretary:local
+    init: true
+    user: "${PI_SECRETARY_UID:-1000}:${PI_SECRETARY_GID:-1000}"
+    stop_grace_period: 120s
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    shm_size: 256mb
+    tmpfs:
+      - /tmp:uid=${PI_SECRETARY_UID:-1000},gid=${PI_SECRETARY_GID:-1000},mode=1777
+    environment:
+      PI_SECRETARY_CONFIG_FILE: /config/secretary.env
+      DATA_DIR: /var/lib/pi-secretary
+      INVOICE_DIR: /var/lib/pi-secretary/invoices
+      TELEGRAM_USER_SESSION: /var/lib/pi-secretary/telegram_account/personal.session
+      DASHBOARD_CREDENTIAL_FILE: /config/dashboard.json
+      DASHBOARD_BIND: 0.0.0.0
+      DASHBOARD_PORT: "8080"
+    volumes:
+      - ${PI_SECRETARY_HOME:?Use the launcher}/config:/config
+      - ${PI_SECRETARY_HOME:?Use the launcher}/data:/var/lib/pi-secretary
+    ports: ["127.0.0.1:8080:8080"]
+  db:
+    image: postgres:16-bookworm
+    profiles: [local]
+    env_file: ${PI_SECRETARY_HOME:?Use the launcher}/config/postgres.env
+    volumes: ["postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U secretary -d secretary"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 120s
+volumes:
+  postgres:

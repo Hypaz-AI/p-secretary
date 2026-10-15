@@ -11,6 +11,54 @@ async function api(path, data) {
   return result;
 }
 function show(connected) { el('login').hidden = connected; el('dashboard').hidden = !connected; el('logout').hidden = !connected; }
+let filePath = '';
+const fileQuery = path => new URLSearchParams({root: el('file-root').value, path}).toString();
+async function browseFiles() {
+  try {
+    const result = await api(`/api/files?${fileQuery(filePath)}`);
+    el('file-path').textContent = `${el('file-root').selectedOptions[0].textContent} / ${filePath}`;
+    el('file-up').disabled = !filePath;
+    el('file-list').replaceChildren();
+    result.entries.forEach(entry => {
+      const path = filePath ? `${filePath}/${entry.name}` : entry.name;
+      const r = row(el('file-list'), entry.name, entry.directory ? 'Cartella' : `${entry.size} byte`);
+      if (entry.directory) {
+        const b = node('button', 'Apri'); b.onclick = () => {filePath = path; browseFiles();}; r.append(b);
+      } else {
+        const a = node('a', 'Scarica'); a.href = `/api/files/download?${fileQuery(path)}`; r.append(a);
+        const b = node('button', 'Elimina');
+        b.onclick = async () => {
+          if (!confirm(`Eliminare ${entry.name}?`)) return;
+          try {
+            const response = await fetch(`/api/files?${fileQuery(path)}`, {method:'DELETE', headers:{'X-CSRF-Token':csrf}});
+            const result = await response.json();
+            if (!response.ok) throw Error(result.error || 'Eliminazione fallita');
+            await browseFiles();
+          } catch(e) {el('file-status').textContent = e.message;}
+        }; r.append(b);
+      }
+    });
+    el('file-status').textContent = '';
+  } catch(e) {el('file-status').textContent = e.message;}
+}
+el('file-root').onchange = () => {filePath = ''; browseFiles();};
+el('file-up').onclick = () => {filePath = filePath.split('/').slice(0,-1).join('/'); browseFiles();};
+el('file-refresh').onclick = browseFiles;
+el('file-send').onclick = async () => {
+  const file = el('file-upload').files[0];
+  if (!file) return;
+  if (file.size > 20*1024*1024) {el('file-status').textContent = 'File troppo grande'; return;}
+  el('file-send').disabled = true;
+  try {
+    const response = await fetch(`/api/files/upload?${new URLSearchParams({name:file.name})}`, {
+      method:'POST', headers:{'X-CSRF-Token':csrf, 'Content-Type':'application/octet-stream'}, body:file});
+    const result = await response.json();
+    if (!response.ok) throw Error(result.error || 'Upload fallito');
+    el('file-root').value = 'data'; filePath = 'uploads'; el('file-upload').value = ''; await browseFiles();
+    el('file-status').textContent = 'File caricato';
+  } catch(e) {el('file-status').textContent = e.message;}
+  finally {el('file-send').disabled = false;}
+};
 function row(parent, left, right) { const r = node('div', ''); r.className = 'row'; r.append(node('div', left), node('small', right)); parent.append(r); return r; }
 async function refresh() {
   try {
@@ -37,7 +85,7 @@ async function refresh() {
     el('zips').replaceChildren();d.zips.forEach(r=>row(el('zips'),`ZIP ${r[0]} · ${r[1]}`,r[2]?'inviato':'non inviato'));
   } catch(e) {el('status').textContent=e.message;}
 }
-el('login').onsubmit=async e=>{e.preventDefault();el('error').textContent='';try{const data=Object.fromEntries(new FormData(e.target));const result=await api('/api/login',data);csrf=result.csrf;e.target.reset();await refresh();}catch(err){el('error').textContent=err.message;}};
+el('login').onsubmit=async e=>{e.preventDefault();el('error').textContent='';try{const data=Object.fromEntries(new FormData(e.target));const result=await api('/api/login',data);csrf=result.csrf;e.target.reset();show(true);await refresh();await browseFiles();}catch(err){el('error').textContent=err.message;}};
 el('logout').onclick=async()=>{await api('/api/logout',{});csrf='';show(false);};
-api('/api/session').then(s=>{csrf=s.csrf;refresh();}).catch(()=>{});
+api('/api/session').then(s=>{csrf=s.csrf;show(true);refresh();browseFiles();}).catch(()=>{});
 setInterval(()=>{if(!el('dashboard').hidden)refresh();},10000);

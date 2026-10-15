@@ -29,10 +29,30 @@ Uso:
     python3 setup_gcal.py --force   # rifà il login device flow
 """
 import sys
+import getpass
 from datetime import datetime, timedelta
 
 import config
 from connectors import gcal
+
+
+def verify_write():
+    if input('Creare e cancellare un evento di prova? [s/N] ').strip().lower() not in ('s', 'si', 'sì', 'y', 'yes'):
+        return False
+    probe = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d %H:%M')
+    res = gcal.create_event(title='Test pi-secretary', start=probe, source='setup di prova')
+    if not res.get('ok') or not res.get('event_id'):
+        print('❌ Scrittura fallita; calendario non abilitato.')
+        return False
+    try:
+        cleanup = gcal.delete_event(res['event_id'])
+    except Exception:
+        cleanup = {}
+    if not cleanup.get('ok'):
+        print('❌ Evento di prova non rimosso: eliminarlo manualmente. Calendario non abilitato.')
+        return False
+    print('✍️ Scrittura e cancellazione OK.')
+    return True
 
 
 def main() -> None:
@@ -65,19 +85,8 @@ def main() -> None:
         config.set_env("GCAL_CALENDAR_ID", chosen_id)
         print(f"✅ Calendario scelto: {info.get('summary', chosen_id)}")
 
-        # verifica di scrittura: evento di prova creato e rimosso subito
-        probe = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M")
-        res = gcal.create_event(title="Test pi-secretary", start=probe,
-                                source="setup di prova")
-        if res.get("ok"):
-            cleanup = gcal.delete_event(res["event_id"])
-            if not cleanup.get("ok"):
-                print("❌ Evento di prova creato ma non rimosso; eliminalo dal calendario.")
-                sys.exit(1)
-            print("✍️ Scrittura OK: evento di prova creato e rimosso.")
-        else:
-            print(f"❌ scrittura fallita: {res.get('error')}")
-            sys.exit(1)
+        if not verify_write():
+            return
         config.set_env("GCAL_ENABLED", "true")
         print("\n✅ GCAL_ENABLED=true scritto nel .env. Nessun token da")
         print("   rinnovare: la chiave vale finché non la revochi tu.")
@@ -107,10 +116,10 @@ def main() -> None:
         client_id = input("Client ID: ").strip()
     client_secret = config.GCAL_CLIENT_SECRET
     if client_secret:
-        client_secret = input(
+        client_secret = getpass.getpass(
             "Client secret (INVIO per riusare quello salvato): ").strip() or client_secret
     else:
-        client_secret = input("Client secret: ").strip()
+        client_secret = getpass.getpass("Client secret: ").strip()
     if not client_id or not client_secret:
         print("❌ ID client o secret mancanti.")
         sys.exit(1)
@@ -147,16 +156,10 @@ def main() -> None:
             print("📖 Lettura OK: nessun evento nei prossimi 7 giorni.")
     except Exception as exc:  # noqa: BLE001
         print(f"⚠️ lettura fallita: {exc}")
+        return
 
-    # verifica di scrittura: evento di prova creato e rimosso subito
-    probe = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M")
-    res = gcal.create_event(title="Test pi-secretary", start=probe,
-                            source="setup di prova")
-    if res.get("ok"):
-        gcal.delete_event(res["event_id"])
-        print("✍️ Scrittura OK: evento di prova creato e rimosso.")
-    else:
-        print(f"⚠️ scrittura fallita: {res.get('error')}")
+    if not verify_write():
+        return
 
     config.set_env("GCAL_ENABLED", "true")
     print("\n✅ GCAL_ENABLED=true scritto nel .env.")

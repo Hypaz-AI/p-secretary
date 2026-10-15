@@ -7,6 +7,7 @@ import sys
 
 import config
 from connectors.telegram_account import api_credentials, secure_session, session_path
+from connectors.storage import FileLock
 
 
 async def authorize():
@@ -36,7 +37,8 @@ def main():
     # CLI-only umask also protects SQLite journal files on initial creation.
     os.umask(0o077)
     try:
-        asyncio.run(authorize())
+        with FileLock(str(session_path()) + '.owner.lock', blocking=False):
+            asyncio.run(authorize())
     except (Exception, KeyboardInterrupt) as exc:
         print(f'Authorization failed ({type(exc).__name__}). Check credentials/dependencies; no secrets logged.')
         return 1

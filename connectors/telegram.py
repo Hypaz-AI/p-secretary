@@ -8,6 +8,17 @@ from pathlib import Path
 import config
 
 API = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
+_poll_lock = None
+
+
+def acquire_poll_lock():
+    """Keep ownership for process lifetime, not just a single getUpdates call."""
+    global _poll_lock
+    if _poll_lock is None:
+        from connectors.storage import FileLock, bot_lock_path
+        lock = FileLock(bot_lock_path(config.TELEGRAM_BOT_TOKEN), blocking=False)
+        lock.__enter__()
+        _poll_lock = lock
 
 
 def _call(method: str, params: dict) -> dict:
@@ -134,6 +145,11 @@ def fetch_new_messages(offset: int, download_dir=None) -> tuple:
     """
     messages = []
     if not config.TELEGRAM_BOT_TOKEN:
+        return messages, offset
+    try:
+        acquire_poll_lock()
+    except OSError:
+        print('[telegram] polling occupato; nessun update consumato')
         return messages, offset
     # solo la chat configurata può dialogare col segretario:
     # chiunque altro scriva al bot viene ignorato (anti prompt-injection)

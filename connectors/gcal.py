@@ -222,10 +222,10 @@ def _load_tokens() -> dict:
 
 
 def _save_tokens(entry: dict) -> None:
+    from connectors.storage import FileLock, atomic_write
     path = token_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(entry, indent=2), encoding="utf-8")
-    path.chmod(0o600)
+    with FileLock(str(path) + '.lock'):
+        atomic_write(path, json.dumps(entry, indent=2))
 
 
 def _post(url: str, data: dict) -> dict:

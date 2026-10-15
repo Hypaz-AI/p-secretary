@@ -41,8 +41,9 @@ def _load_tokens() -> dict:
 
 
 def _save_tokens(tokens: dict) -> None:
-    TOKEN_FILE.write_text(json.dumps(tokens, indent=2), encoding="utf-8")
-    TOKEN_FILE.chmod(0o600)
+    from connectors.storage import FileLock, atomic_write
+    with FileLock(str(TOKEN_FILE) + '.lock'):
+        atomic_write(TOKEN_FILE, json.dumps(tokens, indent=2))
 
 
 def _post(url: str, data: dict) -> dict:
@@ -61,6 +62,12 @@ def _client_id(account: dict) -> str:
 
 
 def _store(address: str, token: dict) -> dict:
+    from connectors.storage import FileLock
+    with FileLock(str(TOKEN_FILE) + '.transaction.lock'):
+        return _store_locked(address, token)
+
+
+def _store_locked(address: str, token: dict) -> dict:
     tokens = _load_tokens()
     key = address.lower()
     old = tokens.get(key, {})

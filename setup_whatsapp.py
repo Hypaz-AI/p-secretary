@@ -17,10 +17,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config
-from connectors.whatsapp import NODE_BRIDGE, _find_system_chromium
+from connectors.whatsapp import bridge_path, bridge_env, stop_process
+from connectors.storage import FileLock
 
 
-def main() -> None:
+def _setup() -> None:
     print("=" * 55)
     print("  Setup WhatsApp — PI-SECRETARY")
     print("=" * 55)
@@ -29,8 +30,6 @@ def main() -> None:
     media_dir = config.DATA_DIR / "wa_media"
     session_dir.mkdir(parents=True, exist_ok=True)
     media_dir.mkdir(parents=True, exist_ok=True)
-    bridge_path = config.DATA_DIR / "wa_bridge.js"
-    bridge_path.write_text(NODE_BRIDGE, encoding="utf-8")
 
     already = any(session_dir.glob("*"))
     if already:
@@ -38,10 +37,8 @@ def main() -> None:
         print("    collegherà subito senza chiedere il QR.")
 
     print("\nAvvio del ponte WhatsApp...\n")
-    env = dict(os.environ,
-               WA_SESSION_DIR=str(session_dir),
-               WA_MEDIA_DIR=str(media_dir))
-    chromium = _find_system_chromium()
+    env = bridge_env(auth_only=True)
+    chromium = env.get('WA_CHROMIUM_PATH')
     if chromium:
         print(f"ℹ️  Uso Chromium di sistema: {chromium}")
         env["WA_CHROMIUM_PATH"] = chromium
@@ -50,7 +47,7 @@ def main() -> None:
         print("   (su ARM64 fallirà — installa: sudo snap install chromium)")
     try:
         proc = subprocess.Popen(
-            ["node", str(bridge_path)],
+            ["node", str(bridge_path())],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, env=env, cwd=str(config.DATA_DIR),
         )
@@ -79,11 +76,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        stop_process(proc)
 
     if not ready:
         print("\n❌ Ponte non connesso. Possibili cause:")
@@ -92,12 +85,21 @@ def main() -> None:
         print("   - guarda i messaggi d'errore qui sopra")
         sys.exit(1)
 
-    # dà un attimo a Node per flushare la sessione su disco
-    time.sleep(3)
+    if proc.returncode != 0:
+        print('❌ Arresto del bridge non pulito; configurazione non abilitata.')
+        return
     config.set_env("WHATSAPP_ENABLED", "true")
     print("\n✅ WhatsApp connesso! Sessione salvata in data/wa_session")
     print("   WHATSAPP_ENABLED=true scritto nel .env")
     print("\nRiavvia il segretario: sudo systemctl restart pi-secretary")
+
+
+def main():
+    try:
+        with FileLock(config.DATA_DIR / 'wa_session/.owner.lock', blocking=False):
+            _setup()
+    except OSError:
+        print('❌ Sessione occupata o non accessibile; fermare runtime/setup concorrente.')
 
 
 if __name__ == "__main__":

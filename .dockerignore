@@ -1,0 +1,15 @@
+**
+!requirements.txt
+!*.py
+test_*.py
+!connectors/
+!connectors/*.py
+!web/
+!web/*.js
+!web/*.css
+!web/*.html
+!data/
+!data/package.json
+!data/package-lock.json
+!docker/
+!docker/entrypoint.py

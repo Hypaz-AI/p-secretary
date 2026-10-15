@@ -9,12 +9,15 @@ Uso:
     python3 setup_telegram.py
 """
 import json
+import getpass
+import secrets
 import subprocess
 import sys
 import time
 import urllib.request
 
 import config
+from connectors.storage import FileLock, bot_lock_path
 
 
 def tg_call(token: str, method: str, params: dict = None) -> dict:
@@ -49,27 +52,40 @@ def main() -> None:
     print("=" * 55)
     print("  Setup bot Telegram — PI-SECRETARY")
     print("=" * 55)
-    warn_if_service_running()
 
     print("\n1. Apri Telegram, cerca @BotFather e scrivi /newbot")
     print("2. Scegli un nome (es. 'Il mio segretario')")
     print("3. Scegli uno username che finisce con 'bot'")
     print("4. BotFather ti darà un TOKEN tipo '123456789:AAE...'")
-    token = input("\nIncolla qui il TOKEN: ").strip()
+    token = getpass.getpass("\nIncolla qui il TOKEN: ").strip()
+    try:
+        with FileLock(bot_lock_path(token), blocking=False):
+            pair(token)
+    except OSError:
+        print('❌ Polling occupato o lock non accessibile: fermare runtime/setup concorrente.')
+
+
+def owner_matches(msg, nonce):
+    return bool(msg and msg.get('text', '').strip() == nonce
+                and msg.get('chat', {}).get('type') == 'private'
+                and not msg.get('from', {}).get('is_bot', False)
+                and msg.get('from', {}).get('id') == msg.get('chat', {}).get('id'))
+
+
+def pair(token):
 
     try:
         me = tg_call(token, "getMe")
         bot_username = me["result"]["username"]
         print(f"\n✅ Token valido! Il tuo bot è @{bot_username}")
     except Exception as exc:  # noqa: BLE001
-        print(f"❌ Token non valido: {exc}")
+        print(f"❌ Token non valido ({type(exc).__name__})")
         sys.exit(1)
 
-    config.set_env("TELEGRAM_BOT_TOKEN", token)
-    print("   Token salvato nel .env")
-
-    print(f"\n5. Ora scrivi UN messaggio qualsiasi al bot @{bot_username}")
-    print("   da Telegram (es. 'ciao'). Aspetto fino a 120 secondi...")
+    nonce = 'pair-' + secrets.token_urlsafe(24)
+    print(f'\nInvia dalla tua chat privata a @{bot_username} questo codice monouso:')
+    print(nonce)
+    print('Aspetto fino a 120 secondi...')
 
     chat_id = None
     offset = 0
@@ -81,7 +97,7 @@ def main() -> None:
                 offset = max(offset, u["update_id"] + 1)
                 msg = u.get("message") or u.get("edited_message")
                 # solo chat private: in un gruppo il chat id sarebbe sbagliato
-                if msg and msg.get("text") and msg["chat"].get("type") == "private":
+                if owner_matches(msg, nonce):
                     chat_id = msg["chat"]["id"]
                     name = msg["chat"].get("first_name", "")
                     print(f"\n✅ Messaggio ricevuto da {name}! chat_id = {chat_id}")
@@ -95,6 +111,7 @@ def main() -> None:
         print("    (lo trovi su https://api.telegram.org/bot<TOKEN>/getUpdates)")
         sys.exit(1)
 
+    config.set_env("TELEGRAM_BOT_TOKEN", token)
     config.set_env("TELEGRAM_CHAT_ID", str(chat_id))
     print("   chat_id salvato nel .env")
 
@@ -106,7 +123,7 @@ def main() -> None:
         print("\n🎉 Fatto! Ti ho appena mandato un messaggio di test.")
         print("   Riavvia il segretario: sudo systemctl restart pi-secretary")
     except Exception as exc:  # noqa: BLE001
-        print(f"\n⚠️  Invio del test fallito: {exc}")
+        print(f"\n⚠️  Invio del test fallito ({type(exc).__name__})")
 
 
 if __name__ == "__main__":
