@@ -20,6 +20,9 @@ data/ms_tokens.json
 # --- Stato e cache di runtime -------------------------------
 data/state.json
 data/.wwebjs_cache/
+data/locks/
+.env.lock
+.env.*.lock
 
 # --- Sessioni (Telegram / WhatsApp) -------------------------
 #    copre anche journal fuori da data/ (es. *.session-journal)
