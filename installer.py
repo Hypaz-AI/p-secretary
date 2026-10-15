@@ -328,7 +328,15 @@ def launch(args):
         def start():
             if not read_env(home / 'config/secretary.env').get('OPENROUTER_API_KEY', '').strip():
                 raise ValueError('OPENROUTER_API_KEY obbligatoria: usare configure e inserire la chiave OpenRouter prima di up.')
+            # Inspect/repair only after the previous app has actually stopped,
+            # before --force-recreate removes its inspectable identity.
+            compose('stop', 'app')
+            repair_whatsapp()
             compose('up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'app')
+        def repair_whatsapp():
+            from connectors.whatsapp_profile import repair_docker_singletons
+            if repair_docker_singletons(home / 'data/wa_session'):
+                print('WhatsApp: singleton Chromium obsoleti rimossi; profilo e sessione preservati.')
         def doctor():
             return compose('run', '--rm', '--no-deps', '-T', 'app', 'python', 'installer.py', '_probe', check=False).returncode
         if args.command in ('setup', 'configure'):
@@ -339,6 +347,7 @@ def launch(args):
             if not pg.exists():
                 provision_database(home / 'config', '')
             compose('stop', 'app')
+            repair_whatsapp()
             compose('build', 'app')
             compose('run', '--rm', '--no-deps', 'app', 'python', 'installer.py', '_configure' if args.command == 'configure' else '_wizard')
             database()
