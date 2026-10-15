@@ -19,6 +19,10 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const AUTH_ONLY = process.env.WA_AUTH_ONLY === '1';
+const HISTORY_IMPORT = process.env.WA_HISTORY_IMPORT === '1';
+function historyError(error) {
+  console.log(JSON.stringify({type:'history_error', error:String(error)}));
+}
 
 const MEDIA_DIR = process.env.WA_MEDIA_DIR;
 if (MEDIA_DIR) fs.mkdirSync(MEDIA_DIR, { recursive: true });
@@ -49,16 +53,20 @@ function cutoff() {
 async function archive(msg, recovered_cached=false) {
   if (AUTH_ONLY || !SPOOL) return;
   const id = msg.id && (msg.id._serialized || msg.id.id);
-  if (!id || msg.from==='status@broadcast' || msg.timestamp < cutoff()) return;
+  if (!id || msg.from==='status@broadcast' || msg.timestamp < cutoff() ||
+      (HISTORY_IMPORT && msg.timestamp >= Number(process.env.WA_HISTORY_END))) return;
   if (INFLIGHT.has(id)) return;
   const finalPath = path.join(SPOOL, Buffer.from(id).toString('hex')+'.json');
-  if (fs.existsSync(finalPath)) return;
+  if (fs.existsSync(finalPath)) {
+    if (!HISTORY_IMPORT || JSON.parse(fs.readFileSync(finalPath,'utf8')).enriched) return;
+  }
   INFLIGHT.add(id);
   try {
   const entry = {id, timestamp:msg.timestamp, chat_id:msg.fromMe?msg.to:msg.from,
     author:msg.author || msg.from, from:msg.from, from_name:msg.from,
     author_name:null, from_me:!!msg.fromMe, text:msg.body || '', attachments:[], recovered_cached,
     enriched:false, version:require('crypto').randomUUID()};
+  if (HISTORY_IMPORT) entry.self = client.info.wid._serialized;
   const dest = path.join(SPOOL, Buffer.from(id).toString('hex')+'.json');
   const persist = () => {fs.writeFileSync(dest+'.tmp', JSON.stringify(entry));fs.renameSync(dest+'.tmp', dest);};
   persist();
@@ -80,7 +88,7 @@ async function archive(msg, recovered_cached=false) {
       const target=path.join(MEDIA_DIR,safe);
       fs.writeFileSync(target,Buffer.from(media.data,'base64'));
       entry.attachments.push({filename:media.filename||safe,content_type:media.mimetype,path:target});
-    } catch(e) {entry.media_error=true;}
+    } catch(e) {entry.media_error=true;if(HISTORY_IMPORT) throw e;}
   }
   entry.enriched=true;persist();
   } finally { INFLIGHT.delete(id); }
@@ -96,10 +104,16 @@ async function recover() {
     }
   } catch(e) {}
 }
-client.on('message_create', msg => archive(msg));
-setInterval(recover,900000).unref();
+if (!HISTORY_IMPORT) {
+  client.on('message_create', msg => archive(msg));
+  setInterval(recover,900000).unref();
+}
 
 client.on('qr', (qr) => {
+  if (HISTORY_IMPORT) {
+    historyError('Existing WhatsApp session requires authentication');
+    return;
+  }
   if (process.env.WA_SHOW_QR !== '1') {
     console.log(JSON.stringify({type:'reauth_required'}));
     return;
@@ -108,11 +122,21 @@ client.on('qr', (qr) => {
   require('qrcode-terminal').generate(qr, { small: true });
 });
 
-client.on('ready', () => {
+client.on('ready', async () => {
   ready = true;
   console.log(JSON.stringify({ type: 'ready', self: client.info && client.info.wid ? client.info.wid._serialized : null }));
-  recover();
+  if (!HISTORY_IMPORT) { recover(); return; }
+  try {
+    const chats = await client.getChats();
+    for (const chat of chats) rememberChat(chat);
+    for (const chat of chats) {
+      // Only history already available to this linked device; no server backfill.
+      for (const msg of await chat.fetchMessages({limit:Infinity})) await archive(msg,true);
+    }
+    console.log(JSON.stringify({type:'history_complete'}));
+  } catch (e) { historyError(e); }
 });
+if (HISTORY_IMPORT) client.on('auth_failure', historyError);
 
 /* Single message_create handler covers incoming and outgoing messages.
 client.on('message', async (msg) => {
@@ -152,7 +176,8 @@ client.on('disconnected', () => {
   console.log(JSON.stringify({ type: 'disconnected' }));
 });
 
-client.initialize();
+const initialization = client.initialize();
+if (HISTORY_IMPORT) initialization.catch(historyError);
 let stopping = false;
 async function shutdown() {
   if (stopping) return;
@@ -169,7 +194,7 @@ const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', async (line) => {
   try {
     const cmd = JSON.parse(line);
-    if (cmd.type === 'send' && ready) {
+    if (!HISTORY_IMPORT && cmd.type === 'send' && ready) {
       await client.sendMessage(cmd.to, cmd.text);
       console.log(JSON.stringify({ type: 'sent', to: cmd.to }));
     }
@@ -214,6 +239,146 @@ def stop_process(proc):
   except subprocess.TimeoutExpired:
     proc.kill()
     proc.wait(timeout=5)
+
+
+def import_history(start, end, timeout=600):
+  """Synchronously archive synced WhatsApp history in [start, end).
+
+  Requires an existing linked-device session and exclusive ownership. This
+  never authenticates, analyzes, sends, or marks messages read. A private
+  persistent spool survives failures independently of the runtime spool.
+  Returns the number of messages successfully stored (including DB upserts).
+  """
+  import math
+  import queue
+  import time
+  from datetime import datetime
+  import db
+  from connectors.storage import FileLock
+
+  if (not isinstance(start, datetime) or not isinstance(end, datetime)
+      or start.utcoffset() is None or end.utcoffset() is None or start >= end):
+    raise ValueError('History requires timezone-aware start < end')
+  if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+    raise ValueError('timeout must be positive and finite')
+  deadline = time.monotonic() + timeout
+
+  def remaining():
+    value = deadline - time.monotonic()
+    if value <= 0:
+      raise TimeoutError('WhatsApp historical import timed out')
+    return value
+
+  session = config.DATA_DIR / 'wa_session'
+  if not (session / 'session').is_dir():
+    raise FileNotFoundError('Existing WhatsApp session required; run setup separately')
+  with FileLock(session / '.owner.lock', blocking=False):
+    spool = config.DATA_DIR / 'wa_history_pending'
+    spool.mkdir(parents=True, exist_ok=True, mode=0o700)
+    env = bridge_env()
+    env.update(WA_HISTORY_IMPORT='1', WA_AUTH_ONLY='0', WA_SHOW_QR='0',
+           WA_SPOOL_DIR=str(spool), WA_HISTORY_CUTOFF=str(start.timestamp()),
+           WA_HISTORY_END=str(end.timestamp()))
+    proc = None
+    reader = None
+    events = queue.Queue()
+
+    def read_events():
+      try:
+        for line in proc.stdout:
+          events.put(line)
+      except Exception as exc:
+        events.put(exc)
+      finally:
+        events.put(None)
+
+    try:
+      remaining()
+      proc = subprocess.Popen(
+        ['node', str(bridge_path())], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        env=env, cwd=str(config.DATA_DIR))
+      reader = threading.Thread(target=read_events, daemon=True)
+      reader.start()
+      self_wid = None
+      while True:
+        try:
+          line = events.get(timeout=remaining())
+        except queue.Empty as exc:
+          raise TimeoutError('WhatsApp historical import timed out') from exc
+        if isinstance(line, Exception):
+          raise line
+        if line is None:
+          raise RuntimeError('WhatsApp bridge exited before history_complete')
+        try:
+          event = json.loads(line)
+        except ValueError:
+          continue  # Chromium and dependency diagnostic output.
+        if not isinstance(event, dict):
+          continue
+        kind = event.get('type')
+        if kind in ('history_error', 'error', 'auth_failure', 'disconnected'):
+          raise RuntimeError(event.get('error') or f'WhatsApp {kind}')
+        if kind in ('qr', 'reauth_required'):
+          raise PermissionError('WhatsApp session requires authentication')
+        if kind == 'ready':
+          self_wid = event.get('self')
+        if kind == 'history_complete':
+          if not self_wid:
+            raise RuntimeError('WhatsApp history completed without account identity')
+          break
+
+      count = 0
+      for path in sorted(spool.glob('*.json')):
+        remaining()
+        m = json.loads(path.read_text())
+        if not m.get('enriched'):
+          continue
+        if (not start.timestamp() <= m['timestamp'] < end.timestamp()
+            or m.get('chat_id') == 'status@broadcast'
+            or m.get('self', self_wid) != self_wid):
+          continue
+        identity = m['id']
+        if path.name != identity.encode().hex() + '.json':
+          raise ValueError('WhatsApp spool identity mismatch')
+        chat_name = m.get('from_name') or m.get('from') or '?'
+        if m.get('from_me'):
+          sender = f'io → {chat_name}'
+        elif '@g.us' in str(m.get('chat_id') or m.get('from') or ''):
+          sender = (f"{m['author_name']} in {chat_name}" if m.get('author_name')
+                else f"{chat_name} · {m.get('author') or m.get('from')}")
+        else:
+          sender = f"{chat_name} ({m.get('from')})"
+        db.store_message('whatsapp', sender, f'WhatsApp · {chat_name}',
+          m.get('text', ''),
+          ts=datetime.fromtimestamp(m['timestamp'], start.tzinfo).isoformat(),
+          source_id=identity, attachments=m.get('attachments', []),
+          metadata={'account': self_wid, 'self': self_wid,
+                'chat_id': m.get('chat_id'), 'author': m.get('author'),
+                'message_id': identity, 'chat_name': chat_name,
+                'author_name': m.get('author_name'),
+                'direction': 'out' if m.get('from_me') else 'in',
+                'recovered': True})
+        count += 1
+        # ACK only the exact enriched version that was durably stored.
+        current = json.loads(path.read_text())
+        if (m.get('version') is not None and current.get('enriched')
+            and current.get('id') == identity
+            and current.get('version') == m['version']):
+          path.unlink()
+      remaining()
+      return count
+    finally:
+      try:
+        if proc is not None:
+          stop_process(proc)
+      finally:
+        if reader is not None:
+          reader.join(timeout=1)
+        if proc is not None:
+          for stream in (proc.stdin, proc.stdout):
+            if stream is not None:
+              stream.close()
 
 
 def _find_system_chromium() -> str:

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import config
@@ -192,8 +192,8 @@ class TelegramAccountWorker:
             flows.mark('telegram_user', 'archive_failed')
             print(f'[telegram-account] live archive failed ({type(exc).__name__}); bounded recovery will retry')
 
-    async def archive(self, message, recovered=False):
-        cutoff, end = history_window()
+    async def archive(self, message, recovered=False, window=None):
+        cutoff, end = history_window() if window is None else window
         if not message.date or not cutoff <= message.date < end or message.chat_id is None:
             return False
         # Service events (joins, pins, etc.) are not ordinary messages.
@@ -297,3 +297,54 @@ class TelegramAccountWorker:
         print(f'[telegram-account] bounded yesterday/today recovery: dialogs={dialogs}/'
               f'{config.TELEGRAM_USER_DIALOG_LIMIT}, inspected={messages}, stored={stored}, '
               f'message-cap dialogs={capped}; caps may omit messages; no full history paging')
+
+
+async def import_history(start, end):
+    """Archive all personal dialogs in aware [start, end); return stored count.
+
+    Requires an existing authorized personal session. No login, live listeners,
+    AI, recovery watermarks or configured recovery caps. Errors propagate.
+    """
+    from connectors.storage import FileLock
+
+    if any(not isinstance(d, datetime) or d.utcoffset() is None for d in (start, end)):
+        raise ValueError('History bounds must be timezone-aware datetimes')
+    start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+    if start >= end:
+        raise ValueError('History start must precede end')
+    path = session_path()
+    if not path.is_file():
+        raise FileNotFoundError('Existing personal Telegram session required')
+    api_id, api_hash = api_credentials()
+    with FileLock(str(path) + '.owner.lock', blocking=False):
+        # Recheck under the same ownership lock as the live worker.
+        if not path.is_file():
+            raise FileNotFoundError('Existing personal Telegram session required')
+        from telethon import TelegramClient
+        secure_session(path)
+        client = TelegramClient(str(path), api_id, api_hash,
+                                receive_updates=False, flood_sleep_threshold=0)
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                raise PermissionError('Telegram session is not authorized')
+            me = await client.get_me()
+            if me is None or me.bot:
+                raise PermissionError('Personal Telegram session required')
+            worker = TelegramAccountWorker()
+            worker.client = client
+            worker.account = f'user:{me.id}'
+            stored = 0
+            async for dialog in client.iter_dialogs(limit=None):
+                async for message in client.iter_messages(dialog.entity, limit=None,
+                                                           offset_date=end):
+                    if message.date and message.date < start:
+                        break
+                    stored += bool(await worker.archive(message, recovered=True,
+                                                        window=(start, end)))
+            return stored
+        finally:
+            try:
+                await client.disconnect()
+            finally:
+                secure_session(path)

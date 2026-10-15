@@ -355,6 +355,18 @@ def launch(args):
                 return 1
             if confirm('Avviare ora app?'):
                 start()
+        elif args.command == 'import-history':
+            if not state.get('complete'):
+                raise ValueError('Completare setup prima di importare lo storico')
+            print('Importazione una tantum: app fermata per liberare le sessioni. Riavviarla con up al termine.')
+            compose('stop', 'app')
+            repair_whatsapp()
+            compose('build', 'app')
+            database()
+            command = ['run', '--rm', '--no-deps', 'app', 'python', 'historical_import.py']
+            if args.days is not None:
+                command += ['--days', str(args.days)]
+            return compose(*command, check=False).returncode
         elif args.command == 'up':
             if not state.get('complete'):
                 raise ValueError('Eseguire setup e confermare prima di avviare app')
@@ -379,8 +391,11 @@ def launch(args):
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['setup', 'configure', 'status', 'up', 'down', 'logs', 'doctor', '_wizard', '_configure', '_probe'])
+    parser.add_argument('command', choices=['setup', 'configure', 'import-history', 'status', 'up', 'down', 'logs', 'doctor', '_wizard', '_configure', '_probe'])
+    parser.add_argument('--days', type=int, help='Giorni da importare con import-history (1–3650)')
     args = parser.parse_args()
+    if args.days is not None and (args.command != 'import-history' or not 1 <= args.days <= 3650):
+        parser.error('--days richiede import-history e un valore tra 1 e 3650')
     try:
         return wizard(edit=args.command == '_configure') if args.command in ('_wizard', '_configure') else probe() if args.command == '_probe' else launch(args)
     except (KeyboardInterrupt, EOFError):

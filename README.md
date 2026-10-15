@@ -1,3 +1,34 @@
+# Importazione storica una tantum
+
+Il comando `sh ./pi-secretary import-history --days 30` importa nell'archivio DB
+le comunicazioni degli ultimi 30 giorni dalle connessioni abilitate. Omettendo
+`--days`, lo script chiede il numero di giorni (default 14; ammessi 1–3650).
+L'intervallo è calcolato al momento dell'avvio, include l'inizio ed esclude la fine.
+
+Il comando ferma l'app per liberare le sessioni Telegram/WhatsApp, ricostruisce
+l'immagine e avvia un container temporaneo. **Al termine l'app resta ferma**:
+riavviarla con `sh ./pi-secretary up`. Non eseguire altri runtime sulle stesse
+sessioni durante l'importazione. In installazioni Python dirette è disponibile
+`python historical_import.py --days 30`, dopo aver fermato il runtime.
+
+- Email: INBOX e cartella Inviate riconosciuta, allegati inclusi, senza segnare
+  i messaggi come letti. Cartella Inviate assente o errori producono un esito
+  incompleto; i dati già acquisiti restano salvati.
+- Telegram personale: tutte le conversazioni accessibili e paginazione fino
+  all'inizio dell'intervallo; allegati rappresentati come metadati, non scaricati.
+- WhatsApp: solo storico sincronizzato disponibile sul dispositivo collegato,
+  non garanzia di recupero completo dal server.
+- Telegram bot: lo storico passato non è disponibile tramite Bot API.
+- Calendar: escluso perché contiene appuntamenti, non comunicazioni.
+
+Nessuna analisi AI, comando, risposta o scrittura Calendar viene avviata dallo
+script. I normali flussi, una volta riattivati, possono analizzare nuovamente
+messaggi recuperati; i dati importati possono comparire nei digest successivi.
+Le identità native evitano duplicati in archivio: i conteggi includono anche
+messaggi già presenti. Nessun watermark di recupero ordinario viene avanzato.
+Rieseguire dopo un errore è sicuro. Codici di uscita: 0 completato, 1 errore
+(anche parziale), 2 copertura limitata/non supportata, 130 annullato.
+
 # Contratto onboarding Docker
 
 I setup opzionali restituiscono `0` (ready), `2` (skipped/consenso rifiutato),

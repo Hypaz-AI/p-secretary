@@ -34,7 +34,8 @@ class AgentIdentityTests(unittest.TestCase):
         with patch.object(config, "AGENT_NAME", "Ada"), patch(
             "db.communications_for_day", return_value=[]
         ), patch("db.upcoming_appointments", return_value=[]), patch(
-            "db.recent_notes", return_value=[]
+            "db.personal_memories", return_value=[]
+        ), patch("brain.remember_user", return_value="nessuna modifica necessaria"
         ), patch("db.all_rules", return_value=[]), patch(
             "connectors.gcal.is_active", return_value=False
         ), patch("brain.urllib.request.urlopen", return_value=response) as request:

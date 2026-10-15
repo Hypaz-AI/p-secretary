@@ -106,8 +106,22 @@ el('config-load').onclick = async () => {
         groups.set(field.group, details); el('config-fields').append(details);
       }
       const label = node('label', fieldLabel(field.key));
-      const input = node(field.key === 'GCAL_SERVICE_ACCOUNT_JSON' ? 'textarea' : 'input', '');
-      if (input.tagName === 'INPUT') input.type = field.secret ? 'password' : 'text';
+      const input = node(field.type === 'select' ? 'select' : field.type === 'textarea' ? 'textarea' : 'input', '');
+      if (input.tagName === 'INPUT') input.type = field.secret ? 'password' : (field.type || 'text');
+      if (input.tagName === 'SELECT') {
+        const current = field.value || '';
+        const empty = node('option', 'Non impostato · default applicazione/preset'); empty.value = ''; input.append(empty);
+        empty.disabled = !/^EMAIL\d+_AUTH$/.test(field.key);
+        (field.options || []).forEach(value => {
+          const option = node('option', value === 'true' ? 'Sì (true)' : value === 'false' ? 'No (false)' : value);
+          option.value = value; input.append(option);
+        });
+        // Preserve legacy values on load: never silently rewrite an unknown value.
+        if (current && !(field.options || []).includes(current)) {
+          const legacy = node('option', `${current} · valore esistente non valido`); legacy.value = current; input.append(legacy);
+        }
+      }
+      ['min', 'max', 'step'].forEach(name => {if (field[name] !== undefined) input.setAttribute(name, field[name]);});
       input.autocomplete = 'off'; input.spellcheck = false;
       input.dataset.key = field.key; input.dataset.original = field.secret ? '' : (field.value || '');
       input.dataset.secret = String(field.secret);
@@ -116,6 +130,10 @@ el('config-load').onclick = async () => {
       input.disabled = !!field.readonly;
       input.placeholder = field.secret ? 'Incolla un nuovo valore solo per sostituire quello salvato' : 'Default applicazione';
       label.append(input);
+      if (field.description) {
+        const help = node('small', field.description); help.id = input.id + '-help';
+        input.setAttribute('aria-describedby', help.id); label.append(help);
+      }
       if (field.secret) label.append(node('small', field.configured ? '● Credenziale salvata · lascia vuoto per mantenerla' : '○ Nessuna credenziale salvata'));
       input.oninput = () => {editAgain(); el('config-status').textContent = `${Object.keys(pendingChanges()).length} modifiche da controllare · non ancora salvate`;};
       if (field.readonly) label.append(node('small', field.readonly));
@@ -139,7 +157,7 @@ el('config-form').onsubmit = async event => {
 };
 el('config-confirm').onclick = async () => {
   const changes = pendingChanges();
-  const inputs = [...el('config-fields').querySelectorAll('input,textarea')];
+  const inputs = [...el('config-fields').querySelectorAll('input,textarea,select')];
   if (!Object.keys(changes).length) {el('config-status').textContent = 'Nessuna modifica.'; return;}
   el('config-confirm').disabled = true; el('config-back').disabled = true; el('config-cancel').disabled = true;
   inputs.forEach(i => {i.dataset.locked = String(i.disabled); i.disabled = true;});

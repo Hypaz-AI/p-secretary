@@ -69,6 +69,56 @@ class AdminConfigTests(unittest.TestCase):
         self.assertEqual(self.client.post('/api/configuration', json=payload, headers=self.headers).status_code, 409)
         self.assertEqual(saved, self.path.read_bytes())
 
+    def test_metadata_covers_every_field_and_dynamic_group(self):
+        fields = {f['key']: f for f in self.client.get('/api/configuration').json['fields']}
+        for key, field in fields.items():
+            self.assertTrue(field['description'], key)
+            self.assertIn(field['type'], ('text', 'password', 'textarea', 'select', 'number', 'time', 'email'), key)
+            if field['secret']:
+                self.assertIn(field['type'], ('password', 'textarea'))
+                self.assertIsNone(field['value'])
+        self.assertEqual(fields['NOTIFY_PRIORITY_THRESHOLD']['options'], ['mai', 'alta', 'media', 'bassa'])
+        for key in ('GCAL_ENABLED', 'WHATSAPP_ENABLED', 'TELEGRAM_USER_ENABLED', 'DASHBOARD_COOKIE_SECURE'):
+            self.assertEqual(fields[key]['options'], ['true', 'false'])
+        self.assertEqual(fields['DIGEST_TIME']['type'], 'time')
+        for i in range(1, 51):
+            prefix = f'EMAIL{i}_'
+            self.assertEqual(fields[prefix + 'PROVIDER']['options'], list(config._EMAIL_PRESETS))
+            self.assertEqual(fields[prefix + 'AUTH']['options'], ['basic', 'oauth2'])
+            self.assertEqual(fields[prefix + 'ADDRESS']['type'], 'email')
+            for suffix in ('IMAP_PORT', 'SMTP_PORT'):
+                self.assertEqual(fields[prefix + suffix]['type'], 'number')
+                self.assertEqual(fields[prefix + suffix]['min'], 1)
+                self.assertEqual(fields[prefix + suffix]['max'], 65535)
+        for i in range(1, 5):
+            self.assertEqual(fields[f'INVOICE_ENTITY{i}_VAT']['type'], 'text')
+        for key in ('POLL_INTERVAL', 'GCAL_EVENT_DURATION', 'TELEGRAM_USER_DIALOG_LIMIT',
+                    'TELEGRAM_USER_MESSAGE_LIMIT', 'TELEGRAM_USER_RECOVERY_INTERVAL'):
+            self.assertEqual(fields[key]['type'], 'number')
+            self.assertEqual(fields[key]['step'], 1)
+
+    def test_enum_validation_precedes_network_and_keeps_file(self):
+        before = self.path.read_bytes()
+        with patch.object(admin, 'verify_email') as verify:
+            for key in ('EMAIL1_PROVIDER', 'EMAIL50_AUTH', 'NOTIFY_PRIORITY_THRESHOLD'):
+                self.assertEqual(self.post({key: 'unsupported'}).status_code, 400)
+            verify.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), before)
+        for threshold in ('mai', 'alta', 'media', 'bassa'):
+            self.assertEqual(self.post({'NOTIFY_PRIORITY_THRESHOLD': threshold}).status_code, 200)
+        with patch.object(admin, 'verify_email'):
+            self.assertEqual(self.post({'EMAIL50_PROVIDER': 'm365', 'EMAIL50_AUTH': 'oauth2'}).status_code, 200)
+
+    def test_frontend_metadata_and_select_lifecycle_contract(self):
+        script = (Path(__file__).parent / 'web' / 'app.js').read_text()
+        self.assertIn("field.type === 'select' ? 'select'", script)
+        self.assertIn('field.options || []', script)
+        self.assertIn('field.description', script)
+        self.assertIn("input.setAttribute('aria-describedby', help.id)", script)
+        self.assertIn("querySelectorAll('input,textarea,select')", script)
+        self.assertIn('i.value = i.dataset.original', script)
+        self.assertIn("i.value !== i.dataset.original", script)
+
     def test_failed_batch_keeps_file_environment_and_redacts_errors(self):
         before = self.path.read_bytes()
         response = self.post({'AGENT_NAME': 'New', 'OPENROUTER_API_KEY': 'CANDIDATE-SECRET'})

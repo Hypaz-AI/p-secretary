@@ -125,6 +125,100 @@ def json_identity(account, folder, validity, uid):
     return json.dumps([account, folder, validity, uid], separators=(',', ':'))
 
 
+def iter_history_messages(account, start, end):
+    """Yield INBOX and Sent in the aware half-open window [start, end).
+
+    Read-only and uncapped; failures propagate (including missing Sent or
+    undated messages), so callers cannot mistake an incomplete scan for success.
+    Date headers define message time, as in the existing email archive.
+    """
+    from datetime import datetime, timedelta, timezone
+    import re
+
+    if any(not isinstance(d, datetime) or d.utcoffset() is None for d in (start, end)):
+        raise ValueError('History bounds must be timezone-aware datetimes')
+    start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+    if start >= end:
+        raise ValueError('History start must precede end')
+    imap = _connect(account)
+    try:
+        candidates = ['"[Gmail]/Sent Mail"', '"[Gmail]/Posta inviata"',
+                      'Sent', '"Sent Items"', '"Sent Messages"', '"Posta inviata"']
+        status, folders = imap.list()
+        if status != 'OK':
+            raise RuntimeError('Unable to list IMAP folders')
+        for row in folders or []:
+            if not isinstance(row, bytes):
+                continue
+            match = re.match(rb'\(([^)]*)\)\s+(?:"[^"]*"|NIL)\s+(.+)$', row)
+            if match and b'\\sent' in match[1].lower().split():
+                candidates.insert(0, match[2].decode('ascii'))
+
+        def select(folder):
+            status, _ = imap.select(folder, readonly=True)
+            if status != 'OK':
+                raise RuntimeError('Unable to select IMAP folder: ' + folder)
+
+        # Resolve Sent before yielding anything, rather than silently omitting it.
+        sent = None
+        for folder in dict.fromkeys(candidates):
+            try:
+                select(folder)
+            except (imaplib.IMAP4.error, RuntimeError):
+                continue
+            sent = folder
+            break
+        if sent is None:
+            raise RuntimeError('Sent folder unavailable; history would be incomplete')
+
+        # SENT* searches use Date headers, not INTERNALDATE. Widen date-only
+        # bounds for timezone offsets; the precise UTC filter below is decisive.
+        def imap_date(d):
+            months = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
+            return f'{d.day:02d}-{months[d.month - 1]}-{d.year:04d}'
+
+        for folder, direction in (('INBOX', 'in'), (sent, 'out')):
+            select(folder)
+            validity_data = imap.response('UIDVALIDITY')[1]
+            if not validity_data or not validity_data[0]:
+                raise RuntimeError('Missing IMAP UIDVALIDITY: ' + folder)
+            validity = validity_data[0].decode('ascii')
+            status, data = imap.uid('search', None, 'SENTSINCE',
+                                    imap_date(start - timedelta(days=2)),
+                                    'SENTBEFORE', imap_date(end + timedelta(days=2)))
+            if status != 'OK' or not data or not isinstance(data[0], bytes):
+                raise RuntimeError('IMAP history search failed: ' + folder)
+            for uid in data[0].split():
+                status, data = imap.uid('fetch', uid, '(BODY.PEEK[])')
+                if status != 'OK':
+                    raise RuntimeError('IMAP history fetch failed: ' + folder)
+                raw = next((item[1] for item in data or []
+                            if isinstance(item, tuple) and len(item) > 1
+                            and isinstance(item[1], bytes)), None)
+                if raw is None:
+                    raise RuntimeError('Missing IMAP message body: ' + folder)
+                entry = _parse_msg(raw, account)
+                ts = parse_email_datetime(entry['date'])
+                if ts is None:
+                    raise ValueError('History message has no timezone-aware Date')
+                if not start <= datetime.fromisoformat(ts).astimezone(timezone.utc) < end:
+                    continue
+                entry.update(uid=uid.decode('ascii'), direction=direction, ts=ts)
+                entry['metadata'] = {'account': account['address'].lower(),
+                                     'folder': folder, 'uidvalidity': validity,
+                                     'uid': entry['uid'], 'message_id': entry['message_id'],
+                                     'direction': direction}
+                entry['source_id'] = json_identity(account['address'].lower(), folder,
+                                                    validity, entry['uid'])
+                yield entry
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass  # Do not mask a scan error or generator cancellation.
+
+
 def fetch_day_messages(account: dict, day: str, historical: bool = False) -> list:
     """Rilegge dalla casella TUTTE le email di un giorno (default: oggi),
     ricevute E inviate, per il digest serale. `day` = 'YYYY-MM-DD'."""

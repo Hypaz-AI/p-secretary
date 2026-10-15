@@ -242,6 +242,38 @@ def recent_notes(limit: int = 5) -> list:
         return [r[0] for r in rows]
 
 
+def personal_memories() -> list:
+    """Tutta la memoria personale, anche dopo riavvii o lunghi periodi."""
+    with _conn() as conn:
+        rows = conn.execute("SELECT id, text FROM notes ORDER BY id").fetchall()
+        return [dict(id=row[0], text=row[1]) for row in rows]
+
+
+def apply_personal_memories(changes: list, known_ids: set) -> int:
+    """Applica solo modifiche validate, atomicamente e senza duplicati esatti."""
+    changed = 0
+    with _conn() as conn, conn.transaction():
+        conn.execute('SELECT pg_advisory_xact_lock(73190422)')
+        for change in changes:
+            operation = change['operation']
+            identity = change.get('id')
+            text = change.get('text', '').strip()
+            if operation == 'add':
+                row = conn.execute(
+                    '''INSERT INTO notes(text) SELECT %s WHERE NOT EXISTS
+                       (SELECT 1 FROM notes WHERE lower(trim(text))=lower(trim(%s)))
+                       RETURNING id''', (text, text)).fetchone()
+                changed += bool(row)
+            elif identity in known_ids:
+                if operation == 'update':
+                    result = conn.execute('UPDATE notes SET text=%s WHERE id=%s AND text<>%s',
+                                          (text, identity, text))
+                else:
+                    result = conn.execute('DELETE FROM notes WHERE id=%s', (identity,))
+                changed += result.rowcount
+    return changed
+
+
 # ------------------------------------------------------------------ regole ----
 def add_rule(pattern: str, instruction: str, taught_by: str = "utente") -> int:
     """Regola insegnata dall'utente: pattern + istruzione."""

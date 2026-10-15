@@ -40,6 +40,88 @@ INTERACTIVE = {
 }
 
 
+def field_metadata(key):
+    """Public, static UI hints: never derive defaults/help from saved credentials."""
+    descriptions = {
+        'AGENT_NAME': 'Nome con cui si presenta l’assistente.',
+        'OPENROUTER_API_KEY': 'Chiave da openrouter.ai/keys; controllare credito e limiti di spesa.',
+        'OPENROUTER_MODEL': 'Identificativo provider/modello OpenRouter per il modello principale.',
+        'OPENROUTER_AUDIO_MODEL': 'Modello OpenRouter che trascrive gli audio Telegram in testo.',
+        'OPENROUTER_IMAGE_MODEL': 'Modello OpenRouter che descrive le immagini Telegram al modello principale.',
+        'DATABASE_URL': 'URI PostgreSQL con credenziali percent-encoded. Verifica web solo host pubblici senza query; DB privati e opzioni TLS dal terminale. Nessuna migrazione automatica.',
+        'TELEGRAM_BOT_TOKEN': 'Token BotFather per dialogo e report; non legge l’account personale. Un nuovo bot richiede autorizzazione da terminale.',
+        'TELEGRAM_CHAT_ID': 'Chat privata del proprietario autorizzato con setup_telegram.py.',
+        'TELEGRAM_USER_ENABLED': 'Abilita la lettura dell’account personale dopo login MTProto da terminale.',
+        'TELEGRAM_API_ID': 'ID numerico da my.telegram.org; distinto dal token del bot.',
+        'TELEGRAM_API_HASH': 'API hash da my.telegram.org; non inserire codici login o password 2FA.',
+        'TELEGRAM_PHONE': 'Numero dell’account personale con prefisso internazionale.',
+        'TELEGRAM_USER_SESSION': 'File di sessione privato creato dal login; vuoto usa il percorso predefinito.',
+        'TELEGRAM_USER_DIALOG_LIMIT': 'Numero massimo di chat per passata di recupero di ieri/oggi; non è un import storico completo.',
+        'TELEGRAM_USER_MESSAGE_LIMIT': 'Numero massimo di messaggi per chat e passata di recupero di ieri/oggi.',
+        'TELEGRAM_USER_RECOVERY_INTERVAL': 'Secondi tra i recuperi Telegram di ieri/oggi; rispetta i FloodWait.',
+        'WHATSAPP_ENABLED': 'Abilita il ponte whatsapp-web.js; autorizzazione QR da terminale.',
+        'GCAL_ENABLED': 'Abilita Google Calendar con service account IAM; nessun OAuth utente.',
+        'GCAL_CALENDAR_ID': 'ID esplicito del calendario condiviso con client_email, permesso di modifica; non usare primary.',
+        'GCAL_EVENT_DURATION': 'Durata predefinita degli appuntamenti, in minuti.',
+        'GCAL_SERVICE_ACCOUNT_JSON': 'Contenuto JSON della chiave IAM, non un percorso. Salvato privatamente con permessi 600; vuoto mantiene la chiave.',
+        'GCAL_SERVICE_ACCOUNT_FILE': 'Percorso della chiave IAM; vuoto usa il file predefinito nei dati persistenti.',
+        'TIMEZONE': 'Fuso IANA per appuntamenti e riepilogo, ad esempio Europe/Rome (gestisce l’ora legale).',
+        'LANGUAGE': 'Lingua dell’assistente, ad esempio it per italiano o en per inglese.',
+        'DIGEST_TIME': 'Ora locale HH:MM del riepilogo delle ultime 24 ore, nel fuso configurato; richiede il bot Telegram.',
+        'NOTIFY_PRIORITY_THRESHOLD': 'Notifiche ordinarie: mai = solo digest; alta = solo priorità alta; media/bassa includono priorità inferiori. Le emergenze AI scavalcano sempre la soglia, anche mai.',
+        'POLL_INTERVAL': 'Secondi tra i controlli email; 300 corrisponde a 5 minuti.',
+        'INVOICE_DIR': 'Cartella fatture: <entità>/<aaaa-mm>/<nome>.pdf; vuoto usa il percorso predefinito.',
+        'DATA_DIR': 'Cartella dati persistenti per appuntamenti e note; vuoto usa il percorso predefinito.',
+        'PI_SECRETARY_CONFIG_FILE': 'Percorso del file di configurazione privato scelto dal deployment.',
+        'DASHBOARD_CREDENTIAL_FILE': 'File privato delle credenziali dashboard; non contiene la password Linux.',
+        'DASHBOARD_BIND': 'Indirizzo di ascolto; 0.0.0.0 espone sulla rete. HTTP solo su reti fidate.',
+        'DASHBOARD_PORT': 'Porta HTTP dashboard; le porte privilegiate richiedono configurazione esterna.',
+        'DASHBOARD_HOSTNAME': 'Nome host della dashboard, ad esempio pi-secretary.local.',
+        'DASHBOARD_COOKIE_SECURE': 'true solo con accesso HTTPS; false per HTTP locale.',
+        'WA_CHROMIUM_PATH': 'Percorso del Chromium di sistema usato dal ponte WhatsApp.',
+    }
+    result = {'type': 'password' if secret(key) else 'text', 'description': descriptions.get(key, '')}
+    email = re.fullmatch(r'EMAIL\d+_(.+)', key)
+    invoice = re.fullmatch(r'INVOICE_ENTITY\d+_(.+)', key)
+    if email:
+        suffix = email[1]
+        result['description'] = {
+            'NAME': 'Nome riconoscibile della casella (fino a 50 account).',
+            'PROVIDER': 'Preset server: Gmail usa password per app; Outlook personale e Microsoft 365 richiedono OAuth da terminale; OVH usa la password casella; custom richiede gli host.',
+            'ADDRESS': 'Indirizzo email completo della casella.',
+            'PASSWORD': 'Password per app Gmail o password casella OVH/custom; Microsoft richiede OAuth, non password.',
+            'AUTH': 'basic = password; oauth2 = autorizzazione Microsoft con setup_ms_auth.py da terminale. Vuoto usa il preset provider.',
+            'CLIENT_ID': 'ID applicazione OAuth Microsoft personalizzata, facoltativo; non un client secret.',
+            'IMAP_HOST': 'Host IMAP senza https://; omettere per usare il preset. Host custom verificabili solo da terminale.',
+            'SMTP_HOST': 'Host SMTP senza https://; omettere per usare il preset. Host custom verificabili solo da terminale.',
+            'IMAP_PORT': 'Porta IMAP intera; preset 993 (IMAPS). Verifica web solo sulla porta 993.',
+            'SMTP_PORT': 'Porta SMTP intera; preset 587 (STARTTLS). Verifica web su 465 TLS o 587 STARTTLS.',
+        }[suffix]
+        if suffix == 'ADDRESS':
+            result['type'] = 'email'
+        if suffix in ('PROVIDER', 'AUTH'):
+            result.update(type='select', options=list(config._EMAIL_PRESETS) if suffix == 'PROVIDER' else ['basic', 'oauth2'])
+    if invoice:
+        result['description'] = {
+            'NAME': 'Nome cartella usato dall’AI per intestare le fatture; solo lettere ASCII, cifre, trattini e underscore. Massimo 4 entità.',
+            'VAT': 'Partita IVA come indizio per l’AI; formato consigliato IT + 11 cifre. È testo: conserva zeri iniziali e prefisso.',
+            'DESC': 'Descrizione dell’entità per aiutare l’AI a classificare le fatture.',
+        }[invoice[1]]
+    if key in ('GCAL_ENABLED', 'WHATSAPP_ENABLED', 'TELEGRAM_USER_ENABLED', 'DASHBOARD_COOKIE_SECURE'):
+        result.update(type='select', options=['true', 'false'])
+    if key == 'NOTIFY_PRIORITY_THRESHOLD':
+        result.update(type='select', options=['mai', 'alta', 'media', 'bassa'])
+    if key.endswith(('_PORT', '_LIMIT', '_INTERVAL', '_DURATION')) or key == 'TELEGRAM_API_ID':
+        result.update(type='number', min=1, max=65535, step=1)
+        if key == 'TELEGRAM_API_ID':
+            result.pop('max')
+    if key == 'DIGEST_TIME':
+        result['type'] = 'time'
+    if key == 'GCAL_SERVICE_ACCOUNT_JSON':
+        result['type'] = 'textarea'
+    return result
+
+
 def schema():
     groups = {
         'Identità e AI': ['AGENT_NAME', 'OPENROUTER_API_KEY', 'OPENROUTER_MODEL',
@@ -57,7 +139,8 @@ def schema():
             'IMAP_HOST', 'IMAP_PORT', 'SMTP_HOST', 'SMTP_PORT')]
     for i in range(1, 5):
         groups[f'Entità fatture {i}'] = [f'INVOICE_ENTITY{i}_{s}' for s in ('NAME', 'VAT', 'DESC')]
-    return {key: {'group': group, 'secret': secret(key)} for group, keys in groups.items() for key in keys}
+    return {key: {'group': group, 'secret': secret(key), **field_metadata(key)}
+            for group, keys in groups.items() for key in keys}
 
 
 def secret(key):
@@ -203,6 +286,10 @@ def verify_calendar(values, raw):
 
 def validate(changes, values):
     for key, value in changes.items():
+        spec = field_metadata(key)
+        if (spec['type'] == 'select' and value not in spec['options']
+            and not (re.fullmatch(r'EMAIL\d+_AUTH', key) and value == '')):
+            raise ValueError('Scelta non valida: ' + key)
         if not valid_preference(key, value):
             raise ValueError('Preferenza non valida: ' + key)
         if key in ('GCAL_ENABLED',) and value not in ('true', 'false'):
