@@ -1,3 +1,9 @@
+# Operational reference (advanced)
+
+For a new installation, start with the Italian [quick start](README.md) and
+[Docker guide](docker/README.md). The host/virtualenv deployment section below
+is an alternative for operators, not an additional step after Docker setup.
+
 ## Email attachment filesystem storage
 
 New email attachments (PDFs and all other binary attachments, including empty
