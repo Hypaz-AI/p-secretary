@@ -12,6 +12,7 @@ import secrets
 import subprocess
 import sys
 from urllib.parse import quote, urlsplit
+from setup_ui import guide, section
 
 ROOT = Path(__file__).resolve().parent
 
@@ -104,6 +105,7 @@ def prompt_missing(config, key, label, secret=False, choices=None, edit=False):
 
 
 def configure_email(config, edit=False):
+    guide('email')
     print('Email: fino a 50 account; password/app password con input nascosto.')
     add_new = True
     for i in range(1, 51):
@@ -117,6 +119,7 @@ def configure_email(config, edit=False):
                 continue
         provider = prompt_missing(config, prefix + 'PROVIDER', 'Provider: gmail/outlook/m365/zimbra_ovh/custom',
                                   choices=('gmail', 'outlook', 'm365', 'zimbra_ovh', 'custom'), edit=edit)
+        guide('outlook' if provider == 'm365' else provider or 'custom')
         prompt_missing(config, prefix + 'NAME', f'Nome account {i}', edit=edit)
         prompt_missing(config, prefix + 'ADDRESS', f'Indirizzo email {i}', edit=edit)
         if provider not in ('outlook', 'm365'):
@@ -127,6 +130,7 @@ def configure_email(config, edit=False):
 
 
 def configure_preferences(config, edit=False):
+    guide('preferences')
     for key, label in [('TIMEZONE', 'Timezone (es. Europe/Rome)'), ('LANGUAGE', 'Lingua (es. it)'),
                        ('OPENROUTER_MODEL', 'Modello OpenRouter'), ('DIGEST_TIME', 'Ora digest (HH:MM)')]:
         prompt_missing(config, key, label, edit=edit)
@@ -145,6 +149,7 @@ def configure_preferences(config, edit=False):
 def wizard(edit=False):
     # Import only inside the container: each setup gets a fresh config module.
     import config
+    guide('welcome')
     directory = config.CONFIG_FILE.parent
     state_file = directory / 'progress.json'
     state = progress(state_file)
@@ -160,6 +165,8 @@ def wizard(edit=False):
             sections = [{ '1': 'identity', '2': 'preferences', '3': 'email', '4': 'database', '5': 'setups'}[choice]]
     state['complete'] = False
     private_write(state_file, json.dumps(state))
+    if not config.DATABASE_URL or 'database' in sections:
+        guide('database')
     if not config.DATABASE_URL:
         external = getpass.getpass('URI PostgreSQL esterno (INVIO = DB locale): ').strip()
     else:
@@ -169,6 +176,8 @@ def wizard(edit=False):
         config.set_env('DATABASE_URL', uri)
     state['database'] = mode
     private_write(state_file, json.dumps(state))
+    if 'identity' in sections:
+        guide('identity')
     for key, label, secret in [('AGENT_NAME', 'Nome agente', False),
                                ('OPENROUTER_API_KEY', 'Chiave OpenRouter', True)]:
         if 'identity' in sections:
@@ -192,6 +201,7 @@ def wizard(edit=False):
     for name, script in setups:
         if 'setups' in sections and confirm('Eseguire setup ' + name + (f' ({state[name]})' if state.get(name) else '') + '?'):
             if name == 'telegram_account':
+                guide('telegram_account')
                 for key, label, secret in [('TELEGRAM_API_ID', 'Telegram personale API_ID', False),
                                            ('TELEGRAM_API_HASH', 'Telegram personale API_HASH', True),
                                            ('TELEGRAM_PHONE', 'Telefono con prefisso internazionale', False)]:
@@ -213,7 +223,8 @@ def wizard(edit=False):
             private_write(state_file, json.dumps(state))
         else:
             state.setdefault(name, 'skipped')
-    print('Configurazione (non readiness runtime):')
+    guide('dashboard')
+    section('Riepilogo · configurazione, non readiness runtime')
     for name, _ in setups:
         print(f'  {name}: {state[name]}')
     if not confirm('Confermare la configurazione (nessun avvio automatico)?'):

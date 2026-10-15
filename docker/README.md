@@ -63,6 +63,12 @@ salvate subito in `config/secretary.env`, lo stato non segreto in
 richiedono consenso. Inserisci segreti solo nel terminale o nelle pagine
 ufficiali, mai in chat.
 
+Ogni sezione mostra istruzioni italiane numerate e link ufficiali per creare
+credenziali e completare l'accesso. I titoli usano colori ANSI solo su TTY con
+TERM compatibile; `NO_COLOR` (anche vuoto), TERM=dumb e output rediretto li
+disattivano. Nessuna dipendenza aggiuntiva. Le guide non aggiungono richieste
+di input né eseguono login autonomamente.
+
 URI vuoto significa PostgreSQL 16 locale, senza porta DB pubblicata, con
 password generata in `config/postgres.env`. L'URI esterno è richiesto con
 input nascosto: usa un DB dedicato raggiungibile dal container. `localhost`
@@ -75,9 +81,9 @@ verifica `SELECT 1` e avvio app. `doctor` non applica migrazioni; l'app sì.
 
 Riprendi un'interruzione con `setup`, oppure usa `configure` per riconfigurare.
 `configure` chiede conferma prima di fermare l'app; anche `setup` lo fa se lo
-stato era completo. **Non sono editor dei valori esistenti**: le chiavi salvate,
-anche vuote, non sono riproposte; i valori già disponibili nell'ambiente possono
-anch'essi evitare una domanda. I login già eseguiti sono riproposti e possono
+stato era completo. `configure` permette di scegliere una sezione e modificare
+i valori: INVIO conserva quelli salvati. `setup` riprende i valori validi già
+salvati e richiede quelli mancanti. I login già eseguiti sono riproposti e possono
 essere accettati di nuovo; lo stato salvato non prova la validità attuale dei token.
 
 Per correggere valori esistenti apri privatamente `config/secretary.env` con un
@@ -87,19 +93,17 @@ per le chiavi, **non copiarla integralmente**: contiene percorsi e istruzioni
 del vecchio deployment host. Gli script possono stampare «.env» o suggerire
 systemd: in Docker scrivono in `secretary.env`, gestisci l'app col launcher.
 
-Il file è montato, ma viene letto solo all'avvio del processo. `up` non forza
-la ricreazione di un container già attivo. Dopo modifiche usa:
+Il file è montato, ma viene letto solo all'avvio del processo. `up` forza
+la ricreazione dell'app e verifica prima il DB. Dopo modifiche usa:
 
 ```sh
-sh ./pi-secretary down
 sh ./pi-secretary up
 ```
 
-Si interrompe anche il DB locale, conservandone il volume. Non cambiare
+Non cambiare
 `postgres.env` dopo l'inizializzazione: PostgreSQL non applica automaticamente
-nuove password. Cambiare l'URI a mano non aggiorna la modalità in `progress.json`:
-il passaggio locale/esterno richiede revisione consapevole di configurazione e
-stato, non è una migrazione automatica del wizard.
+nuove password. Il launcher rileva la modalità locale/esterna dall'URI salvato;
+il cambio di destinazione non migra i dati: va pianificato separatamente.
 
 ## Collegare gli account
 
@@ -149,8 +153,13 @@ Il wizard richiede anche telefono internazionale; senza tutti e tre rinvia il
 login. Inserisci codice e password 2FA solo nel terminale. La sessione concede
 tecnicamente accesso all'account: proteggila come una password.
 
-Il setup **non abilita il connettore**: imposta `TELEGRAM_USER_ENABLED=true`
-nel file privato, usa `down`/`up` e verifica l'interruttore dashboard.
+Il setup chiede un consenso finale prima di impostare `TELEGRAM_USER_ENABLED=true`;
+INVIO rifiuta l'acquisizione (codice di uscita 2). Il codice di accesso arriva
+normalmente nella chat di servizio ufficiale «Telegram» su un dispositivo già
+collegato, anche tra le chat archiviate; gli SMS non sono garantiti. Non usare
+codici di my.telegram.org, API hash o token bot. Con `q` esci senza tentare codici
+casuali; controlla numero e account prima di riprovare, evitando richieste ravvicinate.
+Ricarica successivamente con `up` e verifica l'interruttore dashboard.
 Archivia testo/didascalie in entrata/uscita, non risponde ai contatti, non esegue
 i loro comandi, non segna letto né scarica allegati. Nessuna analisi AI per
 messaggio, ma il digest può usare il testo. «Sola lettura» è una scelta del codice,

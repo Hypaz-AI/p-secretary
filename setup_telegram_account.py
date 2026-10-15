@@ -8,6 +8,7 @@ import sys
 import config
 from connectors.telegram_account import api_credentials, secure_session, session_path
 from connectors.storage import FileLock
+from setup_ui import guide
 
 
 def login_code():
@@ -38,13 +39,13 @@ async def authorize():
         print('Controlla il numero configurato nel wizard e apri il relativo account Telegram.')
         print('Se questa sessione è già autorizzata, non sarà richiesto alcun codice.')
         await client.start(
-            phone=lambda: config.TELEGRAM_PHONE or getpass.getpass('Phone (+country code): '),
+            phone=lambda: config.TELEGRAM_PHONE or getpass.getpass('Telefono con prefisso internazionale: '),
             code_callback=login_code,
             password=lambda: getpass.getpass('Password verifica in due passaggi Telegram (impostata da te, non un codice): '))
         me = await client.get_me()
         if me.bot:
-            raise ValueError('Personal account required, not a bot')
-        print('Session authorized. Enable ingestion only with explicit consent.')
+            raise ValueError('Serve un account personale, non un bot')
+        print('Sessione autorizzata. L’acquisizione richiede il consenso esplicito finale.')
     finally:
         await client.disconnect()
         secure_session(path)
@@ -52,15 +53,16 @@ async def authorize():
 
 def main():
     if not sys.stdin.isatty():
-        print('Run this setup manually in an interactive terminal, never through systemd.')
+        print('Esegui questo setup manualmente in un terminale interattivo, mai tramite un servizio.')
         return 1
+    guide('telegram_account')
     # CLI-only umask also protects SQLite journal files on initial creation.
     os.umask(0o077)
     try:
         with FileLock(str(session_path()) + '.owner.lock', blocking=False):
             asyncio.run(authorize())
     except (Exception, KeyboardInterrupt) as exc:
-        print(f'Authorization failed ({type(exc).__name__}). Check credentials/dependencies; no secrets logged.')
+        print(f'Autorizzazione fallita ({type(exc).__name__}). Verifica credenziali e dipendenze; nessun segreto registrato.')
         return 1
     if input('Abilitare acquisizione Telegram personale? [s/N] ').strip().lower() not in ('s', 'si', 'sì', 'y', 'yes'):
         return 2

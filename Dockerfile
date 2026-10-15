@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY data/package.json data/package-lock.json ./node/
 RUN cd node && npm ci --omit=dev && npm cache clean --force
 COPY actions.py brain.py config.py dashboard.py db.py digest.py documents.py email_attachments.py file_browser.py flows.py invoices.py jobs.py main.py message_store.py pipeline.py recovery.py installer.py ./
-COPY setup_gcal.py setup_ms_auth.py setup_telegram.py setup_telegram_account.py setup_whatsapp.py ./
+COPY setup_ui.py setup_gcal.py setup_ms_auth.py setup_telegram.py setup_telegram_account.py setup_whatsapp.py ./
 COPY connectors/ ./connectors/
 COPY web/ ./web/
 COPY docker/entrypoint.py ./docker/entrypoint.py

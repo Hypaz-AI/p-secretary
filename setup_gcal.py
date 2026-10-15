@@ -34,6 +34,7 @@ from datetime import datetime, timedelta
 
 import config
 from connectors import gcal
+from setup_ui import guide
 
 
 def verify_write():
@@ -57,9 +58,7 @@ def verify_write():
 
 def _setup() -> int:
     force = "--force" in sys.argv[1:]
-    print("=" * 55)
-    print("  Setup Google Calendar — PI-SECRETARY")
-    print("=" * 55)
+    guide('gcal')
 
     # --- modalità 1: service account -------------------------------------
     sa = gcal._load_service_account()
@@ -101,6 +100,7 @@ def _setup() -> int:
     print("nessuna scadenza): vedi i punti 1a-1d in testa a questo script.")
     print("\nAltrimenti prosegui con il login OAuth2 (scade ogni 7 giorni")
     print("finché l'app non è pubblicata in produzione).")
+    guide('gcal_oauth')
     proceed = input("\nProcedo con il login OAuth2? [s/N] ").strip().lower()
     if proceed not in ("s", "si", "sì", "y", "yes"):
         print("\nPer il service account: copia la chiave JSON in")

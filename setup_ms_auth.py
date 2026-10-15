@@ -13,9 +13,11 @@ import sys
 
 import config
 from connectors import ms_oauth
+from setup_ui import guide, section
 
 
 def main() -> int:
+    guide('microsoft')
     force = "--force" in sys.argv[1:]
     accounts = [a for a in config.EMAIL_ACCOUNTS if a.get("auth") == "oauth2"]
     if not accounts:
@@ -25,7 +27,7 @@ def main() -> int:
     print(f"Account Microsoft da autorizzare: {len(accounts)}")
     failed = False
     for acc in accounts:
-        print(f"\n{'=' * 55}\n{acc['name']} — {acc['address']}\n{'=' * 55}")
+        section(f"{acc['name']} — {acc['address']}")
         try:
             ms_oauth.authorize(acc, force=force)
         except Exception as exc:  # noqa: BLE001

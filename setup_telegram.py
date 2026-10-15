@@ -19,6 +19,7 @@ import urllib.request
 
 import config
 from connectors.storage import FileLock, bot_lock_path
+from setup_ui import guide
 
 
 def tg_call(token: str, method: str, params: dict = None) -> dict:
@@ -53,9 +54,7 @@ def warn_if_service_running() -> None:
 
 
 def main() -> None:
-    print("=" * 55)
-    print("  Setup bot Telegram — PI-SECRETARY")
-    print("=" * 55)
+    guide('telegram')
 
     print("\n1. Apri Telegram, cerca @BotFather e scrivi /newbot")
     print("2. Scegli un nome (es. 'Il mio segretario')")
@@ -116,8 +115,8 @@ def pair(token):
 
     if chat_id is None:
         print("\n⚠️  Nessun messaggio ricevuto entro 120 secondi.")
-        print("    Riprova più tardi o scrivi il chat_id a mano nel .env")
-        print("    (lo trovi su https://api.telegram.org/bot<TOKEN>/getUpdates)")
+        print("    Verifica la chat privata e il codice monouso, poi ripeti il setup.")
+        print("    Non inserire il token in URL del browser: potrebbe restare nella cronologia.")
         return 1
 
     config.set_env("TELEGRAM_BOT_TOKEN", token)

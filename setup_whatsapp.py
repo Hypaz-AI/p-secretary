@@ -19,12 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 from connectors.whatsapp import bridge_path, bridge_env, stop_process
 from connectors.storage import FileLock
+from setup_ui import guide
 
 
 def _setup() -> None:
-    print("=" * 55)
-    print("  Setup WhatsApp — PI-SECRETARY")
-    print("=" * 55)
+    guide('whatsapp')
 
     session_dir = config.DATA_DIR / "wa_session"
     media_dir = config.DATA_DIR / "wa_media"
