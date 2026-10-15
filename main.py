@@ -557,6 +557,8 @@ def main():
     web_server = dashboard.start()
     wa = WhatsAppBridge()
     personal = TelegramAccountWorker()
+    import platform_health
+    platform_health.register_workers(wa, personal)
 
     workers = [jobs.Worker('analysis', pipeline.analyze).start(),
                jobs.Worker('action', pipeline.action).start(),

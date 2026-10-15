@@ -34,6 +34,24 @@ function show(connected) {
   if (!connected) {el('config-fields').replaceChildren(); el('config-groups').replaceChildren(); el('config-form').hidden = true; el('config-save').hidden = true; configRevision = '';}
 }
 let configRevision = '';
+const healthLabels = {tested:'Verificato in rete', observed:'Solo stato osservato', disabled:'Disabilitato', unconfigured:'Non configurato', skipped:'Non eseguito', failed:'Verifica fallita', timeout:'Tempo scaduto'};
+el('health-check').onclick = async () => {
+  const button = el('health-check');
+  button.disabled = true;
+  el('health-results').setAttribute('aria-busy', 'true');
+  el('health-status').textContent = 'Verifica in corso… massimo circa 12 secondi. I risultati precedenti, se presenti, non sono aggiornati.';
+  try {
+    const result = await api('/api/platform-health', {});
+    el('health-results').replaceChildren(...result.results.map(check => {
+      const card = node('article', ''); card.className = 'health-card';
+      card.append(node('h3', check.label), node('strong', healthLabels[check.status] || 'Stato sconosciuto'),
+        node('p', check.explanation), node('small', `${new Date(check.checked_at).toLocaleString('it')} · ${check.latency_ms} ms`));
+      return card;
+    }));
+    el('health-status').textContent = `Controllo completato ${new Date(result.completed_at).toLocaleString('it')}. “Verificato” copre solo l’operazione indicata, non l’intero flusso. Attesa minima tra controlli: 30 secondi.`;
+  } catch (error) {el('health-status').textContent = `${error.message} I risultati precedenti non sono aggiornati.`;}
+  finally {button.disabled = false; el('health-results').setAttribute('aria-busy', 'false');}
+};
 const fieldNames = {AGENT_NAME:'Nome assistente', OPENROUTER_API_KEY:'Chiave API OpenRouter', OPENROUTER_MODEL:'Modello AI', DATABASE_URL:'Connessione PostgreSQL', TELEGRAM_BOT_TOKEN:'Token del bot', TELEGRAM_CHAT_ID:'Proprietario autorizzato', TELEGRAM_USER_ENABLED:'Account personale', TELEGRAM_API_ID:'ID applicazione Telegram', TELEGRAM_API_HASH:'Segreto applicazione Telegram', TELEGRAM_PHONE:'Numero di telefono', WHATSAPP_ENABLED:'Connessione WhatsApp', GCAL_ENABLED:'Abilita calendario', GCAL_CALENDAR_ID:'ID del calendario condiviso', GCAL_EVENT_DURATION:'Durata appuntamenti (minuti)', GCAL_SERVICE_ACCOUNT_JSON:'Nuova chiave service account (JSON)', TIMEZONE:'Fuso orario', LANGUAGE:'Lingua', DIGEST_TIME:'Orario riepilogo', NOTIFY_PRIORITY_THRESHOLD:'Priorità minima notifiche', POLL_INTERVAL:'Intervallo controllo (secondi)'};
 const suffixNames = {NAME:'Nome', PROVIDER:'Provider', ADDRESS:'Indirizzo email', PASSWORD:'Password per app', AUTH:'Metodo di accesso', CLIENT_ID:'ID applicazione OAuth', IMAP_HOST:'Server posta in arrivo', IMAP_PORT:'Porta IMAP', SMTP_HOST:'Server posta in uscita', SMTP_PORT:'Porta SMTP', VAT:'Partita IVA', DESC:'Descrizione'};
 const fieldLabel = key => fieldNames[key] || suffixNames[key.replace(/^(EMAIL\d+|INVOICE_ENTITY\d+)_/, '')] || key.toLowerCase().replaceAll('_', ' ');

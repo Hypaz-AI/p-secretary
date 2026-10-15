@@ -96,6 +96,15 @@ def create_app(auth=None):
     admin_config.register(app)
     sessions, attempts = {}, {}
     lock = threading.Lock()
+    from platform_health import HealthRunner
+    health_runner = HealthRunner()
+
+    @app.post('/api/platform-health')
+    def platform_health():
+        result = health_runner.run()
+        if result is None:
+            return jsonify(error='Verifica in corso o attesa di sicurezza: riprovare tra 30 secondi.'), 429, {'Retry-After': '30'}
+        return jsonify(result)
 
     @app.before_request
     def guard():
