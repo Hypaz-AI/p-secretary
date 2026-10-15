@@ -76,8 +76,11 @@ el('config-load').onclick = async () => {
         details.append(commands);
         const fields = result.fields.filter(f => f.group === field.group);
         const configured = fields.some(f => f.configured);
+        const identity = fields.find(f => /^EMAIL\d+_ADDRESS$|^INVOICE_ENTITY\d+_NAME$/.test(f.key));
+        const displayName = identity && identity.value ? `${field.group} · ${identity.value}` : field.group;
+        details.querySelector('h3').textContent = displayName;
         const button = node('button', ''); button.type = 'button'; button.className = 'integration-card';
-        button.append(node('strong', field.group), node('small', configured ? 'Impostazioni presenti · apri' : 'Da configurare · apri'));
+        button.append(node('strong', displayName), node('small', configured ? 'Impostazioni presenti · apri' : 'Da configurare · apri'));
         button.dataset.empty = String(/^(Email |Entità fatture )/.test(field.group) && !configured);
         button.setAttribute('aria-expanded', 'false');
         button.onclick = () => {selectedGroup = field.group; groups.forEach((section, name) => {section.hidden = name !== selectedGroup;}); document.querySelectorAll('#config-groups button').forEach(b => b.setAttribute('aria-expanded', String(b === button))); details.scrollIntoView({behavior:'smooth', block:'start'});};
