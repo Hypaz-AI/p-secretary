@@ -441,9 +441,12 @@ def check_telegram(state: dict):
             )
             continue
         # comandi rapidi / regole insegnate dall'utente
-        if m.get("text") and not m.get('attachments'):
+        from connectors import media_text
+        if (m.get("text") and not m.get('attachments')) or any(
+                media_text.kind(a) for a in m.get('attachments', [])):
             import jobs
-            jobs.submit('owner', f'owner:{mid}', {'text':m['text'], 'message_id':mid})
+            jobs.submit('owner', f'owner:{mid}', {'text':m.get('text', ''), 'message_id':mid,
+                                               'media': bool(m.get('attachments'))})
             continue
         # solo file/allegato senza testo: analisi normale (fattura ecc.)
         if not flows.enabled('telegram_bot'):
@@ -515,8 +518,16 @@ _owner_context = threading.local()
 
 def _owner_job(payload):
     _owner_context.message_id = payload['message_id']
-    if not _handle_user_command(payload['text']):
-        handle_user_chat(payload['text'])
+    text = payload['text']
+    if payload.get('media'):
+        import pipeline
+        from connectors import media_text
+        row, attachments = pipeline.load_message(payload['message_id'])
+        text = media_text.message_text(row[3], attachments)
+        # OCR must not turn image content into privileged slash commands/rules.
+        handle_user_chat(text)
+    elif not _handle_user_command(text):
+        handle_user_chat(text)
 
 
 def main():

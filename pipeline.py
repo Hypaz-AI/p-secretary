@@ -44,6 +44,9 @@ def analyze(payload):
     with db._conn() as conn:
         if conn.execute('SELECT 1 FROM message_analysis WHERE message_id=%s', (mid,)).fetchone():
             return
+    if channel.startswith('telegram'):
+        from connectors import media_text
+        body = media_text.message_text(body, attachments)
     verdict = brain.normalize_verdict(brain.analyze(subject, sender, body, channel, attachments))
     if verdict['category'] == 'errore':
         raise RuntimeError('Analysis unavailable')

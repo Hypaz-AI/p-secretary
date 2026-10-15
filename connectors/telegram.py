@@ -31,13 +31,20 @@ def _call(method: str, params: dict) -> dict:
         return json.loads(resp.read().decode())
 
 
-def _download(file_id: str, dest: Path) -> Path:
+def _download(file_id: str, dest: Path, max_bytes=None) -> Path:
     """Scarica un file dal bot e lo salva in dest."""
     info = _call("getFile", {"file_id": file_id})
     path = info["result"]["file_path"]
     url = f"https://api.telegram.org/file/bot{config.TELEGRAM_BOT_TOKEN}/{path}"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    urllib.request.urlretrieve(url, dest)
+    if max_bytes is None:
+        urllib.request.urlretrieve(url, dest)
+    else:
+        with urllib.request.urlopen(url, timeout=60) as response:
+            data = response.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError('Media oltre il limite di download')
+        dest.write_bytes(data)
     return dest
 
 
@@ -136,6 +143,28 @@ def _chat_name(chat: dict) -> str:
     return str(chat.get("id") or "")
 
 
+def _media_attachments(msg, download_dir):
+    """Download native voice/photo media locally; never send token-bearing URLs to AI."""
+    if not download_dir:
+        return []
+    media = msg.get('voice') or msg.get('audio')
+    mime = (media or {}).get('mime_type', 'audio/ogg')
+    suffix = mimetypes.guess_extension(mime) or '.ogg'
+    if not media and msg.get('photo'):
+        media = max(msg['photo'], key=lambda p: p.get('width', 0) * p.get('height', 0))
+        mime, suffix = 'image/jpeg', '.jpg'
+    if not media:
+        return []
+    from connectors.media_text import MAX_BYTES
+    if media.get('file_size', 0) > MAX_BYTES:
+        # Preserve a visible explanation without repeatedly downloading oversized media.
+        return []
+    filename = f"{Path(media['file_unique_id']).name}{suffix}"
+    dest = Path(download_dir) / filename
+    _download(media['file_id'], dest, max_bytes=MAX_BYTES)
+    return [{'filename': filename, 'content_type': mime, 'path': str(dest)}]
+
+
 def fetch_new_messages(offset: int, download_dir=None) -> tuple:
     """Legge i nuovi update. Ritorna (lista messaggi, nuovo offset).
 
@@ -174,6 +203,14 @@ def fetch_new_messages(offset: int, download_dir=None) -> tuple:
                 continue
             chat_id = str(msg["chat"]["id"])
             chat_name = _chat_name(msg.get("chat"))
+            try:
+                media_attachments = _media_attachments(msg, download_dir)
+            except Exception:
+                offset = update['update_id']
+                raise
+            text = msg.get('text') or msg.get('caption') or ''
+            if (msg.get('voice') or msg.get('audio') or msg.get('photo')) and not media_attachments:
+                text += '\n[Media non scaricato: limite 10 MiB o download non disponibile]'
             native = {'msg_date': dt.isoformat() if dt else None,
                 'source_id': json.dumps(['bot', config.TELEGRAM_BOT_TOKEN.split(':')[0], chat_id, msg.get('message_id')]),
                 'metadata': {'account': 'bot:' + config.TELEGRAM_BOT_TOKEN.split(':')[0],
@@ -191,8 +228,8 @@ def fetch_new_messages(offset: int, download_dir=None) -> tuple:
                     **native,
                     "chat_id": chat_id,
                     "from": who,
-                    "text": msg.get("text", ""),
-                    "attachments": [],
+                    "text": text,
+                    "attachments": list(media_attachments),
                     "unauthorized": True,
                 }
                 doc = msg.get("document")
@@ -215,8 +252,8 @@ def fetch_new_messages(offset: int, download_dir=None) -> tuple:
                 **native,
                 "chat_id": chat_id,
                 "from": _full_name(msg.get("from")),
-                "text": msg.get("text", ""),
-                "attachments": [],
+                "text": text,
+                "attachments": list(media_attachments),
             }
             doc = msg.get("document")
             if doc and download_dir:

@@ -42,7 +42,8 @@ INTERACTIVE = {
 
 def schema():
     groups = {
-        'Identità e AI': ['AGENT_NAME', 'OPENROUTER_API_KEY', 'OPENROUTER_MODEL'],
+        'Identità e AI': ['AGENT_NAME', 'OPENROUTER_API_KEY', 'OPENROUTER_MODEL',
+                  'OPENROUTER_AUDIO_MODEL', 'OPENROUTER_IMAGE_MODEL'],
         'Database': ['DATABASE_URL'],
         'Telegram e WhatsApp': ['TELEGRAM_BOT_TOKEN', *INTERACTIVE,
             'TELEGRAM_USER_DIALOG_LIMIT', 'TELEGRAM_USER_MESSAGE_LIMIT', 'TELEGRAM_USER_RECOVERY_INTERVAL'],

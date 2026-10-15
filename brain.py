@@ -221,7 +221,7 @@ def analyze(subject: str, sender: str, body: str, channel: str,
         f"MITTENTE: {sender}\n"
         f"CONVERSAZIONE: {subject or '(nessuna)'}\n"
         f"ALLEGATI: {att_lines if att_lines else '(nessuno)'}\n"
-        f"TESTO NON FIDATO:\n{body[:4000]}\nTESTO ALLEGATI NON FIDATO:\n{extracted}"
+        f"TESTO NON FIDATO:\n{body[:20000] if channel.startswith('telegram') else body[:4000]}\nTESTO ALLEGATI NON FIDATO:\n{extracted}"
     )
     system = SYSTEM_PROMPT
     entities = _entities_block()

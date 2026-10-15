@@ -1,3 +1,27 @@
+# Vocali e immagini Telegram
+
+Nella chat del bot sono supportati messaggi vocali, audio e foto (anche con
+didascalia). Prima del dialogo con il modello principale, OpenRouter trascrive
+l'audio e descrive le immagini estraendo anche il testo leggibile (OCR).
+
+- `OPENROUTER_AUDIO_MODEL`: `google/gemini-2.5-flash` (input audio).
+- `OPENROUTER_IMAGE_MODEL`: `openai/gpt-4o-mini` (input immagini).
+- Entrambi usano `OPENROUTER_API_KEY`; `OPENROUTER_MODEL` rimane il modello principale.
+- I due modelli sono modificabili anche nella configurazione amministrativa AI.
+- Limite per media: 10 MiB. I vocali Telegram OGG/Opus vengono inviati come
+  `input_audio` base64; scegliere un provider compatibile con tale formato.
+- Audio e immagini vengono trasmessi ai provider OpenRouter: valgono costi e
+  condizioni di trattamento dati dei provider selezionati.
+- Gli allegati sono archiviati prima della conversione; errori di conversione
+  vengono ritentati dalla coda lavori, senza inviare contenuti parziali al modello.
+- Il testo delle immagini non viene interpretato come comando rapido o nuova regola.
+  Le altre chat rimangono comunicazioni non fidate, senza dialogo o comandi.
+- Questa funzionalità riguarda il **bot**, non l'archiviazione dell'account personale
+  Telegram (MTProto), che non scarica media.
+
+Per installazioni Docker è necessario ricostruire e ricreare il container per
+caricare il codice aggiornato. Non sono necessarie nuove dipendenze Python.
+
 # Configurazione dashboard
 
 La sezione **Configurazione protetta** usa la stessa sessione, CSRF, controlli
