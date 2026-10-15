@@ -42,10 +42,6 @@ def _handle_signal(signum, frame):
     print("\n[main] arresto richiesto, chiudo con calma...")
 
 
-signal.signal(signal.SIGTERM, _handle_signal)
-signal.signal(signal.SIGINT, _handle_signal)
-
-
 def format_verdict(channel: str, sender: str, subject: str, verdict: dict) -> str:
     """Costruisce il messaggio di notifica per l'utente."""
     esc = telegram.escape_html
@@ -524,6 +520,9 @@ def _owner_job(payload):
 
 
 def main():
+    # Importing format_verdict from a worker must not register process signals.
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
     print("=" * 60)
     print("  PI-SECRETARY — segretario virtuale")
     print(f"  Modello AI : {config.OPENROUTER_MODEL}")

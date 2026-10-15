@@ -1,5 +1,7 @@
 """Offline regressions; production connections and HTTP are forbidden."""
 import json
+import subprocess
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +13,34 @@ from connectors import gcal
 
 
 class DurableTests(unittest.TestCase):
+    def test_formatter_import_is_safe_in_worker_thread(self):
+        # Fresh interpreter: an already cached main module would hide the bug.
+        result = subprocess.run([sys.executable, '-c', '''
+import threading
+errors = []
+def worker():
+    try:
+        from main import format_verdict
+        assert callable(format_verdict)
+    except Exception as exc:
+        errors.append(repr(exc))
+t = threading.Thread(target=worker)
+t.start()
+t.join()
+assert not errors, errors
+'''], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_worker_records_error_details(self):
+        worker = jobs.Worker('analysis', MagicMock(side_effect=ValueError('example detail')))
+        job = (42, {'message_id': 7}, 1, 'token')
+        with patch.object(jobs, 'claim', return_value=job), \
+             patch.object(jobs, 'finish', side_effect=lambda *args: worker.stop()), \
+             patch.object(jobs.logger, 'exception') as log:
+            worker.run()
+            jobs.finish.assert_called_once_with(job, 'ValueError: example detail')
+            log.assert_called_once()
+
     def setUp(self):
         self.connect = patch('db._conn')
         self.conn = self.connect.start().return_value.__enter__.return_value

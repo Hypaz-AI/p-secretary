@@ -5,12 +5,14 @@ are at-least-once, not exactly-once (a lost Telegram response is ambiguous).
 """
 import json
 import hashlib
+import logging
 import threading
 import uuid
 
 import db
 
 VERSION = 'durable_work_v2'
+logger = logging.getLogger(__name__)
 
 
 class Deferred(RuntimeError):
@@ -133,7 +135,8 @@ class Worker:
                         if isinstance(exc, Deferred):
                             defer(job)
                         else:
-                            finish(job, type(exc).__name__)
+                            logger.exception('Work job %s (%s) failed', job[0], self.kind)
+                            finish(job, f'{type(exc).__name__}: {exc}'[:2000])
                     except Exception:
                         pass  # Lease expiry recovers database outages.
             self.stop_event.wait(1)
