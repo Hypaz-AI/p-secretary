@@ -157,6 +157,47 @@ class WhatsAppHistoryTests(unittest.TestCase):
         with FileLock(self.root / 'wa_session' / '.owner.lock', blocking=False):
             pass
 
+    def test_partial_completion_drains_and_sanitizes(self):
+        path = self.put()
+        self.proc.stdout = io.StringIO(
+            '{"type":"ready","self":"me"}\n' + json.dumps({
+                'type': 'history_complete', 'partial': True,
+                'errors': {'fetch_timeout': 2, 'secret phone/token': 1}}) + '\n')
+        with self.assertRaises(wa.WhatsAppHistoryPartialError) as caught:
+            wa.import_history(START, END)
+        self.assertEqual(caught.exception.stored_count, 1)
+        self.assertEqual(caught.exception.reasons, ('fetch_timeout', 'fetch_failed'))
+        self.assertNotIn('secret', str(caught.exception))
+        self.assertFalse(path.exists())
+        self.stop.assert_called_once()
+
+    def test_fatal_and_eof_after_ready_still_drain(self):
+        for suffix in ('', '{"type":"history_error","error":"private token"}\n'):
+            with self.subTest(suffix=suffix):
+                path = self.put()
+                self.proc.stdout = io.StringIO('{"type":"ready","self":"me"}\n' + suffix)
+                with self.assertRaises(wa.WhatsAppHistoryPartialError) as caught:
+                    wa.import_history(START, END)
+                self.assertEqual(caught.exception.stored_count, 1)
+                self.assertNotIn('private', str(caught.exception))
+                self.assertFalse(path.exists())
+
+    def test_timeout_after_ready_drains_before_reporting(self):
+        path = self.put()
+        release = threading.Event()
+        class SilentAfterReady:
+            def __iter__(self):
+                yield '{"type":"ready","self":"me"}\n'
+                release.wait(2)
+            def close(self):
+                pass
+        self.proc.stdout = SilentAfterReady()
+        self.stop.side_effect = lambda proc: release.set()
+        with self.assertRaises(TimeoutError) as caught:
+            wa.import_history(START, END, timeout=0.03)
+        self.assertEqual(caught.exception.stored_count, 1)
+        self.assertFalse(path.exists())
+
     def test_spawn_error_releases_lock(self):
         self.spawn.side_effect = OSError('node unavailable')
         with self.assertRaises(OSError):
@@ -167,7 +208,7 @@ class WhatsAppHistoryTests(unittest.TestCase):
     def test_real_node_bridge_in_offline_vm(self):
         harness = r'''
 const vm=require('vm'), events={}, files={}, output=[];
-let fetched=0, fail=false;
+let fetched=0, mode='normal', requests=[];
 function message(id, timestamp=100) {return {id:{_serialized:id},timestamp,
  from:'g@g.us',author:'p@c.us',body:'text',hasMedia:false,
  getChat:async()=>({name:'Group'}),getContact:async()=>({pushname:'Marco'})};}
@@ -177,14 +218,21 @@ class Client {
  initialize(){return Promise.resolve();}
  async getChats(){return Array.from({length:105},(_,i)=>({
   id:{_serialized:'g@g.us'},name:'Group',fetchMessages:async options=>{
-   if(options.limit!==Infinity) throw Error('limited fetch');
-   if(fail) throw Error('fetch failed');
+    if(!Number.isFinite(options.limit)||options.limit>12800) throw Error('unbounded fetch');
+    requests.push(options.limit);
+    if(mode==='fail' && i===0) throw Error('private phone/token');
+    if(mode==='browser' && i===0) throw Error('Protocol error secret');
+    if(mode==='cap' && i===0) return Array.from({length:options.limit},(_,j)=>message('cap'+j,150));
+    if(mode==='growth' && i===0) return Array.from({length:options.limit},(_,j)=>message('grow'+j,j===399?99:150));
+    if(mode==='stalled' && i===0) return Array.from({length:options.limit},(_,j)=>message('same'+(j%200),150));
+    if(mode==='archive' && i===0) return [{...message('badmedia',150),hasMedia:true,
+     downloadMedia:async()=>{throw Error('private media URL');}}];
    fetched++;return [message('m'+i),message('end'+i,200),message('old'+i,99)];
   }}));}
  async sendMessage(){throw Error('send forbidden');}
 }
 const context={Buffer,process:{env:{WA_HISTORY_IMPORT:'1',WA_SPOOL_DIR:'/history',
- WA_HISTORY_CUTOFF:'100',WA_HISTORY_END:'200'},on(){},stdin:{}},
+ WA_HISTORY_CUTOFF:'100',WA_HISTORY_END:'200',WA_MEDIA_DIR:'/media'},on(){},stdin:{}},
  console:{log:s=>output.push(JSON.parse(s))},setInterval(){throw Error('live timer');},
  require:n=>n==='whatsapp-web.js'?{Client,LocalAuth:class{}}:n==='fs'?{
  mkdirSync(){},existsSync:p=>p in files,readFileSync:p=>files[p],
@@ -199,8 +247,20 @@ vm.runInContext(JSON.parse(require('fs').readFileSync(0,'utf8')),context);
  if(output.at(-1).type!=='history_complete') throw Error('missing completion');
  const entry=JSON.parse(Object.values(files)[0]);
  if(!entry.enriched||entry.self!=='me') throw Error('bad enrichment/account');
- fail=true;await events.ready();
- if(output.at(-1).type!=='history_error') throw Error('hidden fetch error');
+ for(const scenario of ['fail','browser','cap','growth','stalled','archive']) {
+  mode=scenario;requests=[];fetched=0;await events.ready();
+  const last=output.at(-1);
+  if(last.type!=='history_complete') throw Error('missing partial completion');
+  const partial=['fail','browser','cap','archive'].includes(mode);
+  if(last.partial!==partial) throw Error('wrong partial flag '+mode);
+  if(fetched!==104) throw Error('later chats skipped '+mode);
+  if(mode==='cap' && !last.errors.history_cap_reached) throw Error('missing cap reason');
+  if(mode==='browser' && !last.errors.browser_unavailable) throw Error('missing browser reason');
+  if(mode==='archive' && !last.errors.archive_failed) throw Error('missing media reason');
+  if(mode==='growth' && requests.slice(0,2).join()!=='200,400') throw Error('no progressive fetch');
+  if(mode==='stalled' && requests.length!==106) throw Error('no-growth did not stop');
+ }
+ if(JSON.stringify(output).includes('private')) throw Error('sensitive error leaked');
  events.qr('secret');
  if(output.at(-1).type!=='history_error') throw Error('login allowed');
  console.log('PASS');

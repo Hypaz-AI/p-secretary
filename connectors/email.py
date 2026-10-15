@@ -1,6 +1,7 @@
 """Connettore Email: legge nuove email via IMAP e invia via SMTP."""
 import email
 import imaplib
+import logging
 import smtplib
 import ssl
 from email.header import decode_header
@@ -9,6 +10,18 @@ from email.utils import parseaddr
 
 import config
 from connectors import ms_oauth
+
+
+logger = logging.getLogger(__name__)
+
+
+def _decode_bytes(value, charset=None):
+    try:
+        return value.decode(charset or 'utf-8', errors='replace')
+    except (LookupError, ValueError, UnicodeError):
+        # Codec names are untrusted MIME input (including non-text codecs).
+        logger.warning('Email MIME charset unusable; decoded as UTF-8 with replacement')
+        return value.decode('utf-8', errors='replace')
 
 
 def _xoauth2(address: str, token: str) -> bytes:
@@ -23,7 +36,7 @@ def _decode(value) -> str:
     out = []
     for text, enc in parts:
         if isinstance(text, bytes):
-            out.append(text.decode(enc or "utf-8", errors="replace"))
+            out.append(_decode_bytes(text, enc))
         else:
             out.append(text)
     return "".join(out)
@@ -34,18 +47,15 @@ def _body_text(msg) -> str:
     if msg.is_multipart():
         for part in msg.walk():
             if part.get_content_type() == "text/plain":
-                return part.get_payload(decode=True).decode(
-                    part.get_content_charset() or "utf-8", errors="replace"
-                )
+                return _decode_bytes(part.get_payload(decode=True) or b"",
+                                     part.get_content_charset())
         for part in msg.walk():
             if part.get_content_type() == "text/html":
-                return part.get_payload(decode=True).decode(
-                    part.get_content_charset() or "utf-8", errors="replace"
-                )
+                return _decode_bytes(part.get_payload(decode=True) or b"",
+                                     part.get_content_charset())
         return ""
-    return msg.get_payload(decode=True).decode(
-        msg.get_content_charset() or "utf-8", errors="replace"
-    )
+    return _decode_bytes(msg.get_payload(decode=True) or b"",
+                         msg.get_content_charset())
 
 
 def _connect(account: dict):
@@ -128,11 +138,12 @@ def json_identity(account, folder, validity, uid):
 def iter_history_messages(account, start, end):
     """Yield INBOX and Sent in the aware half-open window [start, end).
 
-    Read-only and uncapped; failures propagate (including missing Sent or
-    undated messages), so callers cannot mistake an incomplete scan for success.
-    Date headers define message time, as in the existing email archive.
+    Read-only and uncapped. Date headers define time, with INTERNALDATE fallback.
+    Malformed messages are reported and skipped; a final error marks the scan
+    incomplete after the remaining messages have been yielded. Protocol failures
+    still stop immediately. Diagnostics never include message content or secrets.
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
     import re
 
     if any(not isinstance(d, datetime) or d.utcoffset() is None for d in (start, end)):
@@ -171,47 +182,63 @@ def iter_history_messages(account, start, end):
         if sent is None:
             raise RuntimeError('Sent folder unavailable; history would be incomplete')
 
-        # SENT* searches use Date headers, not INTERNALDATE. Widen date-only
-        # bounds for timezone offsets; the precise UTC filter below is decisive.
-        def imap_date(d):
-            months = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
-            return f'{d.day:02d}-{months[d.month - 1]}-{d.year:04d}'
-
-        for folder, direction in (('INBOX', 'in'), (sent, 'out')):
+        failures = 0
+        # SENT* excludes malformed/missing Date; SINCE excludes valid old Date
+        # headers delivered recently (and vice versa). ALL is required to keep
+        # both header-time semantics and the INTERNALDATE fallback complete.
+        for folder_index, (folder, direction) in enumerate((('INBOX', 'in'), (sent, 'out')), 1):
             select(folder)
             validity_data = imap.response('UIDVALIDITY')[1]
             if not validity_data or not validity_data[0]:
                 raise RuntimeError('Missing IMAP UIDVALIDITY: ' + folder)
             validity = validity_data[0].decode('ascii')
-            status, data = imap.uid('search', None, 'SENTSINCE',
-                                    imap_date(start - timedelta(days=2)),
-                                    'SENTBEFORE', imap_date(end + timedelta(days=2)))
+            status, data = imap.uid('search', None, 'ALL')
             if status != 'OK' or not data or not isinstance(data[0], bytes):
                 raise RuntimeError('IMAP history search failed: ' + folder)
             for uid in data[0].split():
-                status, data = imap.uid('fetch', uid, '(BODY.PEEK[])')
+                status, data = imap.uid('fetch', uid, '(INTERNALDATE BODY.PEEK[])')
                 if status != 'OK':
                     raise RuntimeError('IMAP history fetch failed: ' + folder)
-                raw = next((item[1] for item in data or []
+                item = next((item for item in data or []
                             if isinstance(item, tuple) and len(item) > 1
                             and isinstance(item[1], bytes)), None)
-                if raw is None:
+                if item is None:
                     raise RuntimeError('Missing IMAP message body: ' + folder)
-                entry = _parse_msg(raw, account)
-                ts = parse_email_datetime(entry['date'])
-                if ts is None:
-                    raise ValueError('History message has no timezone-aware Date')
-                if not start <= datetime.fromisoformat(ts).astimezone(timezone.utc) < end:
+                uid_text = uid.decode('ascii')
+                if not uid_text.isascii() or not uid_text.isdecimal():
+                    raise RuntimeError('Invalid IMAP history UID')
+                try:
+                    entry = _parse_msg(item[1], account)
+                    ts = parse_email_datetime(entry['date'])
+                    date_source = 'date_header'
+                    if ts is None:
+                        match = re.search(rb'INTERNALDATE "([^"]+)"', item[0], re.I)
+                        ts = parse_email_datetime(match[1].decode('ascii')) if match else None
+                        if ts is None:
+                            raise ValueError('No usable Date or INTERNALDATE')
+                        date_source = 'internaldate'
+                        logger.warning('Email history folder_index=%d uid=%s: invalid/missing Date; using INTERNALDATE',
+                                       folder_index, uid_text)
+                    if not start <= datetime.fromisoformat(ts).astimezone(timezone.utc) < end:
+                        continue
+                except (ValueError, LookupError, TypeError, AttributeError, OverflowError) as exc:
+                    failures += 1
+                    logger.error('Email history folder_index=%d uid=%s: malformed message (%s); '
+                                 'inspect this UID read-only and retry after repair',
+                                 folder_index, uid_text, type(exc).__name__)
                     continue
                 entry.update(uid=uid.decode('ascii'), direction=direction, ts=ts)
                 entry['metadata'] = {'account': account['address'].lower(),
                                      'folder': folder, 'uidvalidity': validity,
                                      'uid': entry['uid'], 'message_id': entry['message_id'],
                                      'direction': direction}
+                entry['metadata']['date_source'] = date_source
                 entry['source_id'] = json_identity(account['address'].lower(), folder,
                                                     validity, entry['uid'])
                 yield entry
+        if failures:
+            raise ValueError(f'Email history incomplete: {failures} malformed messages; '
+                             'see folder_index/UID diagnostics (1=INBOX, 2=Sent); repair and retry')
     finally:
         try:
             imap.logout()

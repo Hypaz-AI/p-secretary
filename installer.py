@@ -91,7 +91,7 @@ def prompt_missing(config, key, label, secret=False, choices=None, edit=False):
     if saved and not edit and valid_preference(key, saved):
         return saved
     defaults = {'TIMEZONE': 'Europe/Rome', 'LANGUAGE': 'it',
-                'OPENROUTER_MODEL': 'meta-llama/llama-3.3-70b-instruct', 'DIGEST_TIME': '21:00'}
+                'OPENROUTER_MODEL': 'google/gemini-2.5-flash', 'DIGEST_TIME': '21:00'}
     default = saved or defaults.get(key, '')
     while True:
         hint = 'mantieni salvato' if secret and saved else default if not secret and default else 'salta'
@@ -134,7 +134,7 @@ def configure_email(config, edit=False):
 def configure_preferences(config, edit=False):
     guide('preferences')
     for key, label in [('TIMEZONE', 'Timezone (es. Europe/Rome)'), ('LANGUAGE', 'Lingua (es. it)'),
-                       ('OPENROUTER_MODEL', 'Modello OpenRouter'), ('DIGEST_TIME', 'Ora digest (HH:MM)')]:
+                       ('OPENROUTER_MODEL', 'Modello OpenRouter (input nativi testo e immagini obbligatori)'), ('DIGEST_TIME', 'Ora digest (HH:MM)')]:
         prompt_missing(config, key, label, edit=edit)
     add_new = True
     for i in range(1, 5):

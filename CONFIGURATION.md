@@ -1,23 +1,39 @@
 # Vocali e immagini Telegram
 
 Nella chat del bot sono supportati messaggi vocali, audio e foto (anche con
-didascalia). Prima del dialogo con il modello principale, OpenRouter trascrive
-l'audio e descrive le immagini estraendo anche il testo leggibile (OCR).
+didascalia). OpenRouter trascrive l'audio prima del dialogo. Le foto del proprietario
+sono invece inviate come parti `image_url` (data URL base64) al modello principale multimodale,
+insieme a didascalia, identità dell'assistente, archivio, memoria e cronologia.
+Anche le domande successive hanno accesso alla foto finché rimane
+nella cronologia in RAM (ultimi 10 messaggi; persa al riavvio). Nessun tool remoto:
+i marker calendario continuano a essere validati ed eseguiti dal codice principale.
 
 - `OPENROUTER_AUDIO_MODEL`: `google/gemini-2.5-flash` (input audio).
-- `OPENROUTER_IMAGE_MODEL`: `openai/gpt-4o-mini` (input immagini).
-- Entrambi usano `OPENROUTER_API_KEY`; `OPENROUTER_MODEL` rimane il modello principale.
+- `OPENROUTER_MODEL`: `google/gemini-2.5-flash` (testo e immagini nativi).
+- Entrambi usano `OPENROUTER_API_KEY`; `OPENROUTER_MODEL` è il modello principale.
+  Viene usato per tutte le conversazioni, con o senza immagini, e deve supportare
+  **nativamente input testo e immagini** (`image_url`): è un requisito obbligatorio,
+  non sostituibile con OCR. Nessun modello o preprocessore immagini separato.
+  Il prompt visivo è agnostico rispetto al soggetto della foto.
+  Se la richiesta visiva fallisce o non restituisce testo, il fallback elimina le
+  immagini, dichiara che non sono disponibili e non può creare eventi calendario.
+  Non viene mostrato il reasoning interno del provider come risposta.
 - I due modelli sono modificabili anche nella configurazione amministrativa AI.
 - Limite per media: 10 MiB. I vocali Telegram OGG/Opus vengono inviati come
   `input_audio` base64; scegliere un provider compatibile con tale formato.
 - Audio e immagini vengono trasmessi ai provider OpenRouter: valgono costi e
   condizioni di trattamento dati dei provider selezionati.
-- Gli allegati sono archiviati prima della conversione; errori di conversione
+- Gli allegati sono archiviati prima della trascrizione audio; errori di trascrizione
   vengono ritentati dalla coda lavori, senza inviare contenuti parziali al modello.
+  Solo la chat privata del proprietario configurato in `TELEGRAM_CHAT_ID` è
+  accettata dal bot. Senza proprietario configurato nessun messaggio è accettato.
+  Chat estranee, gruppi e canali sono ignorati prima di download, log dei contenuti,
+  archiviazione o analisi AI, senza risposte; gli update vengono comunque consumati.
 - Il testo delle immagini non viene interpretato come comando rapido o nuova regola.
-  Le altre chat rimangono comunicazioni non fidate, senza dialogo o comandi.
+- La pipeline testuale non converte immagini né le invia al trascrittore audio.
+  L'estrazione generica PDF/XML resta separata e invariata, senza OCR immagini.
 - Questa funzionalità riguarda il **bot**, non l'archiviazione dell'account personale
-  Telegram (MTProto), che non scarica media.
+  Telegram (MTProto), separata e di sola lettura, che non scarica media.
 
 Per installazioni Docker è necessario ricostruire e ricreare il container per
 caricare il codice aggiornato. Non sono necessarie nuove dipendenze Python.
@@ -38,8 +54,15 @@ Nessun localStorage/sessionStorage viene utilizzato.
   preferenze, Calendar e parametri di recupero Telegram personale.
 - Revisione opaca HMAC, lock condiviso con `config.set_env`, validazione prima
   della pubblicazione, singola sostituzione atomica privata 0600 del file env.
-- Un errore in un campo annulla l'intero batch. Il runtime e `os.environ` non
-  sono modificati, neppure dopo successo. Occorre un riavvio **manuale**.
+- Un errore in un campo annulla l'intero batch senza riavvio.
+  Dopo un salvataggio riuscito in Docker, il ciclo principale attende almeno
+  2 secondi per la risposta HTTP, chiude ordinatamente worker e connettori,
+  quindi esce. La policy Compose `restart: unless-stopped` riavvia il container
+  e il nuovo processo rilegge il file env persistente. Nessun socket Docker
+  o shell API. La dashboard sarà temporaneamente indisponibile.
+  Fuori da Docker occorre un riavvio manuale. `os.environ` non viene mutato.
+  Per installazioni esistenti ricostruire l'immagine e ricreare il servizio
+  tramite il launcher per applicare il nuovo codice e la policy.
   Nessuna migrazione o copia dei dati viene effettuata cambiando database.
 - Il JSON Calendar è verificato isolatamente in memoria, senza cache live;
   dopo verifica viene scritto in `.calendar-keys` privata presso il file env,

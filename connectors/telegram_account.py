@@ -1,6 +1,7 @@
 """Read-only personal Telegram archive. No bot routing, sends or read receipts."""
 import asyncio
 import json
+import math
 from pathlib import Path
 import threading
 import time
@@ -299,11 +300,13 @@ class TelegramAccountWorker:
               f'message-cap dialogs={capped}; caps may omit messages; no full history paging')
 
 
-async def import_history(start, end):
+async def import_history(start, end, max_flood_wait=300):
     """Archive all personal dialogs in aware [start, end); return stored count.
 
     Requires an existing authorized personal session. No login, live listeners,
-    AI, recovery watermarks or configured recovery caps. Errors propagate.
+    AI, recovery watermarks or configured recovery caps. Flood waits are retried
+    within a cumulative seconds budget; other errors propagate. Replayed scans
+    use native storage identity/upserts and count each archived message once.
     """
     from connectors.storage import FileLock
 
@@ -312,6 +315,9 @@ async def import_history(start, end):
     start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
     if start >= end:
         raise ValueError('History start must precede end')
+    if (not isinstance(max_flood_wait, (int, float)) or
+            not math.isfinite(max_flood_wait) or max_flood_wait < 0):
+        raise ValueError('max_flood_wait must be finite non-negative seconds')
     path = session_path()
     if not path.is_file():
         raise FileNotFoundError('Existing personal Telegram session required')
@@ -324,25 +330,63 @@ async def import_history(start, end):
         secure_session(path)
         client = TelegramClient(str(path), api_id, api_hash,
                                 receive_updates=False, flood_sleep_threshold=0)
+        waited = 0
+
+        async def retry(operation):
+            nonlocal waited
+            while True:
+                try:
+                    return await operation()
+                except Exception as exc:
+                    # Keep Telethon optional, including for offline client mocks.
+                    try:
+                        from telethon.errors import FloodWaitError
+                    except ImportError:
+                        raise exc from None
+                    if not isinstance(exc, FloodWaitError):
+                        raise
+                    delay = max(1, math.ceil(exc.seconds))
+                    if waited + delay > max_flood_wait:
+                        raise RuntimeError(
+                            f'Telegram history requires {delay}s cooldown; '
+                            f'cumulative wait budget {max_flood_wait:g}s exceeded '
+                            f'after {waited}s. Retry later or increase '
+                            'max_flood_wait; already archived messages are safe '
+                            'to reimport.') from None
+                    print(f'[telegram-account] history rate limited; waiting {delay}s '
+                          f'(cumulative {waited + delay}s/{max_flood_wait:g}s)')
+                    waited += delay
+                    # Hold ownership and make no further requests until cooldown.
+                    await asyncio.sleep(delay)
+
         try:
-            await client.connect()
-            if not await client.is_user_authorized():
+            await retry(client.connect)
+            if not await retry(client.is_user_authorized):
                 raise PermissionError('Telegram session is not authorized')
-            me = await client.get_me()
+            me = await retry(client.get_me)
             if me is None or me.bot:
                 raise PermissionError('Personal Telegram session required')
             worker = TelegramAccountWorker()
             worker.client = client
             worker.account = f'user:{me.id}'
-            stored = 0
-            async for dialog in client.iter_dialogs(limit=None):
-                async for message in client.iter_messages(dialog.entity, limit=None,
-                                                           offset_date=end):
-                    if message.date and message.date < start:
-                        break
-                    stored += bool(await worker.archive(message, recovered=True,
-                                                        window=(start, end)))
-            return stored
+            archived = set()
+
+            async def scan():
+                # A failed async iterator cannot be resumed. Restart the full
+                # scan, without advancing recovery watermarks or double counting.
+                async for dialog in client.iter_dialogs(limit=None):
+                    async for message in client.iter_messages(dialog.entity, limit=None,
+                                                               offset_date=end):
+                        if message.date and message.date < start:
+                            break
+                        identity = (message.chat_id, message.id, message.edit_date or message.date)
+                        if identity in archived:
+                            continue
+                        if await worker.archive(message, recovered=True, window=(start, end)):
+                            archived.add(identity)
+
+            await retry(scan)
+            return len(archived)
         finally:
             try:
                 await client.disconnect()

@@ -39,7 +39,20 @@ def run_import(days, now=None):
         except Exception as exc:
             # Non stampare eccezioni che potrebbero contenere credenziali o messaggi.
             print(f'{label}: importazione incompleta ({type(exc).__name__}).')
-            results.append({'source': label, 'count': None, 'status': 'failed'})
+            count = None
+            if (label == 'WhatsApp' and type(exc).__name__ == 'WhatsAppHistoryPartialError'
+                    and isinstance(getattr(exc, 'stored_count', None), int)):
+                count = exc.stored_count
+                print(f'WhatsApp: {count} messaggi già archiviati; controllare sessione/browser '
+                      'e disponibilità dello storico. I dati acquisiti sono preservati.')
+            elif label == 'Telegram personale':
+                print('Telegram: le attese richieste dal server sono rispettate fino a 300 secondi '
+                      'complessivi; se il limite è superato, riprovare più tardi. '
+                      'Verificare anche autorizzazione e disponibilità della sessione.')
+            elif label.startswith('Email '):
+                print('Email: verificare i diagnostici folder_index/UID per messaggi malformati, '
+                      'oltre ad accesso IMAP e cartella Inviate. I messaggi validi già letti restano salvati.')
+            results.append({'source': label, 'count': count, 'status': 'failed'})
 
     def import_email(account):
         count = 0

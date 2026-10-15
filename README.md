@@ -29,6 +29,16 @@ messaggi già presenti. Nessun watermark di recupero ordinario viene avanzato.
 Rieseguire dopo un errore è sicuro. Codici di uscita: 0 completato, 1 errore
 (anche parziale), 2 copertura limitata/non supportata, 130 annullato.
 
+Robustezza del recupero: le email con Date assente/non valida usano INTERNALDATE;
+messaggi malformati vengono segnalati per UID senza bloccare i successivi (esito
+finale comunque incompleto). La scansione IMAP può leggere l'intera casella per
+gestire correttamente le date malformate, quindi caselle grandi richiedono tempo.
+Telegram rispetta i FloodWait con un budget cumulativo di 300 secondi: attese
+superiori richiedono di riprovare più tardi, non vengono aggirate.
+WhatsApp continua sulle altre chat in caso di errore, salva i messaggi disponibili
+anche prima di segnalare un errore parziale e usa recuperi progressivi fino a
+12.800 messaggi per chat; il raggiungimento del limite è segnalato come parziale.
+
 # Contratto onboarding Docker
 
 I setup opzionali restituiscono `0` (ready), `2` (skipped/consenso rifiutato),
@@ -50,6 +60,19 @@ Non certifica i connettori: dashboard distingue configurazione, interruttore
 enabled e salute osservata dai worker. `configured` non significa ready.
 
 # Pi Secretary
+
+## AI: immagini native e audio separato
+
+`OPENROUTER_MODEL` **DEVE supportare nativamente input testo e immagini**
+(`image_url`); il default è `google/gemini-2.5-flash`. Le foto del proprietario
+sono inviate direttamente al modello principale, con didascalia e cronologia,
+senza modello immagini separato né preprocessing OCR. Solo l'audio viene
+trascritto con `OPENROUTER_AUDIO_MODEL` prima del dialogo. La pipeline testuale
+ignora le immagini; l'estrazione documentale PDF/XML resta separata e invariata.
+Il bot accetta soltanto la chat privata del proprietario configurato.
+Per limiti, fallback e trattamento dati vedere `CONFIGURATION.md`.
+Le installazioni esistenti con un modello solo testuale devono scegliere un
+modello multimodale; i file di configurazione privati non vengono migrati.
 
 ## Google Calendar: solo service account IAM
 

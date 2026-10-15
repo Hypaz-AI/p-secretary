@@ -20,8 +20,16 @@ const path = require('path');
 const readline = require('readline');
 const AUTH_ONLY = process.env.WA_AUTH_ONLY === '1';
 const HISTORY_IMPORT = process.env.WA_HISTORY_IMPORT === '1';
+// Never forward dependency errors: they can contain message text, IDs or URLs.
+function historyReason(error) {
+  const text = String(error).toLowerCase();
+  if (/auth|session requires/.test(text)) return 'authentication_required';
+  if (/target closed|session closed|execution context|protocol error/.test(text)) return 'browser_unavailable';
+  if (/timeout|timed out/.test(text)) return 'fetch_timeout';
+  return 'fetch_failed';
+}
 function historyError(error) {
-  console.log(JSON.stringify({type:'history_error', error:String(error)}));
+  console.log(JSON.stringify({type:'history_error', reason:historyReason(error)}));
 }
 
 const MEDIA_DIR = process.env.WA_MEDIA_DIR;
@@ -43,6 +51,37 @@ if (SPOOL) fs.mkdirSync(SPOOL, {recursive:true});
 // getChatById non li ha ancora risolti (chat mai aperte nella UI web).
 const CHAT_NAMES = {};
 const INFLIGHT = new Set();
+function named(value) {
+  return typeof value === 'string' && value.trim() &&
+    !/^[+\d\s().-]+$/.test(value) && !/@(lid|c\.us|s\.whatsapp\.net|g\.us)$/.test(value)
+    ? value.trim() : null;
+}
+async function resolvePerson(id, msg, useMessageContact) {
+  let best = {name:null, rank:0, aliases:[id]};
+  const take = contact => {
+    if (!contact) return;
+    for (const [field, rank] of [['name',3],['pushname',2],['verifiedName',1]]) {
+      const name = named(contact[field]);
+      if (name && rank > best.rank) {best.name=name;best.rank=rank;}
+    }
+  };
+  if (useMessageContact) {
+    try {take(await msg.getContact());} catch(e) {}
+  }
+  if (typeof client.getContactLidAndPhone === 'function') {
+    try {
+      for (const pair of await client.getContactLidAndPhone([id]))
+        for (const alias of [pair.lid,pair.pn])
+          if (alias && !best.aliases.includes(alias)) best.aliases.push(alias);
+    } catch(e) {}
+  }
+  if (typeof client.getContactById === 'function') {
+    for (const alias of best.aliases) {
+      try {take(await client.getContactById(alias));} catch(e) {}
+    }
+  }
+  return best;
+}
 function rememberChat(chat) {
   if (chat && chat.id && (chat.name || chat.formattedTitle))
     CHAT_NAMES[chat.id._serialized || chat.id] = chat.name || chat.formattedTitle;
@@ -58,7 +97,8 @@ async function archive(msg, recovered_cached=false) {
   if (INFLIGHT.has(id)) return;
   const finalPath = path.join(SPOOL, Buffer.from(id).toString('hex')+'.json');
   if (fs.existsSync(finalPath)) {
-    if (!HISTORY_IMPORT || JSON.parse(fs.readFileSync(finalPath,'utf8')).enriched) return;
+    const previous = JSON.parse(fs.readFileSync(finalPath,'utf8'));
+    if (previous.enriched && previous.names_version === 2) return;
   }
   INFLIGHT.add(id);
   try {
@@ -71,16 +111,26 @@ async function archive(msg, recovered_cached=false) {
   const persist = () => {fs.writeFileSync(dest+'.tmp', JSON.stringify(entry));fs.renameSync(dest+'.tmp', dest);};
   persist();
   try {const chat=await msg.getChat();rememberChat(chat);
-    entry.from_name=(chat && (chat.name || chat.formattedTitle)) || CHAT_NAMES[entry.chat_id] || msg.from;
+    entry.from_name=(chat && (chat.name || chat.formattedTitle)) || CHAT_NAMES[entry.chat_id] || entry.chat_id;
   } catch(e) {entry.chat_error=true;
-    entry.from_name=CHAT_NAMES[entry.chat_id] || msg.from;}
-  if(!msg.fromMe && msg.author && msg.author !== msg.from) {
-    // nei gruppi chat.name è il nome del GRUPPO: risolvi chi ha scritto
-    // il singolo messaggio dal suo contatto (pushname o nome rubrica)
-    try {const contact=await msg.getContact();
-      entry.author_name=(contact && (contact.pushname || contact.name)) || null;
-    } catch(e) {entry.contact_error=true;}
+    entry.from_name=CHAT_NAMES[entry.chat_id] || entry.chat_id;}
+  const group = entry.chat_id.endsWith('@g.us');
+  const personId = group ? (msg.author || (msg.fromMe ? msg.from : null)) : entry.chat_id;
+  if (personId) {
+    const person = await resolvePerson(personId, msg, !msg.fromMe);
+    entry.author_aliases = person.aliases;
+    if (group) {
+      entry.author_name = person.name;
+      entry.author_name_rank = person.rank;
+    } else {
+      entry.chat_aliases = person.aliases;
+      entry.from_name = person.name || named(entry.from_name) || entry.chat_id;
+      entry.chat_name_rank = person.rank || (named(entry.from_name) ? 1 : 0);
+      if (!msg.fromMe) {entry.author_name=person.name;entry.author_name_rank=person.rank;}
+    }
   }
+  if (group) entry.chat_name_rank = named(entry.from_name) ? 3 : 0;
+  entry.names_version = 2;
   if(msg.hasMedia && MEDIA_DIR) {
     try {
       const media=await msg.downloadMedia();
@@ -129,11 +179,32 @@ client.on('ready', async () => {
   try {
     const chats = await client.getChats();
     for (const chat of chats) rememberChat(chat);
+    const errors = {};
+    const record = reason => {errors[reason]=(errors[reason] || 0)+1;};
     for (const chat of chats) {
-      // Only history already available to this linked device; no server backfill.
-      for (const msg of await chat.fetchMessages({limit:Infinity})) await archive(msg,true);
+      try {
+        // 1.34.7 loads earlier messages even with finite limits. Re-fetch the
+        // latest N (not offset pagination), doubling 200..12800. Cap bounds
+        // requested messages, not execution time; Python owns the deadline.
+        // No growth / short result means linked-device history is exhausted,
+        // NOT proof that all account/server history is available.
+        const seen = new Set();
+        for (let limit=200; limit<=12800; limit*=2) {
+          const messages = await chat.fetchMessages({limit});
+          let growth=0, reached=false;
+          for (const msg of messages) {
+            if (Number.isFinite(msg.timestamp) && msg.timestamp <= cutoff()) reached=true;
+            const id=msg.id && (msg.id._serialized || msg.id.id);
+            if (!id || seen.has(id)) continue;
+            seen.add(id);growth++;
+            try {await archive(msg,true);} catch(e) {record('archive_failed');}
+          }
+          if (reached || messages.length<limit || !growth) break;
+          if (limit===12800) record('history_cap_reached');
+        }
+      } catch(e) {record(historyReason(e));}
     }
-    console.log(JSON.stringify({type:'history_complete'}));
+    console.log(JSON.stringify({type:'history_complete', partial:Object.keys(errors).length>0, errors}));
   } catch (e) { historyError(e); }
 });
 if (HISTORY_IMPORT) client.on('auth_failure', historyError);
@@ -241,6 +312,30 @@ def stop_process(proc):
     proc.wait(timeout=5)
 
 
+HISTORY_REASONS = {
+  'authentication_required': 'Relink WhatsApp using setup separately.',
+  'browser_unavailable': 'Check Chromium and the linked session, then retry.',
+  'fetch_timeout': 'Retry a smaller date range or increase the timeout.',
+  'fetch_failed': 'Check WhatsApp Web/library compatibility, then retry.',
+  'archive_failed': 'Check media access and spool disk space, then retry.',
+  'history_cap_reached': 'Per-chat 12800-message cap reached; narrow the date range.',
+  'bridge_exited': 'Bridge exited early; check Chromium availability and retry.',
+  'disconnected': 'Check the linked-device connection, then retry.',
+}
+
+
+class WhatsAppHistoryPartialError(RuntimeError):
+  """Incomplete import; stored_count counts durable upserts, reasons are safe codes."""
+
+  def __init__(self, stored_count, reasons):
+    self.stored_count = stored_count
+    self.reasons = tuple(dict.fromkeys(
+      reason if reason in HISTORY_REASONS else 'fetch_failed' for reason in reasons))
+    self.reason = ', '.join(self.reasons)
+    super().__init__(f'WhatsApp history incomplete; stored {stored_count} messages. ' +
+             ' '.join(HISTORY_REASONS[reason] for reason in self.reasons))
+
+
 def import_history(start, end, timeout=600):
   """Synchronously archive synced WhatsApp history in [start, end).
 
@@ -248,6 +343,9 @@ def import_history(start, end, timeout=600):
   never authenticates, analyzes, sends, or marks messages read. A private
   persistent spool survives failures independently of the runtime spool.
   Returns the number of messages successfully stored (including DB upserts).
+  Partial runs drain enriched spool entries before WhatsAppHistoryPartialError
+  (stored_count/reasons). Fetch requests double from 200 to 12800 per chat;
+  linked-device exhaustion is not a guarantee of complete account history.
   """
   import math
   import queue
@@ -301,15 +399,22 @@ def import_history(start, end, timeout=600):
       reader = threading.Thread(target=read_events, daemon=True)
       reader.start()
       self_wid = None
-      while True:
+      reasons = []
+      pending_error = None
+
+      def consume_events():
+       nonlocal self_wid
+       while True:
         try:
           line = events.get(timeout=remaining())
         except queue.Empty as exc:
           raise TimeoutError('WhatsApp historical import timed out') from exc
         if isinstance(line, Exception):
-          raise line
+          reasons.append('bridge_exited')
+          return
         if line is None:
-          raise RuntimeError('WhatsApp bridge exited before history_complete')
+          reasons.append('bridge_exited')
+          return
         try:
           event = json.loads(line)
         except ValueError:
@@ -318,21 +423,41 @@ def import_history(start, end, timeout=600):
           continue
         kind = event.get('type')
         if kind in ('history_error', 'error', 'auth_failure', 'disconnected'):
-          raise RuntimeError(event.get('error') or f'WhatsApp {kind}')
+          reasons.append(event.get('reason') if event.get('reason') in HISTORY_REASONS
+                         else ('disconnected' if kind == 'disconnected' else 'fetch_failed'))
+          return
         if kind in ('qr', 'reauth_required'):
           raise PermissionError('WhatsApp session requires authentication')
         if kind == 'ready':
           self_wid = event.get('self')
         if kind == 'history_complete':
           if not self_wid:
-            raise RuntimeError('WhatsApp history completed without account identity')
-          break
+            reasons.append('bridge_exited')
+          errors = event.get('errors')
+          if isinstance(errors, dict):
+            reasons.extend(key if key in HISTORY_REASONS else 'fetch_failed' for key in errors)
+          if event.get('partial') and not reasons:
+            reasons.append('fetch_failed')
+          return
+
+      try:
+        consume_events()
+      except (TimeoutError, PermissionError) as exc:
+        pending_error = exc
+      # Stop the writer before draining, including fatal/timeout paths. Recovery
+      # must not be skipped merely because the fetch deadline has expired.
+      stop_process(proc)
+      stopped = proc
+      proc = None
+      reader.join(timeout=1)
+      for stream in (stopped.stdin, stopped.stdout):
+        if stream is not None:
+          stream.close()
 
       count = 0
       for path in sorted(spool.glob('*.json')):
-        remaining()
         m = json.loads(path.read_text())
-        if not m.get('enriched'):
+        if not self_wid or not m.get('enriched'):
           continue
         if (not start.timestamp() <= m['timestamp'] < end.timestamp()
             or m.get('chat_id') == 'status@broadcast'
@@ -357,6 +482,8 @@ def import_history(start, end, timeout=600):
                 'chat_id': m.get('chat_id'), 'author': m.get('author'),
                 'message_id': identity, 'chat_name': chat_name,
                 'author_name': m.get('author_name'),
+                **{key: m[key] for key in ('chat_name_rank', 'author_name_rank',
+                  'chat_aliases', 'author_aliases', 'names_version') if key in m},
                 'direction': 'out' if m.get('from_me') else 'in',
                 'recovered': True})
         count += 1
@@ -366,7 +493,11 @@ def import_history(start, end, timeout=600):
             and current.get('id') == identity
             and current.get('version') == m['version']):
           path.unlink()
-      remaining()
+      if pending_error is not None:
+        pending_error.stored_count = count
+        raise pending_error
+      if reasons:
+        raise WhatsAppHistoryPartialError(count, reasons)
       return count
     finally:
       try:
@@ -534,6 +665,10 @@ class WhatsAppBridge:
             'author': m.get('author'), 'message_id': m['id'],
             'chat_name': m.get('from_name'), 'author_name': m.get('author_name'),
             'direction': 'out' if m.get('from_me') else 'in'}
+          for key in ('chat_name_rank', 'author_name_rank', 'chat_aliases',
+                      'author_aliases', 'names_version'):
+            if key in m:
+              m['metadata'][key] = m[key]
           msgs.append(m)
         except (ValueError, KeyError, OSError, TypeError):
           continue

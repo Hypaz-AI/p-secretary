@@ -20,6 +20,7 @@ import time
 from datetime import datetime
 
 import actions
+import admin_config
 import brain
 import config
 import db
@@ -338,7 +339,7 @@ def _is_from_user(channel: str, sender: str, from_me: bool = False) -> bool:
 _chat_history = []
 
 
-def handle_user_chat(text: str, channel: str = "telegram") -> None:
+def handle_user_chat(text: str, channel: str = "telegram", images=None) -> None:
     """Dialogo con l'utente: risposta AI con contesto dal DB + memoria.
 
     Se l'AI fissa un appuntamento lo segnala con un marker @@EVENTO@@
@@ -347,13 +348,16 @@ def handle_user_chat(text: str, channel: str = "telegram") -> None:
     """
     global _chat_history
     print(f"[main] 💬 dialogo {channel}: {text[:60]}")
-    reply = brain.chat_with_user(text, history=_chat_history)
+    kwargs = {'images': images} if images else {}
+    reply = brain.chat_with_user(text, history=_chat_history, **kwargs)
     reply, events = gcal.parse_markers(reply)
     if events:
         # The model's prose may say 'Fatto' before tools run. Only actual
         # action results can confirm an operation, including in history.
         reply = _create_chat_appointments(events)
-    _chat_history.append({"role": "user", "content": text})
+    content = ([{'type': 'text', 'text': text or 'Guarda questa immagine.'}] + images
+               if images else text)
+    _chat_history.append({"role": "user", "content": content})
     _chat_history.append({"role": "assistant", "content": reply})
     _chat_history = _chat_history[-10:]  # tieni gli ultimi scambi
     if not telegram.notify(reply, html=False):
@@ -406,7 +410,8 @@ def _wa_sender_label(m: dict) -> str:
         if author_name:
             return f"{author_name} in {chat_name}"
         return f"{chat_name} · {m.get('author') or m.get('from')}"
-    return f"{chat_name} ({m.get('from')})"
+    identity = m.get('chat_id') or m.get('from')
+    return chat_name if chat_name == identity else f"{chat_name} ({identity})"
 
 
 def check_telegram(state: dict):
@@ -417,28 +422,17 @@ def check_telegram(state: dict):
     for m in msgs:
         if not running:
             break
-        channel = 'telegram (altro)' if m.get('unauthorized') else 'telegram'
+        metadata = m.get('metadata') or {}
+        if (m.get('unauthorized')
+                or not telegram.is_owner_chat(m.get('chat_id'), m.get('chat_type'))
+                or not telegram.is_owner_chat(metadata.get('chat_id'), metadata.get('chat_type'))):
+            continue
+        channel = 'telegram'
         chat_name = (m.get('metadata') or {}).get('chat_name') or 'bot'
         mid = db.store_message(channel, m['from'], f'Telegram · {chat_name}', m.get('text', ''),
             ts=m.get('msg_date'), source_id=m.get('source_id'), metadata=m.get('metadata'),
             attachments=m.get('attachments'))
         if m.get('source_id') and db.communication_seen(channel, m['source_id']):
-            continue
-        # messaggi da chat NON autorizzate: loggali come comunicazioni
-        # in arrivo (il segretario legge tutto), senza dialogare
-        if m.get("unauthorized"):
-            if not flows.enabled('telegram_bot'):
-                continue
-            process_message(
-                channel="telegram (altro)",
-                sender=m["from"],
-                subject=f"(messaggio Telegram da {chat_name})",
-                body=m.get("text", ""),
-                state=state,
-                attachments=m.get("attachments", []),
-                msg_date=m.get('msg_date'), source_id=m.get('source_id'),
-                metadata=m.get('metadata'), message_id=mid,
-            )
             continue
         # comandi rapidi / regole insegnate dall'utente
         from connectors import media_text
@@ -523,9 +517,13 @@ def _owner_job(payload):
         import pipeline
         from connectors import media_text
         row, attachments = pipeline.load_message(payload['message_id'])
+        images = media_text.image_parts(attachments)
         text = media_text.message_text(row[3], attachments)
-        # OCR must not turn image content into privileged slash commands/rules.
-        handle_user_chat(text)
+        # Media contents must never become privileged slash commands/rules.
+        if images:
+            handle_user_chat(text, images=images)
+        else:
+            handle_user_chat(text)
     elif not _handle_user_command(text):
         handle_user_chat(text)
 
@@ -590,7 +588,7 @@ def main():
     last_cycle = 0
     last_user_check = 0
     try:
-        while running:
+        while running and not admin_config.restart_requested():
             try:
                 now = time.time()
                 sync_workers(wa, personal)

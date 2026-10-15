@@ -26,6 +26,8 @@ class AdminConfigTests(unittest.TestCase):
         # Fail closed if any test accidentally reaches network.
         self.network = patch.object(admin, 'remote_json', side_effect=AssertionError('network forbidden')).start()
         self.addCleanup(patch.stopall)
+        patch.object(admin, '_restart_at', None).start()
+        patch.object(admin, 'automatic_restart', return_value=False).start()
 
     def payload(self, changes):
         return {'revision': self.client.get('/api/configuration').json['revision'], 'changes': changes}
@@ -70,6 +72,7 @@ class AdminConfigTests(unittest.TestCase):
         self.assertEqual(saved, self.path.read_bytes())
 
     def test_metadata_covers_every_field_and_dynamic_group(self):
+        self.assertFalse(self.post({'LANGUAGE': 'it'}).json['restart_scheduled'])
         fields = {f['key']: f for f in self.client.get('/api/configuration').json['fields']}
         for key, field in fields.items():
             self.assertTrue(field['description'], key)
@@ -96,6 +99,25 @@ class AdminConfigTests(unittest.TestCase):
                     'TELEGRAM_USER_MESSAGE_LIMIT', 'TELEGRAM_USER_RECOVERY_INTERVAL'):
             self.assertEqual(fields[key]['type'], 'number')
             self.assertEqual(fields[key]['step'], 1)
+
+    def test_docker_save_schedules_restart_after_commit_and_delay(self):
+        with patch.object(admin, 'automatic_restart', return_value=True), \
+             patch.object(admin.time, 'monotonic', return_value=100) as clock:
+            response = self.post({'AGENT_NAME': 'Restarted'})
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json['restart_scheduled'])
+            self.assertEqual(admin.read_env(self.path)['AGENT_NAME'], 'Restarted')
+            self.assertFalse(admin.restart_requested())
+            clock.return_value = 102
+            self.assertTrue(admin.restart_requested())
+
+    def test_failed_save_never_schedules_restart(self):
+        with patch.object(admin, 'automatic_restart', return_value=True):
+            self.assertEqual(self.post({'POLL_INTERVAL': '0'}).status_code, 400)
+            self.assertIsNone(admin._restart_at)
+            with patch.object(admin, 'atomic_write', side_effect=OSError('disk full')):
+                self.assertEqual(self.post({'AGENT_NAME': 'New'}).status_code, 400)
+            self.assertIsNone(admin._restart_at)
 
     def test_enum_validation_precedes_network_and_keeps_file(self):
         before = self.path.read_bytes()

@@ -164,11 +164,13 @@ el('config-confirm').onclick = async () => {
   el('config-save').disabled = true; el('config-load').disabled = true;
   el('config-status').textContent = 'Verifica in corso… nessuna modifica live.';
   try {
-    await api('/api/configuration', {revision: configRevision, changes});
+    const result = await api('/api/configuration', {revision: configRevision, changes});
     // A successful revision is deliberately invalidated: reload before another edit.
     el('config-fields').replaceChildren(); el('config-save').hidden = true; configRevision = '';
     el('config-form').hidden = true; el('config-groups').replaceChildren();
-    el('config-status').textContent = 'Batch salvato atomicamente. Runtime invariato: riavviare manualmente quando opportuno. Nessuna migrazione DB eseguita.';
+    el('config-status').textContent = result.restart_scheduled
+      ? 'Configurazione salvata. Riavvio automatico del container in corso: la dashboard sarà temporaneamente non disponibile. Al ritorno, accedi nuovamente. Nessuna migrazione DB eseguita.'
+      : 'Configurazione salvata. Runtime non Docker: riavvio manuale necessario. Nessuna migrazione DB eseguita.';
   } catch(e) {el('config-status').textContent = `Non salvato. ${e.message} Le credenziali precedenti sono invariate. Reinserisci le nuove credenziali per riprovare.`; editAgain();}
   finally {
     inputs.filter(input => input.dataset.secret === 'true').forEach(input => {input.value = '';});

@@ -165,6 +165,13 @@ def _media_attachments(msg, download_dir):
     return [{'filename': filename, 'content_type': mime, 'path': str(dest)}]
 
 
+def is_owner_chat(chat_id, chat_type) -> bool:
+    """Fail closed: only the configured owner's private bot chat is allowed."""
+    owner = str(config.TELEGRAM_CHAT_ID or '').strip()
+    return bool(owner and owner.isdecimal() and int(owner) > 0
+                and str(chat_id) == owner and chat_type == 'private')
+
+
 def fetch_new_messages(offset: int, download_dir=None) -> tuple:
     """Legge i nuovi update. Ritorna (lista messaggi, nuovo offset).
 
@@ -180,9 +187,6 @@ def fetch_new_messages(offset: int, download_dir=None) -> tuple:
     except OSError:
         print('[telegram] polling occupato; nessun update consumato')
         return messages, offset
-    # solo la chat configurata può dialogare col segretario:
-    # chiunque altro scriva al bot viene ignorato (anti prompt-injection)
-    authorized = str(config.TELEGRAM_CHAT_ID) if config.TELEGRAM_CHAT_ID else None
     try:
         result = _call("getUpdates", {
             "offset": offset,
@@ -193,6 +197,9 @@ def fetch_new_messages(offset: int, download_dir=None) -> tuple:
             offset = max(offset, update["update_id"] + 1)
             msg = update.get("message") or update.get("edited_message")
             if not msg:
+                continue
+            chat = msg.get('chat') or {}
+            if not is_owner_chat(chat.get('id'), chat.get('type')):
                 continue
             from datetime import datetime, timedelta
             from zoneinfo import ZoneInfo
@@ -214,43 +221,14 @@ def fetch_new_messages(offset: int, download_dir=None) -> tuple:
             native = {'msg_date': dt.isoformat() if dt else None,
                 'source_id': json.dumps(['bot', config.TELEGRAM_BOT_TOKEN.split(':')[0], chat_id, msg.get('message_id')]),
                 'metadata': {'account': 'bot:' + config.TELEGRAM_BOT_TOKEN.split(':')[0],
-                             'chat_id': chat_id, 'message_id': msg.get('message_id'),
+                             'chat_id': chat_id, 'chat_type': chat['type'],
+                             'message_id': msg.get('message_id'),
                              'author': msg.get('from', {}).get('id'), 'direction': 'in',
                              'chat_name': chat_name}}
-            if not authorized or chat_id != authorized:
-                who = _full_name(msg.get("from"))
-                username = (msg.get("from", {}).get("username") or "")
-                print(f"[telegram] ⚠️ messaggio da chat non autorizzata "
-                      f"{chat_id} ({who}): {str(msg.get('text', ''))[:60]}")
-                # NON scartare: loggalo come comunicazione in arrivo da altri
-                # (il segretario legge tutto; solo il dialogo è riservato a te)
-                entry = {
-                    **native,
-                    "chat_id": chat_id,
-                    "from": who,
-                    "text": text,
-                    "attachments": list(media_attachments),
-                    "unauthorized": True,
-                }
-                doc = msg.get("document")
-                if doc and download_dir:
-                    dest = Path(download_dir) / f"{doc['file_unique_id']}_{doc['file_name']}"
-                    try:
-                        _download(doc["file_id"], dest)
-                        entry["attachments"].append({
-                            "filename": doc["file_name"],
-                            "content_type": doc.get("mime_type", "application/octet-stream"),
-                            "path": str(dest),
-                        })
-                        entry["text"] = entry["text"] or f"(file: {doc['file_name']})"
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"[telegram] download allegato fallito: {exc}")
-                if entry["text"] or entry["attachments"]:
-                    messages.append(entry)
-                continue
             entry = {
                 **native,
                 "chat_id": chat_id,
+                "chat_type": chat['type'],
                 "from": _full_name(msg.get("from")),
                 "text": text,
                 "attachments": list(media_attachments),

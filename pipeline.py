@@ -46,6 +46,7 @@ def analyze(payload):
             return
     if channel.startswith('telegram'):
         from connectors import media_text
+        # Audio transcription only; no image OCR. Documents remain in brain.analyze.
         body = media_text.message_text(body, attachments)
     verdict = brain.normalize_verdict(brain.analyze(subject, sender, body, channel, attachments))
     if verdict['category'] == 'errore':

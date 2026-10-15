@@ -62,9 +62,8 @@ def get_bool(key: str, default: bool = False) -> bool:
 # --- OpenRouter ----------------------------------------------
 AGENT_NAME = get("AGENT_NAME", "Pi Secretary") or "Pi Secretary"
 OPENROUTER_API_KEY = get("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
+OPENROUTER_MODEL = get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
 OPENROUTER_AUDIO_MODEL = get("OPENROUTER_AUDIO_MODEL", "google/gemini-2.5-flash")
-OPENROUTER_IMAGE_MODEL = get("OPENROUTER_IMAGE_MODEL", "openai/gpt-4o-mini")
 
 # --- Email ----------------------------------------------------
 # Preset per provider: (host IMAP, porta IMAP, host SMTP, porta SMTP, auth)

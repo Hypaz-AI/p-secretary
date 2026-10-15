@@ -15,6 +15,7 @@ import smtplib
 import socket
 import ssl
 import threading
+import time
 from urllib.parse import urlsplit, quote, urlencode
 from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
 
@@ -24,6 +25,18 @@ from installer import read_env, valid_preference
 
 _lock = threading.Lock()
 _revision_key = os.urandom(32)
+_restart_at = None
+
+
+def restart_requested():
+    """Allow the HTTP response to finish before draining application workers."""
+    with _lock:
+        return _restart_at is not None and time.monotonic() >= _restart_at
+
+
+def automatic_restart():
+    return os.environ.get('PI_SECRETARY_CONTAINER') == '1'
+
 DEPLOYMENT = {
     'PI_SECRETARY_CONFIG_FILE', 'DATA_DIR', 'INVOICE_DIR', 'TELEGRAM_USER_SESSION',
     'DASHBOARD_CREDENTIAL_FILE', 'DASHBOARD_BIND', 'DASHBOARD_PORT',
@@ -45,9 +58,8 @@ def field_metadata(key):
     descriptions = {
         'AGENT_NAME': 'Nome con cui si presenta l’assistente.',
         'OPENROUTER_API_KEY': 'Chiave da openrouter.ai/keys; controllare credito e limiti di spesa.',
-        'OPENROUTER_MODEL': 'Identificativo provider/modello OpenRouter per il modello principale.',
+        'OPENROUTER_MODEL': 'Modello principale OpenRouter: DEVE supportare nativamente input testo e immagini (image_url).',
         'OPENROUTER_AUDIO_MODEL': 'Modello OpenRouter che trascrive gli audio Telegram in testo.',
-        'OPENROUTER_IMAGE_MODEL': 'Modello OpenRouter che descrive le immagini Telegram al modello principale.',
         'DATABASE_URL': 'URI PostgreSQL con credenziali percent-encoded. Verifica web solo host pubblici senza query; DB privati e opzioni TLS dal terminale. Nessuna migrazione automatica.',
         'TELEGRAM_BOT_TOKEN': 'Token BotFather per dialogo e report; non legge l’account personale. Un nuovo bot richiede autorizzazione da terminale.',
         'TELEGRAM_CHAT_ID': 'Chat privata del proprietario autorizzato con setup_telegram.py.',
@@ -125,7 +137,7 @@ def field_metadata(key):
 def schema():
     groups = {
         'Identità e AI': ['AGENT_NAME', 'OPENROUTER_API_KEY', 'OPENROUTER_MODEL',
-                  'OPENROUTER_AUDIO_MODEL', 'OPENROUTER_IMAGE_MODEL'],
+                  'OPENROUTER_AUDIO_MODEL'],
         'Database': ['DATABASE_URL'],
         'Telegram e WhatsApp': ['TELEGRAM_BOT_TOKEN', *INTERACTIVE,
             'TELEGRAM_USER_DIALOG_LIMIT', 'TELEGRAM_USER_MESSAGE_LIMIT', 'TELEGRAM_USER_RECOVERY_INTERVAL'],
@@ -180,7 +192,9 @@ def describe():
             fields.append(dict(spec, key=key, configured=bool(value),
                                value=None if spec['secret'] else value, readonly=readonly(key)))
         return {'revision': revision(raw), 'fields': fields,
-                'apply': 'Salvataggio per il prossimo avvio. Runtime invariato. Riavvio/ricreazione manuale; nessuna migrazione DB. Autorizzazioni QR/OTP/OAuth solo da terminale.'}
+                'apply': ('Dopo il salvataggio il container si riavvia automaticamente. '
+                          if automatic_restart() else 'Runtime non Docker: riavvio manuale necessario. ')
+                         + 'Nessuna migrazione DB. Autorizzazioni QR/OTP/OAuth solo da terminale.'}
 
 
 class Conflict(ValueError):
@@ -330,6 +344,7 @@ def validate(changes, values):
 
 
 def save(payload):
+    global _restart_at
     if not isinstance(payload, dict) or not isinstance(payload.get('changes'), dict) or not isinstance(payload.get('revision'), str):
         raise ValueError('Richiesta non valida')
     changes = payload['changes']
@@ -387,7 +402,11 @@ def save(payload):
             if candidate_path and created:
                 candidate_path.unlink(missing_ok=True)
             raise
-    return {'ok': True, 'restart_required': True, 'applied_live': False}
+        scheduled = automatic_restart()
+        if scheduled and _restart_at is None:
+            _restart_at = time.monotonic() + 2
+        return {'ok': True, 'restart_required': True, 'applied_live': False,
+            'restart_scheduled': scheduled}
 
 
 def register(app):

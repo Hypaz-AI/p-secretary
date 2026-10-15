@@ -87,6 +87,28 @@ class IngestionTests(unittest.TestCase):
         self.bridge.proc.poll.return_value = None
         self.assertEqual(self.bridge.fetch_new_messages(), [])
 
+    @patch('main.db.communication_seen', return_value=True)
+    @patch('main.process_message')
+    def test_raw_then_enriched_dedup_still_updates_storage(self, process, seen):
+        self.put(enriched=False, version='raw')
+        main.check_whatsapp({}, self.bridge)
+        self.store.assert_not_called()
+        self.put(enriched=True, version='enriched', author_name='Address Book',
+                 author_name_rank=3, names_version=2, author_aliases=['person@lid', '123@c.us'])
+        main.check_whatsapp({}, self.bridge)
+        self.assertEqual(self.store.call_args.kwargs['metadata']['author_name'], 'Address Book')
+        self.assertEqual(self.store.call_args.kwargs['metadata']['author_name_rank'], 3)
+        process.assert_not_called()
+        self.assertEqual(self.bridge.fetch_new_messages(), [])
+
+    def test_ack_raw_or_old_version_cannot_remove_enrichment(self):
+        self.put(enriched=False, version='raw')
+        self.bridge.ack('a', 'raw')
+        self.assertTrue(list(self.bridge.spool_dir.glob('*.json')))
+        self.put(version='new')
+        self.bridge.ack('a', 'raw')
+        self.assertEqual(len(self.bridge.fetch_new_messages()), 1)
+
     @patch('main.db.communication_seen', return_value=False)
     @patch('main.process_message')
     def test_cached_recovery_queues_analysis(self, process, seen):
@@ -124,6 +146,11 @@ class Client {
  constructor() { this.info = {wid:{_serialized:'self'}}; }
  on(k, fn) {events[k] = fn;}
  initialize() {return Promise.resolve();}
+ async getContactLidAndPhone(ids) {return ids.map(id=>({lid:id,pn:'123@c.us'}));}
+ async getContactById(id) {
+     if (id==='123@c.us') return {name:'Address Book',pushname:'Push'};
+     return {pushname:'Push'};
+ }
  async getChats() { return [{id:{_serialized:'g@g.us'}, name:'Group',
    fetchMessages: async options => {
     if (options.limit !== 200) throw Error('unbounded history requested');
@@ -160,7 +187,7 @@ vm.runInContext(JSON.parse(require('fs').readFileSync(0,'utf8')), context);
   const m=JSON.parse(files['/spool/'+Buffer.from(id).toString('hex')+'.json']);
   if(m.text!=='text'||!m.media_error||!m.enriched||m.author!=='person@c.us')
    throw Error('message dropped');
-  if(m.author_name!=='Marco') throw Error('author name not resolved');
+    if(m.author_name!=='Address Book') throw Error('addressbook must beat pushname');
   if(id!=='live' && m.from_name!=='Group')
    throw Error('chat name fallback failed: '+m.from_name);
  }
@@ -168,6 +195,30 @@ vm.runInContext(JSON.parse(require('fs').readFileSync(0,'utf8')), context);
  await events.message_create({...message('status'),from:'status@broadcast'});
  await events.message_create({...message('old'),timestamp:99});
  if(Object.keys(files).length!==before) throw Error('filter failed');
+ const privateMessage = {...message('private'),from:'person@lid',author:undefined,
+     hasMedia:false,getChat:async()=>({name:'person@lid'})};
+ await events.message_create(privateMessage);
+ const read=id=>JSON.parse(files['/spool/'+Buffer.from(id).toString('hex')+'.json']);
+ if(read('private').from_name!=='Address Book' ||
+        !read('private').chat_aliases.includes('123@c.us')) throw Error('private LID resolution');
+ await events.message_create({...privateMessage,id:{id:'out'},from:'self@c.us',
+     to:'person@lid',fromMe:true,getContact:async()=>{throw Error('must not resolve self');}});
+ if(read('out').from_name!=='Address Book') throw Error('outgoing destination resolution');
+ // Durable raw exists while contact lookup is blocked; no enriched flag yet.
+ let release;
+ vm.runInContext('client.getContactById = async () => {throw Error("unavailable")};'+
+     'client.getContactLidAndPhone = async () => {throw Error("unavailable")}',context);
+ const blocked=events.message_create({...privateMessage,id:{id:'blocked'},
+     getContact:()=>new Promise(resolve=>{release=resolve;})});
+ await new Promise(resolve=>setImmediate(resolve));
+ if(read('blocked').enriched) throw Error('raw incorrectly enriched');
+ release({verifiedName:'Verified'});
+ await blocked;
+ if(read('blocked').from_name!=='Verified') throw Error('verified fallback');
+ await events.message_create({...privateMessage,id:{id:'failed'},
+     getContact:async()=>{throw Error('unavailable')}});
+ if(!read('failed').enriched || read('failed').from_name!=='person@lid')
+     throw Error('contact failure lost raw message');
  console.log('mock Node bridge: PASS');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 '''

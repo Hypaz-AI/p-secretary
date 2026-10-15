@@ -1,5 +1,6 @@
 """Versioned native message storage; only the configured PostgreSQL is used."""
 import json
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -9,6 +10,57 @@ import email_attachments
 VERSION = 'native_messages_v1'
 TABLES = {'email': 'email_messages', 'whatsapp': 'whatsapp_messages',
           'telegram': 'telegram_messages'}
+
+
+def merge_whatsapp_metadata(old, incoming):
+    """Names only improve; technical IDs and message bodies remain native."""
+    merged = dict(old)
+    for key, value in incoming.items():
+        if value is not None and value != '' and key not in (
+                'chat_name', 'author_name', 'chat_name_rank', 'author_name_rank'):
+            if key.endswith('_aliases'):
+                merged[key] = list(dict.fromkeys(list(old.get(key) or []) + list(value)))
+            else:
+                merged[key] = value
+    for key in ('chat_name', 'author_name'):
+        def rank(meta):
+            name = str(meta.get(key) or '').strip()
+            if not name or re.fullmatch(r'[+\d\s().-]+', name) or re.search(
+                    r'@(lid|c\.us|s\.whatsapp\.net|g\.us)$', name):
+                return 0
+            return int(meta.get(key + '_rank') or 1)
+        if rank(incoming) >= rank(old) and rank(incoming) > 0:
+            merged[key] = incoming[key]
+            merged[key + '_rank'] = rank(incoming)
+        elif key not in merged and incoming.get(key):
+            merged[key] = incoming[key]
+    return merged
+
+
+def enrich_whatsapp(conn, row, meta, attachments):
+    mid, previous, sender, subject = row
+    merged = merge_whatsapp_metadata(previous, meta)
+    if merged != previous:
+        chat = merged.get('chat_name') or merged.get('chat_id') or '?'
+        author = merged.get('author_name')
+        if merged.get('direction') == 'out':
+            sender = f'io → {chat}'
+        elif str(merged.get('chat_id', '')).endswith('@g.us'):
+            sender = f'{author} in {chat}' if author else f"{chat} · {merged.get('author') or '?'}"
+        else:
+            sender = f"{chat} ({merged.get('chat_id') or merged.get('author') or '?'})"
+        conn.execute('UPDATE whatsapp_messages SET sender=%s,subject=%s,metadata=%s WHERE id=%s',
+                     (sender, f'WhatsApp · {chat}', json.dumps(merged), mid))
+    # Serialized by the message lock: retries/enrichment never duplicate media.
+    for att in attachments or []:
+        conn.execute('''INSERT INTO attachments(message_id,channel,filename,content_type,path,data,metadata)
+            SELECT %s,'whatsapp',%s,%s,%s,%s,%s WHERE NOT EXISTS
+            (SELECT 1 FROM attachments WHERE message_id=%s AND
+             filename IS NOT DISTINCT FROM %s AND path IS NOT DISTINCT FROM %s)''',
+            (mid, att.get('filename'), att.get('content_type'), att.get('path'),
+             att.get('data'), json.dumps({k: v for k, v in att.items() if k not in ('data', 'path')}),
+             mid, att.get('filename'), att.get('path')))
+    return mid
 
 
 def native(channel):
@@ -88,6 +140,13 @@ def store(conn, channel, sender, subject, body, ts=None, source_id=None,
         raise ValueError('Native timestamp must include timezone')
     day = dt.astimezone(ZoneInfo(config.TIMEZONE)).date() if dt else None
     with conn.transaction():
+        if channel == 'whatsapp' and source_id:
+            conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',
+                         ('whatsapp:' + source_id,))
+            existing = conn.execute('''SELECT id,metadata,sender,subject FROM whatsapp_messages
+                WHERE channel=%s AND source_id=%s FOR UPDATE''', (channel, source_id)).fetchone()
+            if existing:
+                return enrich_whatsapp(conn, existing, meta, attachments)
         conversation = None
         external = meta.get('chat_id')  # email Message-ID is NOT a thread ID
         if external is not None:

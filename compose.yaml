@@ -4,6 +4,7 @@ services:
     build: .
     image: pi-secretary:local
     init: true
+    restart: unless-stopped
     user: "${PI_SECRETARY_UID:-1000}:${PI_SECRETARY_GID:-1000}"
     stop_grace_period: 120s
     cap_drop: [ALL]
