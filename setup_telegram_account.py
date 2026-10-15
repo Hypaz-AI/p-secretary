@@ -10,6 +10,23 @@ from connectors.telegram_account import api_credentials, secure_session, session
 from connectors.storage import FileLock
 
 
+def login_code():
+    print('\nDove trovare il codice di accesso:')
+    print('  Apri Telegram sul telefono o su un altro dispositivo già collegato.')
+    print('  Controlla la chat di servizio ufficiale "Telegram", anche tra le chat archiviate.')
+    print('  Verifica che l’account aperto sia quello del numero inserito nel wizard.')
+    print('  Non usare token del bot, API_ID, API_HASH o codici di my.telegram.org.')
+    print('  La consegna via SMS non è garantita: dipende da Telegram.')
+    print('Se non arriva nulla, non tentare codici a caso: digita q per uscire.')
+    print('Prima di riprovare controlla il numero con prefisso internazionale;')
+    print('evita richieste ripetute ravvicinate, che possono causare limiti temporanei.')
+    print('Il codice non viene mostrato mentre lo digiti. Non condividerlo in chat.')
+    code = getpass.getpass('Codice di accesso Telegram (q = esci): ').strip()
+    if code.lower() == 'q':
+        raise KeyboardInterrupt()
+    return code
+
+
 async def authorize():
     from telethon import TelegramClient
     api_id, api_hash = api_credentials()
@@ -17,10 +34,13 @@ async def authorize():
     secure_session(path)
     client = TelegramClient(str(path), api_id, api_hash)
     try:
+        print('\nAccesso all’account Telegram PERSONALE (non al bot).')
+        print('Controlla il numero configurato nel wizard e apri il relativo account Telegram.')
+        print('Se questa sessione è già autorizzata, non sarà richiesto alcun codice.')
         await client.start(
             phone=lambda: config.TELEGRAM_PHONE or getpass.getpass('Phone (+country code): '),
-            code_callback=lambda: getpass.getpass('Telegram login code: '),
-            password=lambda: getpass.getpass('Telegram two-step verification password: '))
+            code_callback=login_code,
+            password=lambda: getpass.getpass('Password verifica in due passaggi Telegram (impostata da te, non un codice): '))
         me = await client.get_me()
         if me.bot:
             raise ValueError('Personal account required, not a bot')
