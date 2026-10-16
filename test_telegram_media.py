@@ -11,6 +11,45 @@ from connectors import media_text, telegram
 
 
 class MediaTextTests(unittest.TestCase):
+    def test_audio_budget_scales_with_duration_and_is_bounded(self):
+        self.assertEqual(media_text.audio_token_budget({'duration': 30}), 4696)
+        self.assertEqual(media_text.audio_token_budget({'duration': 300}), 10096)
+        self.assertEqual(media_text.audio_token_budget({'duration': 1200}), 28096)
+        self.assertEqual(media_text.audio_token_budget({'duration': 100000}), 32768)
+        for duration in (None, '', 'bad', True, -1, 0, float('nan'), float('inf')):
+            with self.subTest(duration=duration):
+                self.assertEqual(media_text.audio_token_budget({'duration': duration}), 16384)
+
+    def test_long_transcription_is_not_silently_cut(self):
+        text = 'parlato ' * 3000
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            'choices': [{'message': {'content': text}}]}).encode()
+        with patch.object(config, 'OPENROUTER_API_KEY', 'test'), patch(
+                'connectors.media_text.urllib.request.urlopen', return_value=response) as request:
+            result = media_text.convert({'content_type': 'audio/ogg', 'data': b'audio',
+                                         'duration': 300})
+        self.assertEqual(result, text.strip())
+        self.assertEqual(json.loads(request.call_args.args[0].data)['max_tokens'], 10096)
+
+    def test_audio_truncation_retries_with_larger_budget(self):
+        from test_chat_completion import completion
+        with patch.object(config, 'OPENROUTER_API_KEY', 'test'), patch(
+                'connectors.media_text.urllib.request.urlopen', side_effect=[
+                    completion('inizio', 'length'), completion('trascrizione completa')]) as request:
+            result = media_text.convert({'content_type': 'audio/ogg', 'data': b'audio',
+                                         'duration': 300})
+        self.assertEqual(result, 'trascrizione completa')
+        self.assertEqual([json.loads(call.args[0].data)['max_tokens']
+                          for call in request.call_args_list], [10096, 20192])
+
+    def test_audio_safety_limit_raises_instead_of_cutting(self):
+        with patch.object(config, 'OPENROUTER_API_KEY', 'test'), patch.object(
+                media_text.ai_budget, 'request_content', return_value='troppo lungo'), patch.object(
+                media_text, 'MAX_TEXT', 2):
+            with self.assertRaisesRegex(RuntimeError, 'limite di sicurezza'):
+                media_text.convert({'content_type': 'audio/ogg', 'data': b'audio'})
+
     def request(self, mime, data=b'media'):
         response = MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps({
@@ -82,6 +121,21 @@ class MediaTextTests(unittest.TestCase):
 
 
 class PipelineMediaTests(unittest.TestCase):
+    def test_load_message_restores_archived_audio_duration(self):
+        import pipeline
+        connection = MagicMock()
+        conn = connection.__enter__.return_value
+        conn.execute.return_value.fetchone.return_value = ('telegram', 'owner', '', 'test', '1')
+        conn.execute.return_value.fetchall.return_value = [
+            ('voice.ogg', 'audio/ogg', '/tmp/voice.ogg', None,
+             {'duration': 123, 'path': 'untrusted path'}),
+            ('old.ogg', 'audio/ogg', '/tmp/old.ogg', None, {})]
+        with patch.object(pipeline.db, '_conn', return_value=connection):
+            _, attachments = pipeline.load_message(42)
+        self.assertEqual(attachments[0]['duration'], 123)
+        self.assertEqual(attachments[0]['path'], '/tmp/voice.ogg')
+        self.assertNotIn('duration', attachments[1])
+
     def test_analysis_transcribes_only_audio_and_preserves_document_attachments(self):
         import pipeline
         attachments = [{'filename': 'photo.png', 'content_type': 'image/png'},
@@ -116,9 +170,11 @@ class TelegramMediaTests(unittest.TestCase):
 
     def test_voice_is_downloaded_and_authorized(self):
         (messages, offset), download = self.fetch({'chat': {'id': 7, 'type': 'private'},
-            'voice': {'file_id': 'v', 'file_unique_id': 'unique', 'mime_type': 'audio/ogg'}})
+            'voice': {'file_id': 'v', 'file_unique_id': 'unique', 'mime_type': 'audio/ogg',
+                      'duration': 42}})
         self.assertEqual(offset, 6)
         self.assertEqual(messages[0]['attachments'][0]['content_type'], 'audio/ogg')
+        self.assertEqual(messages[0]['attachments'][0]['duration'], 42)
         self.assertNotIn('unauthorized', messages[0])
         self.assertEqual(download.call_args.kwargs['max_bytes'], media_text.MAX_BYTES)
 

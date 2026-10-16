@@ -42,6 +42,8 @@ class AgentIdentityTests(unittest.TestCase):
             self.assertEqual(brain.chat_with_user("Come ti chiami?"), "Mi chiamo Ada.")
         payload = json.loads(request.call_args.args[0].data)
         self.assertIn('Il tuo nome è "Ada"', payload["messages"][0]["content"])
+        # Multi-event agendas must not share the old 600-token reasoning cap.
+        self.assertEqual(payload["max_tokens"], 16384)
 
 
 if __name__ == "__main__":

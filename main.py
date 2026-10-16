@@ -347,6 +347,11 @@ def handle_user_chat(text: str, channel: str = "telegram", images=None) -> None:
     agenda e — se Google Calendar è collegato — creato come evento.
     """
     global _chat_history
+    message_id = getattr(_owner_context, 'message_id', None)
+    if message_id is not None:
+        import owner_dialogue
+        owner_dialogue.respond(text, message_id, images=images)
+        return
     print(f"[main] 💬 dialogo {channel}: {text[:60]}")
     kwargs = {'images': images} if images else {}
     reply = brain.chat_with_user(text, history=_chat_history, **kwargs)
@@ -431,7 +436,7 @@ def check_telegram(state: dict):
         chat_name = (m.get('metadata') or {}).get('chat_name') or 'bot'
         mid = db.store_message(channel, m['from'], f'Telegram · {chat_name}', m.get('text', ''),
             ts=m.get('msg_date'), source_id=m.get('source_id'), metadata=m.get('metadata'),
-            attachments=m.get('attachments'))
+            attachments=m.get('attachments'), reconcile=True)
         if m.get('source_id') and db.communication_seen(channel, m['source_id']):
             continue
         # comandi rapidi / regole insegnate dall'utente
@@ -471,7 +476,7 @@ def check_whatsapp(state: dict, bridge: WhatsAppBridge):
         try:
             mid = db.store_message('whatsapp', sender, f'WhatsApp · {chat_name}', m.get('text', ''),
                 ts=m.get('msg_date'), source_id=m.get('id'), metadata=m.get('metadata'),
-                attachments=m.get('attachments'))
+                attachments=m.get('attachments'), reconcile=True)
             if db.communication_seen('whatsapp', m['id']):
                 bridge.ack(m['id'], m.get('version'))
                 continue
@@ -511,14 +516,25 @@ _owner_context = threading.local()
 
 
 def _owner_job(payload):
-    _owner_context.message_id = payload['message_id']
+    # Scope archived identity to this job, including exceptions and retries.
+    try:
+        _owner_context.message_id = payload['message_id']
+        _run_owner_job(payload)
+    finally:
+        _owner_context.message_id = None
+
+
+def _run_owner_job(payload):
     text = payload['text']
     if payload.get('media'):
         import pipeline
         from connectors import media_text
         row, attachments = pipeline.load_message(payload['message_id'])
         images = media_text.image_parts(attachments)
-        text = media_text.message_text(row[3], attachments)
+        # Only the owner's caption and voice are privileged current text.
+        # Image OCR remains visible through vision/archive, never owner evidence.
+        text = media_text.message_text(row[3], [a for a in attachments
+                              if media_text.kind(a) == 'audio'])
         # Media contents must never become privileged slash commands/rules.
         if images:
             handle_user_chat(text, images=images)
@@ -526,6 +542,29 @@ def _owner_job(payload):
             handle_user_chat(text)
     elif not _handle_user_command(text):
         handle_user_chat(text)
+
+
+def _reconcile_job(payload):
+    """Do not overtake already queued earlier analysis or replay superseded edits."""
+    import jobs
+    import task_reconciliation
+    mid = payload['message_id']
+    with db._conn() as conn:
+        if payload.get('revision'):
+            current = conn.execute('''SELECT 1 FROM telegram_messages WHERE id=%s
+                AND (metadata->>'revision_date')::timestamptz=%s::timestamptz''',
+                (mid, payload['revision'])).fetchone()
+            if not current:
+                return
+        earlier = conn.execute('''SELECT 1 FROM work_jobs j
+            JOIN communications c ON c.id=(j.payload->>'message_id')::bigint
+            WHERE j.kind='analysis' AND j.status IN ('pending','running')
+              AND c.id<>%s AND c.acquired_at <=
+                  (SELECT acquired_at FROM communications WHERE id=%s)
+            LIMIT 1''', (mid, mid)).fetchone()
+        if earlier:
+            raise jobs.Deferred('Earlier message analysis is unfinished')
+    task_reconciliation.reconcile(payload)
 
 
 def main():
@@ -561,6 +600,7 @@ def main():
     state = actions.load_state()
     import jobs
     import pipeline
+    from connectors import media_archive
     state['telegram_offset'] = jobs.cursor('telegram_bot_offset', state.get('telegram_offset', 0))
     flows.init()
     web_server = dashboard.start()
@@ -570,6 +610,8 @@ def main():
     platform_health.register_workers(wa, personal)
 
     workers = [jobs.Worker('analysis', pipeline.analyze).start(),
+               jobs.Worker('media', media_archive.process).start(),
+               jobs.Worker('reconcile', _reconcile_job).start(),
                jobs.Worker('action', pipeline.action).start(),
                jobs.Worker('owner', _owner_job).start()]
     periodic = {}

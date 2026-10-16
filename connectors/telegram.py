@@ -162,7 +162,10 @@ def _media_attachments(msg, download_dir):
     filename = f"{Path(media['file_unique_id']).name}{suffix}"
     dest = Path(download_dir) / filename
     _download(media['file_id'], dest, max_bytes=MAX_BYTES)
-    return [{'filename': filename, 'content_type': mime, 'path': str(dest)}]
+    attachment = {'filename': filename, 'content_type': mime, 'path': str(dest)}
+    if 'duration' in media:
+        attachment['duration'] = media['duration']
+    return [attachment]
 
 
 def is_owner_chat(chat_id, chat_type) -> bool:

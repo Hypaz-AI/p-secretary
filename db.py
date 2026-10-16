@@ -113,15 +113,23 @@ def init(approved_reset: bool = False) -> int:
         result = message_store.migrate(conn, SCHEMA, False)
         import jobs
         jobs.migrate(conn)
+        import task_reconciliation
+        task_reconciliation.migrate(conn)
+        from connectors import media_archive
+        media_archive.migrate(conn)
+        import owner_dialogue
+        owner_dialogue.migrate(conn)
         return result
 
 
 # ------------------------------------------------------- comunicazioni ----
 def store_message(channel, sender, subject, body, ts=None, source_id=None,
-                  metadata=None, attachments=None, update_existing=False):
+                  metadata=None, attachments=None, update_existing=False, reconcile=False,
+                  historical=False):
     with _conn() as conn:
         return message_store.store(conn, channel, sender, subject, body, ts,
-                                   source_id, metadata, attachments, update_existing)
+                                   source_id, metadata, attachments, update_existing,
+                                   reconcile=reconcile, **({'historical': True} if historical else {}))
 
 
 def log_communication(channel, sender, subject, body, verdict, notified,
@@ -169,7 +177,10 @@ def communications_for_day(day=None) -> list:
     with _conn() as conn:
         rows = conn.execute(
             """SELECT ts, channel, sender, subject,
-                      COALESCE(summary, LEFT(body, 2000)) AS summary, category,
+                                            concat_ws(E'\n\n', COALESCE(summary, LEFT(body, 2000)),
+                                                (SELECT string_agg('[' || t.kind || '] ' || t.text, E'\n\n' ORDER BY a.id)
+                                                 FROM attachments a JOIN media_transcripts t ON t.attachment_id=a.id
+                                                 WHERE a.message_id=communications.id)) AS summary, category,
                       priority, needs_action, action, direction
                FROM communications
                WHERE day = COALESCE(%(day)s, (now() AT TIME ZONE %(tz)s)::date)
@@ -190,7 +201,10 @@ def communications_since(hours: int = 24) -> list:
     with _conn() as conn:
         rows = conn.execute(
             """SELECT ts, channel, sender, subject,
-                      COALESCE(summary, LEFT(body, 2000)) AS summary, category,
+                                            concat_ws(E'\n\n', COALESCE(summary, LEFT(body, 2000)),
+                                                (SELECT string_agg('[' || t.kind || '] ' || t.text, E'\n\n' ORDER BY a.id)
+                                                 FROM attachments a JOIN media_transcripts t ON t.attachment_id=a.id
+                                                 WHERE a.message_id=communications.id)) AS summary, category,
                       priority, needs_action, action, direction
                FROM communications
                WHERE ts >= now() - %(hours)s * interval '1 hour'
@@ -201,6 +215,50 @@ def communications_since(hours: int = 24) -> list:
         return [dict(zip(cols, r)) for r in rows]
 
 # ------------------------------------------------------------ appuntamenti ----
+def pending_tasks(until: datetime) -> list:
+    """Attività aperte: arretrate, entro l'orizzonte e senza scadenza."""
+    from zoneinfo import ZoneInfo
+    local_until = until.astimezone(ZoneInfo(config.TIMEZONE))
+    with _conn() as conn:
+        rows = conn.execute(
+                 """WITH horizon AS (SELECT %s::timestamptz AS until)
+                 SELECT id, title, deadline, source_message, owner_deadline_date, owner_remind_at,
+                     owner_origin_message, owner_operation_key, version FROM tasks CROSS JOIN horizon
+                 WHERE status='open' AND (deadline IS NULL OR deadline <= horizon.until
+                                OR owner_remind_at <= horizon.until)
+               ORDER BY deadline NULLS LAST, id""", (until,)).fetchall()
+        tasks = [dict(zip(('id', 'title', 'deadline', 'source_message', 'owner_deadline_date',
+                           'owner_remind_at', 'owner_origin_message', 'owner_operation_key', 'version'), row))
+                 for row in rows]
+        # DATE horizons use the configured local date, never the DB session zone.
+        tasks = [t for t in tasks if t.get('owner_deadline_date') is None
+                 or t['owner_deadline_date'] <= local_until.date()
+                 or (t.get('owner_remind_at') is not None and t['owner_remind_at'] <= until)]
+        def order(task):
+            if task.get('owner_deadline_date') is not None:
+                return (0, datetime.combine(task['owner_deadline_date'], datetime.min.time(),
+                                            local_until.tzinfo), task['id'])
+            if task.get('deadline') is not None:
+                return (0, task['deadline'], task['id'])
+            return (1, local_until, task['id'])
+        return sorted(tasks, key=order)
+
+
+def appointments_between(start: datetime, end: datetime) -> list:
+    """Agenda interna nell'intervallo assoluto, incluse proposte da confermare."""
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT id, title, dt, location, notes, event_id, sync_state
+               FROM appointments WHERE NOT done
+                 AND sync_state NOT IN ('cancelled', 'cancel_pending')
+                 AND (dt::timestamp AT TIME ZONE %(tz)s) >= %(start)s
+                 AND (dt::timestamp AT TIME ZONE %(tz)s) <= %(end)s
+               ORDER BY dt""",
+            {'tz': config.TIMEZONE, 'start': start, 'end': end}).fetchall()
+        return [dict(zip(('id', 'title', 'dt', 'location', 'notes', 'event_id', 'sync_state'), row))
+                for row in rows]
+
+
 def add_appointment(title: str, dt: str, location: str = "", notes: str = "",
                     source: str = "") -> int:
     with _conn() as conn:
@@ -249,11 +307,32 @@ def personal_memories() -> list:
         return [dict(id=row[0], text=row[1]) for row in rows]
 
 
-def apply_personal_memories(changes: list, known_ids: set) -> int:
-    """Applica solo modifiche validate, atomicamente e senza duplicati esatti."""
+def apply_personal_memories(changes: list, known_ids: set, conn=None, expected=None) -> int:
+    """Applica note; con conn usa la transazione del chiamante, senza chiuderla.
+
+    expected è lo snapshot id/testo (mappa o lista di note) per il CAS di update/delete.
+    Senza conn possiede connessione e transazione, come nel percorso legacy.
+    """
+    from contextlib import ExitStack
+
     changed = 0
-    with _conn() as conn, conn.transaction():
+    with ExitStack() as stack:
+        if conn is None:
+            conn = stack.enter_context(_conn())
+            stack.enter_context(conn.transaction())
         conn.execute('SELECT pg_advisory_xact_lock(73190422)')
+        if expected is not None:
+            snapshot = (expected if isinstance(expected, dict)
+                        else {m['id']: m['text'] for m in expected})
+            targets = sorted({c.get('id') for c in changes
+                              if c['operation'] in ('update', 'delete')
+                              and c.get('id') in known_ids})
+            # Controlla tutti i bersagli prima di scrivere; i lock durano fino al commit.
+            for identity in targets:
+                row = conn.execute('SELECT text FROM notes WHERE id=%s FOR UPDATE',
+                                   (identity,)).fetchone()
+                if identity not in snapshot or row is None or row[0] != snapshot[identity]:
+                    raise ValueError('Memoria personale cambiata dopo la preparazione')
         for change in changes:
             operation = change['operation']
             identity = change.get('id')

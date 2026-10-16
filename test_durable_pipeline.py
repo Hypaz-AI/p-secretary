@@ -48,6 +48,9 @@ assert not errors, errors
         self.network = patch('urllib.request.urlopen', side_effect=AssertionError('Network forbidden'))
         self.network.start()
         self.addCleanup(self.network.stop)
+        exclusion = patch('message_store.reconciliation_excluded', return_value=False)
+        exclusion.start()
+        self.addCleanup(exclusion.stop)
 
     def test_ingest_commits_source_and_queue_without_ai(self):
         with patch('message_store.store', return_value=42) as store, patch('brain.analyze') as ai:
@@ -55,15 +58,47 @@ assert not errors, errors
         self.assertEqual(result['message_id'],42)
         store.assert_called_once()
         ai.assert_not_called()
-        sql, params = self.conn.execute.call_args.args
+        sql, params = self.conn.execute.call_args_list[0].args
         self.assertIn('ON CONFLICT',sql)
         self.assertEqual(params[:2],('analysis','analysis:42'))
+        _, reconciliation = self.conn.execute.call_args_list[1].args
+        self.assertEqual(reconciliation[0], 'reconcile')
+        self.assertEqual(json.loads(reconciliation[2]), {'message_id': 42, 'revision': ''})
 
     def test_notification_failure_does_not_mark_sent(self):
         with patch('connectors.telegram.notify', return_value=False):
             with self.assertRaises(RuntimeError):
                 pipeline.action({'type':'notify','message_id':42,'text':'x'})
         self.conn.execute.assert_not_called()
+
+    def test_task_proposal_commands_use_persistent_owner_handler(self):
+        with patch('task_reconciliation.owner_commands', return_value=True) as owner:
+            self.assertTrue(pipeline.owner_commands('/proposte'))
+        owner.assert_called_once_with('/proposte')
+        self.conn.execute.assert_not_called()
+
+    def test_manual_done_uses_lifecycle_cleanup(self):
+        with patch('task_reconciliation.close_task', return_value=True) as close, \
+             patch('connectors.telegram.notify') as notify:
+            self.assertTrue(pipeline.owner_commands('/fatto 7'))
+        close.assert_called_once_with(self.conn, 7)
+        self.assertEqual(notify.call_args.args[0], 'Attività completata.')
+
+    def test_stale_reminder_is_not_delivered(self):
+        with patch('task_reconciliation.reminder_is_current', return_value=False) as gate, \
+             patch('connectors.telegram.notify') as notify:
+            pipeline.action({'type': 'reminder', 'id': 7})
+        gate.assert_called_once_with(self.conn, {'type': 'reminder', 'id': 7})
+        notify.assert_not_called()
+
+    def test_scheduler_stamps_current_deadline(self):
+        from datetime import datetime, timezone
+        deadline = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        self.conn.execute.return_value.fetchall.return_value = [(7, deadline)]
+        with patch('flows.enabled', return_value=False), patch('jobs.enqueue') as enqueue:
+            pipeline.schedule()
+        self.assertEqual(enqueue.call_args.args[3], {
+            'type': 'reminder', 'id': 7, 'deadline': deadline.isoformat()})
 
     def test_notification_ack_marks_actual_sent(self):
         with patch('connectors.telegram.notify', return_value=True):

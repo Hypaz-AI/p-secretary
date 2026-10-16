@@ -1,6 +1,6 @@
 """Durable ingestion → analysis → outbox. No external effects inside DB transactions."""
 import json
-from datetime import datetime
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 import brain
@@ -18,16 +18,30 @@ def ingest(channel, sender, subject, body, state=None, attachments=None,
         mid = message_id or db.message_store.store(conn, channel, sender, subject, body,
             msg_date, source_id, metadata, attachments)
         jobs.enqueue(conn, 'analysis', f'analysis:{mid}', {'message_id': mid})
+        import task_reconciliation
+        task_reconciliation.queue(conn, mid)
     return {'queued': True, 'message_id': mid}
 
 
 def load_message(mid):
     with db._conn() as conn:
         row = conn.execute('SELECT channel,sender,subject,body,source_id FROM communications WHERE id=%s', (mid,)).fetchone()
-        attachments = conn.execute('SELECT filename,content_type,path,data FROM attachments WHERE message_id=%s', (mid,)).fetchall()
+        attachments = conn.execute('''SELECT a.filename,a.content_type,a.path,a.data,a.metadata,
+            a.id,t.text FROM attachments a LEFT JOIN media_transcripts t ON t.attachment_id=a.id
+            WHERE a.message_id=%s ORDER BY a.id''', (mid,)).fetchall()
     if not row:
         raise ValueError('Missing archived message')
-    return row, [dict(zip(('filename','content_type','path','data'), a)) for a in attachments]
+    result = []
+    for attachment in attachments:
+        item = dict(zip(('filename','content_type','path','data'), attachment))
+        metadata = attachment[4] if len(attachment) > 4 else None
+        if isinstance(metadata, dict) and 'duration' in metadata:
+            item['duration'] = metadata['duration']
+        if len(attachment) > 5:
+            item['id'] = attachment[5]
+            item['transcript'] = attachment[6]
+        result.append(item)
+    return row, result
 
 
 def merge_agenda(remote, local):
@@ -44,9 +58,9 @@ def analyze(payload):
     with db._conn() as conn:
         if conn.execute('SELECT 1 FROM message_analysis WHERE message_id=%s', (mid,)).fetchone():
             return
-    if channel.startswith('telegram'):
+    if channel.startswith('telegram') or channel == 'whatsapp':
         from connectors import media_text
-        # Audio transcription only; no image OCR. Documents remain in brain.analyze.
+        # Archived media must be converted durably before semantic analysis.
         body = media_text.message_text(body, attachments)
     verdict = brain.normalize_verdict(brain.analyze(subject, sender, body, channel, attachments))
     if verdict['category'] == 'errore':
@@ -100,6 +114,15 @@ def action(payload):
     if kind == 'notify':
         if payload.get('flow') and not flows.enabled(payload['flow']):
             raise jobs.Deferred('Notification flow paused')
+        if payload.get('owner_reply_mid') is not None:
+            key = f"owner-reply:{payload['owner_reply_mid']}:{payload['owner_reply_chunk']}"
+            with db._conn() as conn:
+                # Include backoff/leased replies, but exclude this job and terminal failures.
+                if conn.execute("""SELECT 1 FROM work_jobs WHERE kind='action' AND key LIKE %s
+                    AND id < (SELECT id FROM work_jobs WHERE key=%s)
+                    AND status IN ('pending','running') LIMIT 1""",
+                    ('owner-reply:%', key)).fetchone():
+                    raise jobs.Deferred('Earlier owner reply still delivering')
         if not telegram.notify(payload['text'], html=payload.get('html', True)):
             raise RuntimeError('Notification not acknowledged')
         if payload.get('message_id'):
@@ -143,9 +166,21 @@ def action(payload):
                 invoices.save_invoice(info.get('entity'), att['filename'], bytes(data), sender,
                     subject, channel, info.get('date'), info.get('description'), info.get('document_number'))
     elif kind == 'reminder':
+        import task_reconciliation
         with db._conn() as conn:
-            row = conn.execute("SELECT title FROM tasks WHERE id=%s AND status='open'", (payload['id'],)).fetchone()
-        if row and not telegram.notify('⏰ Attività in scadenza: '+row[0], html=False):
+            if not task_reconciliation.reminder_is_current(conn, payload):
+                return
+            if payload.get('owner_reminder'):
+                row = conn.execute("""SELECT title,deadline,owner_deadline_date,owner_remind_at FROM tasks
+                    WHERE id=%s AND status='open' AND version=%s""",
+                    (payload['id'], payload['version'])).fetchone()
+            else:
+                row = conn.execute("SELECT title FROM tasks WHERE id=%s AND status='open'", (payload['id'],)).fetchone()
+        prefix = '⏰ Promemoria attività: ' if payload.get('owner_reminder') else '⏰ Attività in scadenza: '
+        label = (' — ' + owner_task_schedule_label(dict(zip(
+            ('title', 'deadline', 'owner_deadline_date', 'owner_remind_at'), row)))
+                 if row and payload.get('owner_reminder') else '')
+        if row and not telegram.notify(prefix+row[0]+label, html=False):
             raise RuntimeError('Reminder not acknowledged')
     elif kind == 'zip':
         if not flows.enabled('monthly_zip'):
@@ -158,6 +193,57 @@ def action(payload):
         raise ValueError('Unknown action')
 
 
+def owner_reminder_time(task):
+    """Explicit reminder wins; otherwise default to local 09:00 or the deadline."""
+    if task.get('owner_remind_at') is not None:
+        return task['owner_remind_at']
+    if task.get('owner_deadline_date') is not None:
+        return datetime.combine(task['owner_deadline_date'], time(9), ZoneInfo(config.TIMEZONE))
+    return task.get('deadline')
+
+
+def is_owner_task(task):
+    return any(task.get(field) is not None for field in (
+        'owner_origin_message', 'owner_operation_key', 'owner_deadline_date', 'owner_remind_at'))
+
+
+def enqueue_owner_reminder(conn, task):
+    """Caller holds the open task row lock; never rearm a delivered version."""
+    remind_at = owner_reminder_time(task)
+    if remind_at is None:
+        return
+    key = f"owner-reminder:{task['id']}:v{task['version']}"
+    payload = {'type': 'reminder', 'id': task['id'], 'version': task['version'],
+               'owner_reminder': True, 'remind_at': remind_at.isoformat()}
+    if jobs.enqueue(conn, 'action', key, payload):
+        conn.execute('UPDATE work_jobs SET available_at=GREATEST(now(),%s::timestamptz) WHERE key=%s',
+                     (remind_at, key))
+
+
+def owner_task_schedule_label(task, now=None):
+    """Presentation only: a default reminder is not a timed deadline."""
+    now = now or datetime.now(ZoneInfo(config.TIMEZONE))
+    parts = []
+    day = task.get('owner_deadline_date')
+    if day is not None:
+        parts.append(f'{day.isoformat()} (solo data)'
+                     + (' — arretrata' if day < now.astimezone(ZoneInfo(config.TIMEZONE)).date() else ''))
+    elif task.get('deadline') is not None:
+        parts.append(task['deadline'].astimezone(ZoneInfo(config.TIMEZONE)).isoformat())
+    else:
+        parts.append('senza scadenza')
+    reminder = owner_reminder_time(task)
+    if reminder is not None:
+        if task.get('owner_remind_at') is not None:
+            label = 'promemoria richiesto'
+        elif day is not None:
+            label = 'promemoria predefinito (default 09:00 locale)'
+        else:
+            label = 'promemoria predefinito (default alla scadenza)'
+        parts.append(f'{label}: {reminder.astimezone(ZoneInfo(config.TIMEZONE)).isoformat()}')
+    return '; '.join(parts)
+
+
 def schedule():
     import invoices
     current = datetime.now(ZoneInfo(config.TIMEZONE)).strftime('%Y-%m')
@@ -165,11 +251,25 @@ def schedule():
         for month in sorted({m['month'] for m in db.months_with_invoices() if m['month'] < current}):
             jobs.submit('action', f'zip:{month}', {'type':'zip','month':month})
     with db._conn() as conn, conn.transaction():
-        for row in conn.execute("SELECT id FROM tasks WHERE status='open' AND deadline<=now()+interval '24 hours'").fetchall():
-            jobs.enqueue(conn, 'action', f'task-reminder:{row[0]}', {'type':'reminder','id':row[0]})
+        for row in conn.execute("""SELECT id,version,owner_deadline_date,owner_remind_at,deadline FROM tasks
+            WHERE status='open' AND (owner_deadline_date IS NOT NULL OR owner_remind_at IS NOT NULL
+                OR (deadline IS NOT NULL AND
+                    (owner_origin_message IS NOT NULL OR owner_operation_key IS NOT NULL)))
+            FOR UPDATE""").fetchall():
+            enqueue_owner_reminder(conn, dict(zip(
+            ('id', 'version', 'owner_deadline_date', 'owner_remind_at', 'deadline'), row)))
+        for row in conn.execute("""SELECT id,deadline FROM tasks WHERE status='open'
+            AND owner_origin_message IS NULL AND owner_operation_key IS NULL
+            AND owner_deadline_date IS NULL AND owner_remind_at IS NULL
+            AND deadline<=now()+interval '24 hours' FOR UPDATE""").fetchall():
+            jobs.enqueue(conn, 'action', f'task-reminder:{row[0]}',
+                         {'type':'reminder','id':row[0], 'deadline':row[1].isoformat()})
 
 
 def owner_commands(text):
+    import task_reconciliation
+    if task_reconciliation.owner_commands(text):
+        return True
     parts = text.strip().split(maxsplit=1)
     command = parts[0].lower() if parts else ''
     if command not in ('/attivita','/fatto','/conferma','/annulla','/task'):
@@ -191,14 +291,21 @@ def owner_commands(text):
             except ValueError:
                 reply = 'Usare /task titolo | YYYY-MM-DDTHH:MM+02:00 (scadenza facoltativa).'
         elif command == '/attivita':
-            rows = conn.execute("SELECT id,title,deadline,source_message FROM tasks WHERE status='open' ORDER BY deadline NULLS LAST,id LIMIT 50").fetchall()
-            reply = '\n'.join(f'#{r[0]} {r[1]} — {r[2] or "senza scadenza"} (fonte #{r[3]})' for r in rows) or 'Nessuna attività aperta.'
+            rows = conn.execute("""SELECT id,title,deadline,source_message,owner_deadline_date,owner_remind_at,
+                owner_origin_message FROM tasks WHERE status='open'
+                ORDER BY COALESCE(owner_deadline_date, (deadline AT TIME ZONE %s)::date) NULLS LAST,id LIMIT 50""",
+                (config.TIMEZONE,)).fetchall()
+            tasks = [dict(zip(('id', 'title', 'deadline', 'source_message', 'owner_deadline_date',
+                              'owner_remind_at', 'owner_origin_message'), row)) for row in rows]
+            reply = '\n'.join(f"#{t['id']} {t['title']} — {owner_task_schedule_label(t)} "
+                              f"(fonte #{t.get('owner_origin_message') or t['source_message']})"
+                              for t in tasks) or 'Nessuna attività aperta.'
         else:
             if len(parts)<2 or not parts[1].isdigit():
                 reply = 'Specificare un ID numerico.'
             elif command == '/fatto':
-                row = conn.execute("UPDATE tasks SET status='done',completed_at=now() WHERE id=%s AND status='open' RETURNING id", (int(parts[1]),)).fetchone()
-                reply = 'Attività completata.' if row else 'Attività non aperta.'
+                closed = task_reconciliation.close_task(conn, int(parts[1]))
+                reply = 'Attività completata.' if closed else 'Attività non aperta.'
             else:
                 identity = int(parts[1])
                 target = 'pending' if command == '/conferma' else 'cancel_pending'

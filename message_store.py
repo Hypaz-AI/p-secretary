@@ -1,7 +1,7 @@
 """Versioned native message storage; only the configured PostgreSQL is used."""
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import config
@@ -12,12 +12,28 @@ TABLES = {'email': 'email_messages', 'whatsapp': 'whatsapp_messages',
           'telegram': 'telegram_messages'}
 
 
+def reconciliation_excluded(conn, message_id):
+    """Read durable provenance, including for pipeline callers with supplied IDs.
+
+    The communications view does not expose metadata. Call inside the enqueue
+    transaction; shared row locks fence concurrent promotion by a live edit.
+    Missing IDs are not classified as historical.
+    """
+    for table in TABLES.values():
+        row = conn.execute(f"""SELECT metadata @> '{{"historical": true}}'::jsonb
+            FROM {table} WHERE id=%s FOR SHARE""", (message_id,)).fetchone()
+        if row:
+            return row[0] is True
+    return False
+
+
 def merge_whatsapp_metadata(old, incoming):
     """Names only improve; technical IDs and message bodies remain native."""
     merged = dict(old)
     for key, value in incoming.items():
         if value is not None and value != '' and key not in (
-                'chat_name', 'author_name', 'chat_name_rank', 'author_name_rank'):
+            'chat_name', 'author_name', 'chat_name_rank', 'author_name_rank',
+            'historical'):
             if key.endswith('_aliases'):
                 merged[key] = list(dict.fromkeys(list(old.get(key) or []) + list(value)))
             else:
@@ -60,6 +76,8 @@ def enrich_whatsapp(conn, row, meta, attachments):
             (mid, att.get('filename'), att.get('content_type'), att.get('path'),
              att.get('data'), json.dumps({k: v for k, v in att.items() if k not in ('data', 'path')}),
              mid, att.get('filename'), att.get('path')))
+    from connectors import media_archive
+    media_archive.enqueue_message(conn, mid)
     return mid
 
 
@@ -132,8 +150,20 @@ def migrate(conn, base_schema, approved=False):
 
 
 def store(conn, channel, sender, subject, body, ts=None, source_id=None,
-          metadata=None, attachments=None, update_existing=False):
+        metadata=None, attachments=None, update_existing=False, reconcile=False,
+        historical=False):
+    """Archive atomically; explicit history stays excluded across live retries.
+
+    reconcile=False alone is not historical provenance (pipeline storage uses
+    that default too). Only a strictly newer live personal-Telegram revision
+    can promote an explicitly historical identity.
+    """
     meta = dict(metadata or {})
+    # This reserved provenance field is controlled by the explicit store option,
+    # not by transport metadata. Duplicate/enrichment paths preserve stored state.
+    meta.pop('historical', None)
+    if historical:
+      meta['historical'] = True
     table = TABLES[native(channel)]
     dt = datetime.fromisoformat(ts) if ts else None
     if dt and dt.tzinfo is None:
@@ -146,7 +176,11 @@ def store(conn, channel, sender, subject, body, ts=None, source_id=None,
             existing = conn.execute('''SELECT id,metadata,sender,subject FROM whatsapp_messages
                 WHERE channel=%s AND source_id=%s FOR UPDATE''', (channel, source_id)).fetchone()
             if existing:
-                return enrich_whatsapp(conn, existing, meta, attachments)
+                mid = enrich_whatsapp(conn, existing, meta, attachments)
+                if reconcile and not historical and existing[1].get('historical') is not True:
+                    import task_reconciliation
+                    task_reconciliation.queue(conn, mid)
+                return mid
         conversation = None
         external = meta.get('chat_id')  # email Message-ID is NOT a thread ID
         if external is not None:
@@ -161,7 +195,14 @@ def store(conn, channel, sender, subject, body, ts=None, source_id=None,
             if channel != 'telegram (account)' or not source_id or not meta.get('revision_date'):
                 raise ValueError('Updates require a scoped personal Telegram identity and revision')
             conflict = f'''DO UPDATE SET body=excluded.body, sender=excluded.sender,
-                subject=excluded.subject, metadata=excluded.metadata,
+                subject=excluded.subject,
+                metadata=(excluded.metadata - 'historical') || CASE
+                    WHEN {table}.metadata @> '{{"historical": true}}'::jsonb
+                    AND ((excluded.metadata @> '{{"historical": true}}'::jsonb)
+                         OR ({table}.metadata->>'revision_date') IS NULL
+                         OR (excluded.metadata->>'revision_date')::timestamptz <=
+                            ({table}.metadata->>'revision_date')::timestamptz)
+                    THEN '{{"historical": true}}'::jsonb ELSE '{{}}'::jsonb END,
                 author=excluded.author, direction=excluded.direction
                 WHERE ({table}.metadata->>'revision_date') IS NULL OR
                 (excluded.metadata->>'revision_date')::timestamptz >=
@@ -169,21 +210,51 @@ def store(conn, channel, sender, subject, body, ts=None, source_id=None,
         row = conn.execute(f"""INSERT INTO {table}
             (ts,day,channel,sender,subject,body,source_id,conversation_id,metadata,{','.join(fields)})
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,{','.join(['%s'] * len(fields))})
-            ON CONFLICT(channel,source_id) {conflict} RETURNING id""",
+            ON CONFLICT(channel,source_id) {conflict}
+            RETURNING id, metadata @> '{{"historical": true}}'::jsonb""",
             (dt, day, channel, sender, subject, body, source_id, conversation,
              json.dumps(meta), *values)).fetchone()
         if not row:
-            return conn.execute(f'SELECT id FROM {table} WHERE channel=%s AND source_id=%s',
-                                (channel, source_id)).fetchone()[0]
+            existing = conn.execute(f'''SELECT id, metadata @> '{{"historical": true}}'::jsonb
+                FROM {table} WHERE channel=%s AND source_id=%s FOR SHARE''',
+                (channel, source_id)).fetchone()
+            mid = existing[0]
+            from connectors import media_archive
+            media_archive.enqueue_message(conn, mid)
+            # A conditional personal-Telegram upsert returns no row for an
+            # older revision. Never give that rejected edit a reconciliation key.
+            if (reconcile and not historical and not update_existing
+                    and not (len(existing) > 1 and existing[1] is True)):
+                import task_reconciliation
+                task_reconciliation.queue(conn, mid)
+            return mid
+        if update_existing:
+            # An accepted edit can replace/remove the media. Never reuse the old
+            # transcript for a different photo/voice on the same message identity.
+            conn.execute('''DELETE FROM attachments WHERE message_id=%s
+                AND NOT (filename=ANY(%s))''',
+                (row[0], [att.get('filename') for att in attachments or []]))
         for att in attachments or []:
             path, data = att.get('path'), att.get('data')
             if native(channel) == 'email' and data is not None:
                 path = email_attachments.persist(data)
                 data = None
             conn.execute("""INSERT INTO attachments(message_id,channel,filename,content_type,path,data,metadata)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)""", (row[0], native(channel), att.get('filename'),
+                SELECT %s,%s,%s,%s,%s,%s,%s WHERE NOT EXISTS (
+                    SELECT 1 FROM attachments WHERE message_id=%s
+                    AND filename IS NOT DISTINCT FROM %s AND path IS NOT DISTINCT FROM %s
+                    AND data IS NOT DISTINCT FROM %s)""", (row[0], native(channel), att.get('filename'),
                 att.get('content_type'), path, data,
-                json.dumps({k: v for k, v in att.items() if k not in ('data', 'path')})))
+                json.dumps({k: v for k, v in att.items() if k not in ('data', 'path')}),
+                row[0], att.get('filename'), path, data))
+        from connectors import media_archive
+        if native(channel) != 'email':
+            media_archive.enqueue_message(conn, row[0])
+        if reconcile and not historical and not (len(row) > 1 and row[1] is True):
+            import task_reconciliation
+            revision = (datetime.fromisoformat(meta['revision_date'])
+                        .astimezone(timezone.utc).isoformat() if update_existing else '')
+            task_reconciliation.queue(conn, row[0], revision=revision)
         return row[0]
 
 

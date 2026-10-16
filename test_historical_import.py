@@ -91,7 +91,7 @@ class RunnerTests(unittest.TestCase):
         self.db.store_message.assert_called_once_with(
             'email (first)', 'sender', 'subject', 'body', ts=message['ts'],
             source_id='native-1', metadata=message['metadata'],
-            attachments=message['attachments'])
+            attachments=message['attachments'], historical=True)
         self.assertIs(self.db.store_message.call_args.kwargs['attachments'], message['attachments'])
         self.assertEqual(self.pipeline.mock_calls, [])
 

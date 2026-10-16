@@ -1,3 +1,11 @@
+# Dialogo continuo con la segretaria
+
+La chat naturale Telegram del proprietario usa uno storico persistente, un
+riepilogo progressivo e il recupero mirato dei vecchi dialoghi. Note personali,
+decisioni e procedure restano distinte da attività, scadenze e appuntamenti.
+I nuovi schemi vengono creati con migrazioni additive al normale avvio.
+Architettura, promemoria, garanzie di retry e limiti: [OWNER_DIALOGUE.md](OWNER_DIALOGUE.md).
+
 # Importazione storica una tantum
 
 Il comando `sh ./pi-secretary import-history --days 30` importa nell'archivio DB
@@ -15,14 +23,17 @@ sessioni durante l'importazione. In installazioni Python dirette è disponibile
   i messaggi come letti. Cartella Inviate assente o errori producono un esito
   incompleto; i dati già acquisiti restano salvati.
 - Telegram personale: tutte le conversazioni accessibili e paginazione fino
-  all'inizio dell'intervallo; allegati rappresentati come metadati, non scaricati.
+  all'inizio dell'intervallo; vocali e immagini supportati vengono scaricati
+  entro il limite di 10 MiB e accodati per la conversione testuale.
 - WhatsApp: solo storico sincronizzato disponibile sul dispositivo collegato,
   non garanzia di recupero completo dal server.
 - Telegram bot: lo storico passato non è disponibile tramite Bot API.
 - Calendar: escluso perché contiene appuntamenti, non comunicazioni.
 
-Nessuna analisi AI, comando, risposta o scrittura Calendar viene avviata dallo
-script. I normali flussi, una volta riattivati, possono analizzare nuovamente
+Nessuna richiesta AI sincrona, comando, risposta o scrittura Calendar viene avviata
+dallo script. I media vengono accodati per trascrizione AI al riavvio dell'app:
+questo comporta invio ai provider OpenRouter e relativi costi. I normali flussi,
+una volta riattivati, possono analizzare nuovamente
 messaggi recuperati; i dati importati possono comparire nei digest successivi.
 Le identità native evitano duplicati in archivio: i conteggi includono anche
 messaggi già presenti. Nessun watermark di recupero ordinario viene avanzato.
@@ -61,14 +72,74 @@ enabled e salute osservata dai worker. `configured` non significa ready.
 
 # Pi Secretary
 
+## Digest giornaliero e piano delle prossime 48 ore
+
+A `DIGEST_TIME`, nel `TIMEZONE` configurato, il bot invia il recap delle ultime
+24 ore e un piano delle successive 48 ore, anche in assenza di nuovi messaggi.
+Il piano incrocia agenda interna, Google Calendar quando disponibile e tutte le
+attività aperte pertinenti: arretrate, in scadenza entro 48 ore e senza scadenza,
+incluse quelle nate da comunicazioni più vecchie.
+
+- Le scadenze esplicite future generano eventi di 15 minuti con popup 30 minuti
+  prima e un promemoria Telegram 24 ore prima (subito se già entro le 24 ore).
+  Gli arretrati vengono segnalati senza cambiarne la scadenza.
+- Eventi e promemoria hanno chiavi persistenti: ripetere il digest o riavviare
+  non crea nuove copie. Gli appuntamenti già associati al messaggio sono mantenuti.
+- Per attività create con `/task`, gli eventi sono accodati alla sincronizzazione;
+  se Calendar è disabilitato, restano nell'agenda interna/in coda. Per attività
+  estratte da comunicazioni esterne restano proposte da approvare con `/conferma ID`.
+- Per attività senza scadenza l'AI suggerisce prossimi passi, senza inventare
+  date o dichiarare appuntamenti salvati. Il piano segnala conflitti noti.
+- `/attivita` elenca le attività aperte; `/fatto ID` le chiude. I promemoria ancora
+  in coda verificano che l'attività sia aperta prima di inviarla.
+
+Il flusso dashboard `digest` deve essere attivo. Il recap è consegnato tramite
+la coda persistente; se l'AI non risponde, viene inviato un riepilogo testuale
+di riserva con agenda e attività.
+
+## Aggiornamento delle attività dalle nuove comunicazioni
+
+Ogni nuovo input acquisito dai flussi attivi viene confrontato con le attività
+aperte, inclusi messaggi Telegram personali e WhatsApp inviati. La valutazione
+avviene in una coda persistente separata, con tentativi automatici in caso di errore.
+
+- Completamenti e modifiche del titolo si applicano automaticamente solo con
+  evidenza testuale esplicita, certa e collegamento univoco all'attività.
+- Dubbi, corrispondenze multiple, annullamenti, cambi di scadenza e deduzioni
+  esclusivamente visive richiedono conferma via bot, anche con soglia notifiche `mai`.
+- `/proposte` elenca le richieste pendenti; `/conferma_attivita ID` applica una
+  proposta e `/rifiuta_attivita ID` la respinge. Gli ID sono quelli delle proposte,
+  distinti dagli ID delle attività e degli appuntamenti.
+- Ogni modifica conserva evidenza e versione. Una proposta superata da modifiche
+  all'attività o al messaggio sorgente non viene applicata.
+- `/fatto ID` usa lo stesso percorso: chiude l'attività e ritira i promemoria e
+  gli eventi derivati dall'attività. Gli appuntamenti indipendenti del messaggio
+  originale non vengono cancellati automaticamente.
+- Gli import storici espliciti restano archivio, senza riconciliazione automatica
+  anche se recuperati nuovamente dai connettori. Questo vincolo di provenienza
+  vale per gli import effettuati dopo l'aggiornamento, non per vecchie righe già importate.
+
+Le migrazioni additive sono eseguite al prossimo avvio del servizio. Nessuna
+nuova credenziale o variabile `.env` è necessaria. La valutazione usa OpenRouter
+e può aumentare il consumo AI in proporzione ai messaggi e alle attività aperte.
+
 ## AI: immagini native e audio separato
 
 `OPENROUTER_MODEL` **DEVE supportare nativamente input testo e immagini**
 (`image_url`); il default è `google/gemini-2.5-flash`. Le foto del proprietario
-sono inviate direttamente al modello principale, con didascalia e cronologia,
-senza modello immagini separato né preprocessing OCR. Solo l'audio viene
-trascritto con `OPENROUTER_AUDIO_MODEL` prima del dialogo. La pipeline testuale
-ignora le immagini; l'estrazione documentale PDF/XML resta separata e invariata.
+sono inviate direttamente al modello principale, con didascalia e cronologia.
+Inoltre, ogni vocale e immagine supportati acquisiti da Telegram (bot/account)
+e WhatsApp vengono convertiti in testo tramite una coda persistente `media`.
+I vocali usano `OPENROUTER_AUDIO_MODEL`; le immagini usano il modello principale
+per estrarre testo visibile e una descrizione visiva strutturata, non semplici
+stringhe base64 né i token visivi interni del provider.
+Il risultato è salvato in PostgreSQL, tabella `media_transcripts`, collegata
+all'allegato, e riutilizzato per analisi, digest e contesto del dialogo.
+Originali e didascalie restano invariati. Sono inclusi messaggi inviati/ricevuti,
+recupero e import storico; al primo avvio vengono accodati anche i media già
+archiviati con byte/file disponibili. Queste conversioni hanno costi AI.
+Non vengono contattati mittenti o eseguiti comandi dalla sola trascrizione.
+L'estrazione documentale PDF/XML resta separata e invariata.
 Il bot accetta soltanto la chat privata del proprietario configurato.
 Per limiti, fallback e trattamento dati vedere `CONFIGURATION.md`.
 Le installazioni esistenti con un modello solo testuale devono scegliere un

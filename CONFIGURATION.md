@@ -1,4 +1,55 @@
-# Vocali e immagini Telegram
+# Vocali e immagini Telegram e WhatsApp
+
+## Archivio testuale persistente
+
+Per i media supportati acquisiti da Telegram bot, account personale MTProto e
+WhatsApp, inclusi messaggi inviati, recuperati e importati, la coda `media`
+produce testo salvato in PostgreSQL (`media_transcripts`, chiave `attachment_id`).
+Il vocale è trascritto fedelmente; l'immagine è inviata come `image_url` al modello
+principale e convertita in testo visibile, descrizione visiva, dati operativi e
+incertezze. I token visivi interni non sono testo esportabile: si conserva una
+rappresentazione testuale analizzabile e non la codifica base64 dell'immagine.
+
+Originali e didascalie non vengono modificati. I risultati riusciti sono riusati
+fra riavvii/retry. Gli errori restano nella coda con tentativi e stato failed;
+analisi e dialogo attendono il risultato invece di usare trascrizioni parziali.
+Digest e contesto del dialogo includono il testo salvato, anche per comunicazioni
+che non passano dall'analisi ordinaria. La sola conversione non esegue comandi,
+non invia risposte ai contatti e non crea appuntamenti.
+
+Al primo avvio la migrazione additiva accoda anche audio/immagini già archiviati
+con byte o file disponibili: può generare molte richieste e costi OpenRouter.
+Non recupera automaticamente i vecchi media MTProto archiviati solo come metadati:
+devono essere riacquisiti dal recupero o dall'importazione storica.
+L'import non chiama l'AI inline ma prepara lavori eseguiti al riavvio del servizio.
+I risultati vision possono contenere errori: controllare dati critici.
+
+## Budget AI e protezione dai troncamenti
+
+I limiti riguardano l'output per richiesta (ragionamento incluso, dove previsto),
+non la finestra di contesto né una spesa fissa:
+
+| Funzione | Primo tentativo | Retry se troncato |
+| --- | ---: | ---: |
+| Dialogo e agenda | 16.384 | 32.768 |
+| Analisi comunicazioni | 8.192 | 16.384 |
+| Memoria personale | 4.096 | 8.192 |
+| Digest | 8.192 | 16.384 |
+
+Per gli audio: **4.096 + 20 token per secondo**, fino a 32.768 al primo
+tentativo. Esempi: 30 s = 4.696; 5 min = 10.096; 20 min = 28.096.
+Senza durata valida si usano 16.384 token. La durata Telegram viene conservata
+anche nell'archivio; audio storici o altri canali senza durata usano il fallback.
+Il retry raddoppia il budget, con tetto assoluto di 65.536 token.
+Questi margini non garantiscono una trascrizione completa per audio arbitrariamente
+lunghi: al limite occorre dividerli. Il modello/provider scelto deve supportare
+i limiti di output richiesti (indipendentemente dalla sua finestra di contesto).
+
+Tutte le richieste scartano interamente le risposte troncate e rigenerano una
+sola volta dai messaggi originali. Nessuna data viene ricostruita da testo parziale,
+nessun reasoning viene usato come risposta finale. Le trascrizioni non vengono
+più tagliate silenziosamente a 16.000 caratteri: oltre 262.144 caratteri si segnala
+un errore. Ragionamento `low`; le istruzioni di risposta concisa restano attive.
 
 Nella chat del bot sono supportati messaggi vocali, audio e foto (anche con
 didascalia). OpenRouter trascrive l'audio prima del dialogo. Le foto del proprietario
@@ -13,7 +64,8 @@ i marker calendario continuano a essere validati ed eseguiti dal codice principa
 - Entrambi usano `OPENROUTER_API_KEY`; `OPENROUTER_MODEL` è il modello principale.
   Viene usato per tutte le conversazioni, con o senza immagini, e deve supportare
   **nativamente input testo e immagini** (`image_url`): è un requisito obbligatorio,
-  non sostituibile con OCR. Nessun modello o preprocessore immagini separato.
+  non sostituibile con OCR. Lo stesso modello genera anche il testo persistente;
+  nessun modello immagini separato.
   Il prompt visivo è agnostico rispetto al soggetto della foto.
   Se la richiesta visiva fallisce o non restituisce testo, il fallback elimina le
   immagini, dichiara che non sono disponibili e non può creare eventi calendario.
@@ -23,17 +75,17 @@ i marker calendario continuano a essere validati ed eseguiti dal codice principa
   `input_audio` base64; scegliere un provider compatibile con tale formato.
 - Audio e immagini vengono trasmessi ai provider OpenRouter: valgono costi e
   condizioni di trattamento dati dei provider selezionati.
-- Gli allegati sono archiviati prima della trascrizione audio; errori di trascrizione
+- Gli allegati sono archiviati prima della conversione media; errori di trascrizione
   vengono ritentati dalla coda lavori, senza inviare contenuti parziali al modello.
   Solo la chat privata del proprietario configurato in `TELEGRAM_CHAT_ID` è
   accettata dal bot. Senza proprietario configurato nessun messaggio è accettato.
   Chat estranee, gruppi e canali sono ignorati prima di download, log dei contenuti,
   archiviazione o analisi AI, senza risposte; gli update vengono comunque consumati.
 - Il testo delle immagini non viene interpretato come comando rapido o nuova regola.
-- La pipeline testuale non converte immagini né le invia al trascrittore audio.
-  L'estrazione generica PDF/XML resta separata e invariata, senza OCR immagini.
-- Questa funzionalità riguarda il **bot**, non l'archiviazione dell'account personale
-  Telegram (MTProto), separata e di sola lettura, che non scarica media.
+- Le immagini non vengono inviate al trascrittore audio: il worker vision usa
+  `OPENROUTER_MODEL`. L'estrazione generica PDF/XML resta separata e invariata.
+- L'account personale Telegram resta in sola lettura verso Telegram (niente invii
+  o ricevute di lettura), ma ora scarica vocali e immagini per archivio e conversione.
 
 Per installazioni Docker è necessario ricostruire e ricreare il container per
 caricare il codice aggiornato. Non sono necessarie nuove dipendenze Python.

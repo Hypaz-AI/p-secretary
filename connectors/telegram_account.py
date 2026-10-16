@@ -1,5 +1,7 @@
 """Read-only personal Telegram archive. No bot routing, sends or read receipts."""
 import asyncio
+import hashlib
+import io
 import json
 import math
 from pathlib import Path
@@ -193,7 +195,38 @@ class TelegramAccountWorker:
             flows.mark('telegram_user', 'archive_failed')
             print(f'[telegram-account] live archive failed ({type(exc).__name__}); bounded recovery will retry')
 
-    async def archive(self, message, recovered=False, window=None):
+    async def media_attachments(self, message, source_id):
+        """Bounded downloads through the already-owned MTProto client, no sends."""
+        from connectors import media_text
+        file = getattr(message, 'file', None)
+        if not file:
+            return []
+        mime = getattr(file, 'mime_type', None) or ''
+        if getattr(message, 'photo', None):
+            mime = 'image/jpeg'
+        if not media_text.kind({'content_type': mime}):
+            return []
+        size = getattr(file, 'size', 0) or 0
+        if size > media_text.MAX_BYTES:
+            raise ValueError('Media Telegram oltre il limite di 10 MiB')
+
+        def bounded(received, total):
+            if received > media_text.MAX_BYTES or (total and total > media_text.MAX_BYTES):
+                raise ValueError('Media Telegram oltre il limite di 10 MiB')
+
+        media = getattr(message, 'photo', None) or getattr(message, 'document', None)
+        identity = f"{source_id}:{getattr(media, 'id', '')}"
+        name = hashlib.sha256(identity.encode()).hexdigest()
+        with io.BytesIO() as stream:
+            await self.client.download_media(message, file=stream, progress_callback=bounded)
+            data = stream.getvalue()
+        if not data or len(data) > media_text.MAX_BYTES:
+            raise ValueError('Media Telegram vuoto o oltre il limite di 10 MiB')
+        return [{'filename': name, 'content_type': mime, 'data': data,
+                 'duration': getattr(file, 'duration', None)}]
+
+    async def archive(self, message, recovered=False, window=None, *, reconcile=True,
+                      historical=False):
         cutoff, end = history_window() if window is None else window
         if not message.date or not cutoff <= message.date < end or message.chat_id is None:
             return False
@@ -243,11 +276,15 @@ class TelegramAccountWorker:
                 'has_media': bool(message.media),
                 'chat_type': chat_type,
                 'sender_name': sender_name, 'chat_name': chat_name}
-        # Native storage only: no AI calls, commands, contact replies or media downloads.
+        attachments = await self.media_attachments(message, source_id)
+        # No inline AI, commands or replies. Runtime recovery also reconciles;
+        # explicit historical imports opt out independently of `recovered`.
         await asyncio.to_thread(db.store_message, 'telegram (account)',
                                 sender_label, chat_name or '(Telegram personale)',
                                 message.raw_text or ('[Telegram media]' if message.media else ''), ts=message.date.isoformat(),
-                                source_id=source_id, metadata=meta, update_existing=True)
+                                source_id=source_id, metadata=meta, attachments=attachments,
+                                update_existing=True, reconcile=reconcile,
+                                historical=historical)
         return True
 
     async def recover(self):
@@ -382,7 +419,8 @@ async def import_history(start, end, max_flood_wait=300):
                         identity = (message.chat_id, message.id, message.edit_date or message.date)
                         if identity in archived:
                             continue
-                        if await worker.archive(message, recovered=True, window=(start, end)):
+                        if await worker.archive(message, recovered=True, window=(start, end),
+                                                reconcile=False, historical=True):
                             archived.add(identity)
 
             await retry(scan)

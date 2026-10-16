@@ -161,9 +161,11 @@ codici di my.telegram.org, API hash o token bot. Con `q` esci senza tentare codi
 casuali; controlla numero e account prima di riprovare, evitando richieste ravvicinate.
 Ricarica successivamente con `up` e verifica l'interruttore dashboard.
 Archivia testo/didascalie in entrata/uscita, non risponde ai contatti, non esegue
-i loro comandi, non segna letto né scarica allegati. Nessuna analisi AI per
-messaggio, ma il digest può usare il testo. «Sola lettura» è una scelta del codice,
-non un permesso Telegram limitato.
+i loro comandi e non segna letto. Scarica vocali e immagini supportati (fino a
+10 MiB) e accoda la conversione AI in testo salvato nel DB: i media vengono
+trasmessi ai provider OpenRouter con relativi costi e condizioni di trattamento.
+Il digest e il contesto del dialogo possono usare il testo persistente.
+«Sola lettura» è una scelta del codice, non un permesso Telegram limitato.
 
 ### WhatsApp
 

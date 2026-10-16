@@ -137,7 +137,8 @@ async function archive(msg, recovered_cached=false) {
       const safe=(id+'_'+(media.filename||'file')).replace(/[^\w.-]/g,'_');
       const target=path.join(MEDIA_DIR,safe);
       fs.writeFileSync(target,Buffer.from(media.data,'base64'));
-      entry.attachments.push({filename:media.filename||safe,content_type:media.mimetype,path:target});
+      entry.attachments.push({filename:media.filename||safe,content_type:media.mimetype,path:target,
+        duration:msg.duration || msg._data?.duration || null});
     } catch(e) {entry.media_error=true;if(HISTORY_IMPORT) throw e;}
   }
   entry.enriched=true;persist();
@@ -478,6 +479,7 @@ def import_history(start, end, timeout=600):
           m.get('text', ''),
           ts=datetime.fromtimestamp(m['timestamp'], start.tzinfo).isoformat(),
           source_id=identity, attachments=m.get('attachments', []),
+          historical=True,
           metadata={'account': self_wid, 'self': self_wid,
                 'chat_id': m.get('chat_id'), 'author': m.get('author'),
                 'message_id': identity, 'chat_name': chat_name,

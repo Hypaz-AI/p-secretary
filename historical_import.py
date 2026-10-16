@@ -27,7 +27,7 @@ def run_import(days, now=None):
     flows.init()
     enabled = flows.settings()
     print(f'Intervallo: {start.isoformat()} → {end.isoformat()} (estremo finale escluso)')
-    print('Solo archivio: nessuna analisi AI o invio. I duplicati mantengono la stessa identità.')
+    print('Solo archivio: nessuna richiesta AI sincrona o invio. Media accodati per trascrizione AI al riavvio; possibili costi OpenRouter. I duplicati mantengono la stessa identità.')
     results = []
 
     def execute(label, callback, limited=False):
@@ -60,7 +60,8 @@ def run_import(days, now=None):
             db.store_message(
                 f"email ({account['name']})", message['from'], message['subject'],
                 message['body'], ts=message['ts'], source_id=message['source_id'],
-                metadata=message['metadata'], attachments=message['attachments'])
+                metadata=message['metadata'], attachments=message['attachments'],
+                historical=True)
             count += 1
         return count
 

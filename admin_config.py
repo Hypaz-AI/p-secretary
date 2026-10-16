@@ -79,7 +79,7 @@ def field_metadata(key):
         'GCAL_SERVICE_ACCOUNT_FILE': 'Percorso della chiave IAM; vuoto usa il file predefinito nei dati persistenti.',
         'TIMEZONE': 'Fuso IANA per appuntamenti e riepilogo, ad esempio Europe/Rome (gestisce l’ora legale).',
         'LANGUAGE': 'Lingua dell’assistente, ad esempio it per italiano o en per inglese.',
-        'DIGEST_TIME': 'Ora locale HH:MM del riepilogo delle ultime 24 ore, nel fuso configurato; richiede il bot Telegram.',
+        'DIGEST_TIME': 'Ora locale HH:MM del riepilogo delle ultime 24 ore e del piano delle prossime 48 ore dalle attività aperte; richiede il bot Telegram.',
         'NOTIFY_PRIORITY_THRESHOLD': 'Notifiche ordinarie: mai = solo digest; alta = solo priorità alta; media/bassa includono priorità inferiori. Le emergenze AI scavalcano sempre la soglia, anche mai.',
         'POLL_INTERVAL': 'Secondi tra i controlli email; 300 corrisponde a 5 minuti.',
         'INVOICE_DIR': 'Cartella fatture: <entità>/<aaaa-mm>/<nome>.pdf; vuoto usa il percorso predefinito.',
