@@ -376,7 +376,7 @@ class OwnerControlsWebTests(unittest.TestCase):
         result = subprocess.run(['node', '--unhandled-rejections=strict', '-e', OWNER_WEB_HARNESS],
             input=json.dumps(dict(script=(Path(__file__).parent / 'web/app.js').read_text(),
                                   scenario=scenario, options=options)),
-            cwd=Path(__file__).parent, env={'PATH': os.defpath}, text=True, capture_output=True, timeout=10)
+            cwd=Path(__file__).parent, env=web_fixtures.node_env(), text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('PASS', result.stdout)
 

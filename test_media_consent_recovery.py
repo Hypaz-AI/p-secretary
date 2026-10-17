@@ -485,13 +485,13 @@ async function mediaRecovery() {
 
 class MediaConsentWebTests(unittest.TestCase):
     def scenario(self, **options):
-        from test_web_session_safety import NODE_HARNESS
+        from test_web_session_safety import NODE_HARNESS, node_env
         harness = NODE_HARNESS.replace('(async () => {', MEDIA_UI_SCENARIO + '\n(async () => {', 1)
         harness = harness.replace("if (scenario === 'sources') await sources();",
             "if (scenario === 'media') await mediaRecovery(); else if (scenario === 'sources') await sources();")
         result = subprocess.run(['node', '--unhandled-rejections=strict', '-e', harness],
             input=json.dumps(dict(script=(ROOT / 'web/app.js').read_text(), scenario='media', options=options)),
-            cwd=ROOT, env={'PATH': os.defpath}, text=True, capture_output=True, timeout=10)
+            cwd=ROOT, env=node_env(), text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_explicit_per_native_source_action_and_no_source_open_replay(self):

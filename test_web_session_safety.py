@@ -11,6 +11,27 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+def node_env():
+    """PATH minimale per il subprocess node, con la sua directory reale.
+
+    os.defpath (/bin:/usr/bin) non include /usr/local/bin, dove i runner CI
+    (e molti deployment) installano Node: il subprocess erediterebbe un PATH
+    senza node. Si antepone SOLO la directory del binario risolto: nessuna
+    variabile d'ambiente del deployment viene comunque trasmessa.
+    """
+    path = os.defpath
+    try:
+        node_dir = Path(subprocess.run(['which', 'node'], capture_output=True,
+                                        text=True).stdout.strip()).parent
+        if str(node_dir) not in path.split(os.pathsep):
+            path = str(node_dir) + os.pathsep + path
+    except (OSError, ValueError):
+        pass
+    return {'PATH': path}
+
+
 NODE_HARNESS = r'''
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
@@ -258,7 +279,7 @@ class WebSessionSafetyTests(unittest.TestCase):
             ['node', '--unhandled-rejections=strict', '-e', NODE_HARNESS],
             input=json.dumps(dict(script=(ROOT / 'web/app.js').read_text(),
                                  scenario=scenario, options=options)),
-            cwd=ROOT, env={'PATH': os.defpath}, text=True, capture_output=True, timeout=10,
+            cwd=ROOT, env=node_env(), text=True, capture_output=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('PASS', result.stdout)
