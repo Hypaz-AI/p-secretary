@@ -299,7 +299,9 @@ class SecretaryDashboardTests(unittest.TestCase):
         root = Path(__file__).parent
         image = (root / 'Dockerfile').read_text()
         self.assertIn('COPY policy.py capabilities.py knowledge.py secretary.py secretary_runtime.py ./', image)
-        self.assertIn('COPY execution.py ./', image)
+        # I moduli runtime del segretario viaggiano insieme: execution e i
+        # nuovi gate/privacy non devono mai restare fuori dall'immagine.
+        self.assertIn('COPY execution.py quiet_hours.py privacy.py ./', image)
         workflow = (root / '.github/workflows/docker.yml').read_text()
         self.assertIn('python -m unittest discover -v', workflow)
         self.assertIn('PI_SECRETARY_CONFIG_FILE=/dev/null', workflow)
