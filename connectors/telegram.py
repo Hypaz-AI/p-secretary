@@ -2,6 +2,7 @@
 import html as html_mod
 import json
 import mimetypes
+import re
 import urllib.request
 from pathlib import Path
 
@@ -9,6 +10,14 @@ import config
 
 API = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
 _poll_lock = None
+MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
+
+
+def _safe_filename(value, fallback='file'):
+    # POSIX and Windows separators, controls and dot components are untrusted.
+    name = str(value or '').replace('\\', '/').rsplit('/', 1)[-1]
+    name = re.sub(r'[^\w. -]', '_', name).strip(' .')[:160]
+    return name or fallback
 
 
 def acquire_poll_lock():
@@ -32,19 +41,36 @@ def _call(method: str, params: dict) -> dict:
 
 
 def _download(file_id: str, dest: Path, max_bytes=None) -> Path:
-    """Scarica un file dal bot e lo salva in dest."""
+    """Bounded, timed download. Never leave partial files on failed transfers."""
+    import os
+    import tempfile
+    from urllib.parse import quote
+    dest = Path(dest)
+    limit = min(max_bytes if max_bytes is not None else MAX_DOWNLOAD_BYTES, MAX_DOWNLOAD_BYTES)
+    if type(limit) is not int or limit <= 0:
+        raise ValueError('Invalid download limit')
     info = _call("getFile", {"file_id": file_id})
     path = info["result"]["file_path"]
-    url = f"https://api.telegram.org/file/bot{config.TELEGRAM_BOT_TOKEN}/{path}"
+    if not isinstance(path, str) or path.startswith('/') or any(
+            p in ('.', '..') for p in path.replace('\\', '/').split('/')):
+        raise ValueError('Invalid Telegram file path')
+    if info['result'].get('file_size', 0) > limit:
+        raise ValueError('Media oltre il limite di download')
+    url = f"https://api.telegram.org/file/bot{config.TELEGRAM_BOT_TOKEN}/{quote(path, safe='/')}"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if max_bytes is None:
-        urllib.request.urlretrieve(url, dest)
-    else:
+    temporary = None
+    try:
         with urllib.request.urlopen(url, timeout=60) as response:
-            data = response.read(max_bytes + 1)
-        if len(data) > max_bytes:
+            data = response.read(limit + 1)
+        if len(data) > limit:
             raise ValueError('Media oltre il limite di download')
-        dest.write_bytes(data)
+        fd, temporary = tempfile.mkstemp(prefix='.telegram-', dir=dest.parent)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+        os.replace(temporary, dest)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
     return dest
 
 
@@ -159,7 +185,7 @@ def _media_attachments(msg, download_dir):
     if media.get('file_size', 0) > MAX_BYTES:
         # Preserve a visible explanation without repeatedly downloading oversized media.
         return []
-    filename = f"{Path(media['file_unique_id']).name}{suffix}"
+    filename = f"{_safe_filename(media['file_unique_id'])}{suffix}"
     dest = Path(download_dir) / filename
     _download(media['file_id'], dest, max_bytes=MAX_BYTES)
     attachment = {'filename': filename, 'content_type': mime, 'path': str(dest)}
@@ -196,13 +222,20 @@ def fetch_new_messages(offset: int, download_dir=None) -> tuple:
             "timeout": 0,
             "allowed_updates": ["message"],
         })
-        for update in result.get("result", []):
-            offset = max(offset, update["update_id"] + 1)
+        for update in sorted(result.get("result", []), key=lambda item: item['update_id']):
+            update_id = update['update_id']
+            if update_id < offset:
+                continue
+            # ACK this update only after its content/downloads are complete.
+            # On failure return the failing ID and leave later updates untouched.
+            offset = update_id
             msg = update.get("message") or update.get("edited_message")
             if not msg:
+                offset = update_id + 1
                 continue
             chat = msg.get('chat') or {}
             if not is_owner_chat(chat.get('id'), chat.get('type')):
+                offset = update_id + 1
                 continue
             from datetime import datetime, timedelta
             from zoneinfo import ZoneInfo
@@ -210,6 +243,7 @@ def fetch_new_messages(offset: int, download_dir=None) -> tuple:
             start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=max(1,min(90,int(config.get('RECOVERY_DAYS','14')))))
             dt = datetime.fromtimestamp(msg['date'], ZoneInfo(config.TIMEZONE)) if msg.get('date') else None
             if dt and not start <= dt < now + timedelta(minutes=5):
+                offset = update_id + 1
                 continue
             chat_id = str(msg["chat"]["id"])
             chat_name = _chat_name(msg.get("chat"))
@@ -224,12 +258,22 @@ def fetch_new_messages(offset: int, download_dir=None) -> tuple:
             native = {'msg_date': dt.isoformat() if dt else None,
                 'source_id': json.dumps(['bot', config.TELEGRAM_BOT_TOKEN.split(':')[0], chat_id, msg.get('message_id')]),
                 'metadata': {'account': 'bot:' + config.TELEGRAM_BOT_TOKEN.split(':')[0],
+                             'update_id': update_id,
                              'chat_id': chat_id, 'chat_type': chat['type'],
                              'message_id': msg.get('message_id'),
                              'author': msg.get('from', {}).get('id'), 'direction': 'in',
                              'chat_name': chat_name}}
+            for key in (
+                'forward_origin', 'forward_date', 'forward_from', 'forward_from_chat',
+                'forward_sender_name', 'is_automatic_forward', 'is_forwarded', 'forwarded',
+                'quote', 'external_reply', 'via_bot', 'sender_chat',
+            ):
+                if key in msg:
+                    # Keep indirect provenance, even empty markers, for owner policy.
+                    native['metadata'][key] = msg[key]
             entry = {
                 **native,
+                'update_id': update_id,
                 "chat_id": chat_id,
                 "chat_type": chat['type'],
                 "from": _full_name(msg.get("from")),
@@ -238,22 +282,25 @@ def fetch_new_messages(offset: int, download_dir=None) -> tuple:
             }
             doc = msg.get("document")
             if doc and download_dir:
-                dest = Path(download_dir) / f"{doc['file_unique_id']}_{doc['file_name']}"
-                try:
-                    _download(doc["file_id"], dest)
+                filename = _safe_filename(doc.get('file_name'), 'document')
+                dest = Path(download_dir) / f"{_safe_filename(doc['file_unique_id'])}_{filename}"
+                if doc.get('file_size', 0) > MAX_DOWNLOAD_BYTES:
+                    entry['text'] += '\n[Documento non scaricato: limite 10 MiB]'
+                else:
+                    _download(doc["file_id"], dest, max_bytes=MAX_DOWNLOAD_BYTES)
                     entry["attachments"].append({
-                        "filename": doc["file_name"],
+                        "filename": filename,
                         "content_type": doc.get("mime_type", "application/octet-stream"),
                         "path": str(dest),
                     })
-                    entry["text"] = entry["text"] or f"(file: {doc['file_name']})"
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[telegram] download allegato fallito: {exc}")
+                    entry["text"] = entry["text"] or f"(file: {filename})"
             if not entry["text"] and not entry["attachments"]:
+                offset = update_id + 1
                 continue
             messages.append(entry)
+            offset = update_id + 1
     except Exception as exc:  # noqa: BLE001
-        print(f"[telegram] lettura fallita: {exc}")
+        print(f"[telegram] lettura fallita ({type(exc).__name__})")
         import flows
         flows.mark('telegram_bot', 'failed')
     return messages, offset

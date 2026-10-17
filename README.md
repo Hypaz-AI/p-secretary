@@ -1,3 +1,121 @@
+# Pi Secretary · spazio personale sotto controllo
+
+Documenti, ricerca, memoria, attività e responsabilità sono il centro
+dell’interfaccia; **fatture e ZIP sono opzionali**, non il profilo obbligatorio.
+La dashboard aggiunge quattro pannelli autenticati:
+
+- **Cosa seguo per te**: pratiche, prossima azione, attese, revisioni,
+  responsabilità e proposte. Sospensione/revoca usa la versione letta (CAS),
+  registra una ricevuta e revoca le approvazioni collegate. Nessuna riattivazione
+  implicita o nuova delega dal browser.
+- **Documenti e ricerca**: catalogo e ricerca lessicale italiana con citazioni,
+  testo estratto, stato parziale/storico e apertura della fonte DB. Non è una
+  ricerca semantica; un file caricato genericamente non viene indicizzato da solo.
+- **Permessi AI**: consenso esplicito per email/Telegram/WhatsApp × testo/media,
+  più **storico come contesto di sola lettura**, negato in assenza di una scelta.
+  Telegram comprende bot e account personale: non esiste granularità per
+  chat/account. Lo storico richiede anche testo e, per documenti/media, media;
+  non autorizza comandi o azioni successive. Abilitare un flusso o inserire una
+  chiave **non dà consenso**. Revocare non ritira dati già trasmessi.
+- **Esiti**: ricevute locali, revisioni/bozze e collegamenti suggeriti, distinti
+  da consegne esterne. Un’approvazione lega payload esatto, versione e scadenza;
+  **non invia nulla**, non prova un successo e non è un permesso generico.
+
+Pratiche/responsabilità sono viste limitate a 24 elementi per raccolta; catalogo
+e revisioni a 20. I pannelli segretario si aggiornano manualmente per non cambiare
+il payload durante una decisione; i contatori operativi restano automatici.
+Fatture/ZIP inattivi restano chiusi in **Consulta storico fatture e ZIP**, sempre
+accessibile; i flussi esistenti sono gli unici interruttori persistenti.
+
+**Stato di integrazione:** il servizio è un **segretario di revisione limitato**,
+già collegato al bootstrap/runtime, non un esecutore di workflow arbitrari.
+`db.init()` applica le migrazioni additive, incluse execution e ai_budget, prima
+dei flussi; `main()` avvia otto worker persistenti: analysis, media, reconcile,
+action, owner, knowledge, secretary_review e secretary_email_execution.
+Indicizzazione, osservazioni, revisioni dovute e backlog sono integrati. Ogni
+worker tratta un job alla volta; le attività periodiche hanno un solo thread vivo
+per nome. Lease di 15 minuti, heartbeat di 30 secondi, limite esecuzione di un'ora
+e massimo otto tentativi per errori ordinari non significano resend illimitati.
+La dashboard non migra il DB né avvia worker alla richiesta: schema/modulo assente
+è segnalato, non trasformato in una falsa vista vuota o in un consenso.
+Vedere [contratti e limiti](CONFIGURATION.md#integrazione-dashboard-del-segretario)
+e il [piano architetturale](SECRETARY_ARCHITECTURE_PLAN.md): **il piano non è una
+checklist di funzionalità tutte completate**.
+
+Nuovo profilo capabilities: fatture/ZIP disattivati. Upgrade legacy: flag
+espliciti preservati, mancanti compatibili col profilo legacy; provenienza
+sconosciuta trattata in pausa per le funzionalità opzionali. Verificare i flussi
+prima di riattivare: nessuna riscrittura delle deleghe o inferenza dallo storico.
+Quiet hours supportate solo per notifiche delle revisioni (`22–08`, configurabili),
+non globali. Modalità globale observe/active e tetto monetario AI sono pianificati;
+i cap Worker sono reali ma non limiti monetari: default **200 chiamate/giorno,
+500000 token riservati/addebitati al giorno UTC, due richieste in volo, 65536 token
+massimi di output per richiesta**. Ogni retry consuma una nuova riserva senza
+rimborso; ledger/DB/lease non disponibili bloccano le richieste Worker. Le chiamate
+dirette/legacy e il digest periodico fuori dai job non hanno questo budget
+persistente. Non è una garanzia che ogni percorso AI legacy sia protetto.
+
+## Controlli proprietario e provenienza
+
+I nuovi piani proprietario di pratiche/responsabilità sono v2: il server conserva
+le fonti native di **tutti gli input esportati**, inclusi snapshot e storia
+(`input_sources`, `input_versions`), con piani applicati e ricevute immutabili.
+Le letture derivate seguono anche revisioni runtime precedenti; fonti
+mancanti/cicliche/non verificabili non autorizzano invio al modello. I vecchi
+piani v1 non diventano prova di consenso. Il resolver condiviso owner/riconciliazione
+task segue origini e tutte le evidenze applicate delle attività, non solo
+l'ultima: revocare una fonte applicata blocca quel contesto; proposte non applicate
+non contribuiscono. Questo **non completa** la provenienza degli input modello
+dei vecchi piani attività/memoria o il modello di conflitti della memoria.
+
+- **Accetta collegamento**: POST `/api/secretary/runtime/links/<id>/accept`, solo
+  `expected_version` della proposta mostrata. Fonte, revisione e ambito sono
+  ricontrollati; avanza la pratica, invalida approvazioni dipendenti e accoda una
+  revisione. Non concede una delega né collega qualsiasi risultato di ricerca.
+- **Presa in carico**: POST
+  `/api/secretary/runtime/practices/<id>/acknowledge`, `expected_version` della
+  pratica e `attention_hash` mostrato. Silenzia l'attenzione invariata, non chiude
+  la pratica né autorizza effetti; notifiche superate/riconosciute sono fermate
+  dai controlli prima dell'invio. Entrambi i controlli richiedono login/CSRF/origine
+  e identità proprietario costruita dal backend, mai autorità dal JSON.
+- **Riprova media bloccati dal consenso**, dalla fonte corrente aperta: POST
+  `/api/media/retry-blocked`, `message_id,expected_channel`. Occorrono entrambi
+  i consensi testo/media; solo fonti correnti idonee, non storico o tentativi
+  provider già registrati. Massimo 20 allegati/richiesta e tre reset/allegato.
+  Concedere il consenso non recupera automaticamente i job bloccati.
+- **Email di solo testo**: prepara con POST `/api/secretary/emails`, controlla
+  GET `/api/secretary/emails/<id>`, approva il payload esatto e poi scegli
+  separatamente POST `/api/secretary/emails/<id>/dispatch`. Mittente configurato
+  esplicito, oggetto fisso **Messaggio approvato**, destinatario/testo, versione,
+  scadenza e ricevuta sono vincolati. Approvare non accoda/invia; allegati e thread
+  non supportati. GET `/api/secretary/execution` mostra esiti limitati, non prova
+  consegna/lettura. La ricevuta UI resta solo nel DOM. Dopo un tentativo persistito,
+  timeout/crash/esito incerto non vengono reinviati alla cieca: serve riconciliare.
+
+Calendar usa grant **v3**: testo proprietario nativo corrente, evento/stato,
+ID Calendar esplicito configurato, fuso e tempi di creazione risolti
+(inizio/fine/durata/promemoria) sono sigillati e ricontrollati prima dell'I/O.
+Grant scaduti o legacy senza target sono negati; replay non rinnova il consenso
+né lo ricollega a un nuovo calendario/fuso. Serve nuova autorizzazione corrente.
+`CALENDAR_EXTERNAL_AUTO`/`CALENDAR_TRUSTED_SENDERS` non abilitano più auto-creazione
+per etichetta mittente. Anche notifiche/risposte/ZIP del pipeline persistono il
+tentativo prima dell'invio: attempted/uncertain richiedono riconciliazione, non
+resend cieco. Segnare spam/newsletter come letti è solo comportamento del
+classificatore privato legacy, non dell'ingest attuale.
+
+## Roadmap ancora aperta
+
+Restano: workflow/dipendenze arbitrari; memoria tipizzata, conflitti e provenienza
+completa degli input dei vecchi piani attività/memoria; collegamento generale di
+evidenze esistenti alle pratiche dal retrieval; condizioni di stop eseguibili
+(il testo salvato non è un motore di regole); Calendar update/disponibilità/drift;
+allegati e invii email in thread; tetto monetario/modalità e quiet hours globali;
+erase/export privacy coordinati; prova completa di backup ripristinato,
+validazione in produzione e valutazione semantica/qualitativa.
+L'integrazione limitata non dichiara il piano completato. Risultati correnti della
+suite completa saranno aggiunti dal run principale: questa modifica documentale
+non esegue test o terminale e non legge dati utente.
+
 # Dialogo continuo con la segretaria
 
 La chat naturale Telegram del proprietario usa uno storico persistente, un
@@ -24,17 +142,21 @@ sessioni durante l'importazione. In installazioni Python dirette è disponibile
   incompleto; i dati già acquisiti restano salvati.
 - Telegram personale: tutte le conversazioni accessibili e paginazione fino
   all'inizio dell'intervallo; vocali e immagini supportati vengono scaricati
-  entro il limite di 10 MiB e accodati per la conversione testuale.
+  entro il limite di 10 MiB; eventuali job media restano soggetti ai gate sotto,
+  non una promessa di conversione storica.
 - WhatsApp: solo storico sincronizzato disponibile sul dispositivo collegato,
   non garanzia di recupero completo dal server.
 - Telegram bot: lo storico passato non è disponibile tramite Bot API.
 - Calendar: escluso perché contiene appuntamenti, non comunicazioni.
 
 Nessuna richiesta AI sincrona, comando, risposta o scrittura Calendar viene avviata
-dallo script. I media vengono accodati per trascrizione AI al riavvio dell'app:
-questo comporta invio ai provider OpenRouter e relativi costi. I normali flussi,
-una volta riattivati, possono analizzare nuovamente
-messaggi recuperati; i dati importati possono comparire nei digest successivi.
+dallo script. I media possono essere accodati, ma **la coda non aggira il consenso
+né autorizza azioni al riavvio**: le fonti storiche restano negate alla conversione
+operativa e al replay di analisi/task/Calendar/invii, anche con consenso storico.
+`ai_history` abilita solo letture AI di contesto supportate, insieme a testo e,
+per documenti/media, media; non riattiva il digest operativo sullo storico.
+Il vincolo vale per import marcati storici dall'aggiornamento, non certifica la
+provenienza di vecchie righe prive di tale marcatura.
 Le identità native evitano duplicati in archivio: i conteggi includono anche
 messaggi già presenti. Nessun watermark di recupero ordinario viene avanzato.
 Rieseguire dopo un errore è sicuro. Codici di uscita: 0 completato, 1 errore
@@ -76,35 +198,46 @@ enabled e salute osservata dai worker. `configured` non significa ready.
 
 A `DIGEST_TIME`, nel `TIMEZONE` configurato, il bot invia il recap delle ultime
 24 ore e un piano delle successive 48 ore, anche in assenza di nuovi messaggi.
-Il piano incrocia agenda interna, Google Calendar quando disponibile e tutte le
+Il planner locale consulta agenda interna, Google Calendar quando disponibile e
 attività aperte pertinenti: arretrate, in scadenza entro 48 ore e senza scadenza,
-incluse quelle nate da comunicazioni più vecchie.
+incluse quelle nate da comunicazioni più vecchie. Il testo AI usa solo il
+sottoinsieme ammesso dai controlli di fonte: non promette copertura completa né
+una verifica generale di disponibilità/conflitti Calendar.
 
-- Le scadenze esplicite future generano eventi di 15 minuti con popup 30 minuti
-  prima e un promemoria Telegram 24 ore prima (subito se già entro le 24 ore).
-  Gli arretrati vengono segnalati senza cambiarne la scadenza.
+- Il planner delle attività esterne preesistenti può proporre eventi locali di
+  15 minuti con popup 30 minuti prima e promemoria 24 ore prima (subito se già
+  entro le 24 ore). Gli arretrati non cambiano scadenza. Le attività proprietario
+  usano invece promemoria espliciti o, per default, alle 09:00 locali per sole
+  date e alla scadenza per orari precisi: non inventano un orario di deadline.
 - Eventi e promemoria hanno chiavi persistenti: ripetere il digest o riavviare
   non crea nuove copie. Gli appuntamenti già associati al messaggio sono mantenuti.
-- Per attività create con `/task`, gli eventi sono accodati alla sincronizzazione;
-  se Calendar è disabilitato, restano nell'agenda interna/in coda. Per attività
-  estratte da comunicazioni esterne restano proposte da approvare con `/conferma ID`.
-- Per attività senza scadenza l'AI suggerisce prossimi passi, senza inventare
-  date o dichiarare appuntamenti salvati. Il piano segnala conflitti noti.
+- Creare un task, anche con `/task`, **non autorizza Calendar**. Gli eventuali
+  eventi derivati restano proposte locali, da autorizzare separatamente con
+  `/conferma ID`; le attività proprietario non entrano nel vecchio planner
+  automatico delle scadenze. Nessuna auto-creazione per etichetta mittente.
+- Per attività senza scadenza l'AI può suggerire prossimi passi, senza inventare
+  date o dichiarare appuntamenti salvati; non certifica assenza di conflitti.
 - `/attivita` elenca le attività aperte; `/fatto ID` le chiude. I promemoria ancora
   in coda verificano che l'attività sia aperta prima di inviarla.
 
-Il flusso dashboard `digest` deve essere attivo. Il recap è consegnato tramite
-la coda persistente; se l'AI non risponde, viene inviato un riepilogo testuale
-di riserva con agenda e attività.
+Il flusso dashboard `digest` deve essere attivo. I dati inviati al modello sono
+filtrati secondo le fonti ammesse: non tutto l'archivio/Calendar remoto viene
+esportato all'AI. Il recap o fallback è accodato come notifica persistente;
+accodato/accettato non significa consegnato. Un invio attempted/uncertain richiede
+riconciliazione, non un reinvio automatico. La generazione periodica del digest
+fuori dai job non ha il cap AI persistente Worker.
 
 ## Aggiornamento delle attività dalle nuove comunicazioni
 
-Ogni nuovo input acquisito dai flussi attivi viene confrontato con le attività
-aperte, inclusi messaggi Telegram personali e WhatsApp inviati. La valutazione
-avviene in una coda persistente separata, con tentativi automatici in caso di errore.
+I nuovi input correnti acquisiti dai flussi attivi possono essere confrontati con
+le attività aperte, inclusi messaggi Telegram personali e WhatsApp inviati, solo
+con fonti/consensi ammessi. La valutazione avviene in una coda persistente
+separata, con tentativi limitati in caso di errore.
 
-- Completamenti e modifiche del titolo si applicano automaticamente solo con
-  evidenza testuale esplicita, certa e collegamento univoco all'attività.
+- Completamenti e modifiche del titolo automatici richiedono testo proprietario
+  nativo corrente, evidenza esplicita/certa e collegamento univoco all'attività.
+  Comunicazioni esterne e messaggi personali/WhatsApp inviati restano evidenza
+  per proposte, non autorità per applicare la modifica.
 - Dubbi, corrispondenze multiple, annullamenti, cambi di scadenza e deduzioni
   esclusivamente visive richiedono conferma via bot, anche con soglia notifiche `mai`.
 - `/proposte` elenca le richieste pendenti; `/conferma_attivita ID` applica una
@@ -113,8 +246,9 @@ avviene in una coda persistente separata, con tentativi automatici in caso di er
 - Ogni modifica conserva evidenza e versione. Una proposta superata da modifiche
   all'attività o al messaggio sorgente non viene applicata.
 - `/fatto ID` usa lo stesso percorso: chiude l'attività e ritira i promemoria e
-  gli eventi derivati dall'attività. Gli appuntamenti indipendenti del messaggio
-  originale non vengono cancellati automaticamente.
+  aggiorna gli eventi derivati localmente. Una cancellazione Calendar remota
+  richiede un nuovo grant esplicito `/annulla ID`: chiudere il task non basta.
+  Gli appuntamenti indipendenti del messaggio originale non sono cancellati.
 - Gli import storici espliciti restano archivio, senza riconciliazione automatica
   anche se recuperati nuovamente dai connettori. Questo vincolo di provenienza
   vale per gli import effettuati dopo l'aggiornamento, non per vecchie righe già importate.
@@ -127,17 +261,22 @@ e può aumentare il consumo AI in proporzione ai messaggi e alle attività apert
 
 `OPENROUTER_MODEL` **DEVE supportare nativamente input testo e immagini**
 (`image_url`); il default è `google/gemini-2.5-flash`. Le foto del proprietario
-sono inviate direttamente al modello principale, con didascalia e cronologia.
-Inoltre, ogni vocale e immagine supportati acquisiti da Telegram (bot/account)
-e WhatsApp vengono convertiti in testo tramite una coda persistente `media`.
+possono essere inviate al modello principale, con didascalia e contesto ammesso,
+solo dopo i controlli di fonte/consenso. Vocali e immagini supportati acquisiti
+da Telegram (bot/account) e WhatsApp possono essere convertiti in testo tramite
+la coda persistente `media` se la fonte nativa corrente consente testo e media.
 I vocali usano `OPENROUTER_AUDIO_MODEL`; le immagini usano il modello principale
 per estrarre testo visibile e una descrizione visiva strutturata, non semplici
 stringhe base64 né i token visivi interni del provider.
 Il risultato è salvato in PostgreSQL, tabella `media_transcripts`, collegata
-all'allegato, e riutilizzato per analisi, digest e contesto del dialogo.
+all'allegato, e riutilizzato da analisi/contesto del dialogo con i relativi gate;
+il digest attuale non carica trascrizioni.
 Originali e didascalie restano invariati. Sono inclusi messaggi inviati/ricevuti,
-recupero e import storico; al primo avvio vengono accodati anche i media già
-archiviati con byte/file disponibili. Queste conversioni hanno costi AI.
+recupero e import storico **nell'archivio/coda, non nel permesso a convertire**.
+Anche i media archiviati con byte/file possono essere accodati dalla migrazione:
+lo storico resta bloccato operativamente, e il consenso negato produce un blocco
+terminale. Per i soli blocchi correnti idonei esiste il recupero esplicito sopra.
+Le conversioni ammesse hanno costi AI; import/riavvio non concedono consenso.
 Non vengono contattati mittenti o eseguiti comandi dalla sola trascrizione.
 L'estrazione documentale PDF/XML resta separata e invariata.
 Il bot accetta soltanto la chat privata del proprietario configurato.
@@ -153,7 +292,9 @@ poi Chiavi → Aggiungi chiave → JSON. Rispetta le policy dell’organizzazion
 Il setup Calendar nel wizard permette **incolla nascosto** (JSON compatto o
 multilinea, termina con una riga `FINE`) oppure importazione da file. Serve un
 terminale con input nascosto; se non disponibile, l’incolla viene bloccato.
-Non inserire chiavi in chat, argomenti di shell o dashboard.
+Non inserire chiavi in chat, argomenti di shell o upload generici. La dashboard
+protetta dispone di un campo JSON Calendar dedicato con validazione separata,
+senza evento di prova: vedere [CONFIGURATION.md](CONFIGURATION.md#setup-calendar).
 
 La chiave viene validata localmente e salvata atomicamente con permessi `0600`;
 ogni sostituzione richiede consenso. Il default Docker è
@@ -202,7 +343,8 @@ Se hai già il repository, entra nella sua directory invece di clonarlo.
    Le credenziali vengono generate e salvate privatamente. Non devi installare
    PostgreSQL sull'host. L'URI esterno serve solo se hai un DB dedicato.
 2. Nome agente, chiave OpenRouter, fuso orario, lingua, modello e ora digest.
-3. Se aggiungere email (fino a 50) ed entità fatture (fino a quattro).
+3. Se aggiungere email (fino a 50). La configurazione di entità fatture (fino a
+  quattro) è opzionale e non abilita automaticamente fatture o ZIP.
 4. Se eseguire login per bot Telegram, Telegram personale, WhatsApp, Calendar
    e Microsoft: puoi rispondere **no** e completarli dopo.
 

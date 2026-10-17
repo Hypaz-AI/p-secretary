@@ -1,11 +1,14 @@
 """Offline delivery ordering contracts using an in-memory SQL outbox."""
+import os
 import sqlite3
 import unittest
 from unittest.mock import MagicMock, patch
 
+import config
 import db
 import jobs
 import pipeline
+import policy
 
 
 class OwnerReplyOrderTests(unittest.TestCase):
@@ -22,6 +25,12 @@ class OwnerReplyOrderTests(unittest.TestCase):
         connect.return_value.__enter__.return_value = self.conn
         self.connect = connect
         self.notify = self.enterContext(patch.object(pipeline.telegram, 'notify', return_value=True))
+        # Keep the real ordering query and delivery path, but isolate PostgreSQL
+        # policy/receipt persistence from this SQLite outbox-only fixture.
+        self.gate = self.enterContext(patch('policy.can_operate', side_effect=lambda conn, mid, effect, **kw:
+            effect in {'notify', 'owner_command'}))
+        self.effect = self.enterContext(patch('policy.prepare_effect', return_value=True))
+        self.receipt = self.enterContext(patch('policy.record_receipt', return_value=True))
         self.enterContext(patch('urllib.request.urlopen', side_effect=AssertionError('HTTP forbidden')))
         if db.psycopg is not None:
             self.enterContext(patch.object(db.psycopg, 'connect', side_effect=AssertionError('PostgreSQL forbidden')))
@@ -100,17 +109,75 @@ class OwnerReplyOrderTests(unittest.TestCase):
         self.reply(1, 10, 0, 'running')
         pipeline.action(dict(type='notify', text='urgent'))
         self.notify.assert_called_once_with('urgent', html=True)
-        self.connect.assert_not_called()
+        # Receipts need DB contexts, but unrelated sends never query the outbox.
+        self.conn.execute.assert_not_called()
+        self.effect.assert_called_once()
+        self.assertEqual([c.args[2] for c in self.receipt.call_args_list], ['attempted', 'accepted'])
 
     def test_calendar_is_not_held_by_owner_reply(self):
         self.reply(1, 10, 0, 'running')
         self.conn.execute.side_effect = None
-        self.conn.execute.return_value.fetchone.return_value = (
-            'event-id', dict(title='Visit', dt='2030-01-01 10:00'), 'pending')
-        with patch.object(pipeline.gcal, 'is_active', return_value=True), \
-             patch.object(pipeline.gcal, 'create_event', return_value={'ok': True}) as create:
-            pipeline.action(dict(type='calendar', id=2))
-        create.assert_called_once()
+        key = 'owner:42:event:0'
+        event = dict(title='Visit', dt='2030-01-01 10:00')
+        row = (jobs.event_id(key), event, 'pending', key)
+        self.conn.execute.return_value.fetchone.return_value = row
+        authorization = 'calendar:offline-owner-grant'
+        with patch.dict(os.environ, {'GCAL_CALENDAR_ID': 'owner-reply-order@group.calendar.google.com'}), \
+             patch.object(config, 'TIMEZONE', 'Europe/Rome'), \
+             patch.object(config, 'GCAL_EVENT_DURATION', 60), \
+             patch.object(pipeline.gcal, 'is_active', return_value=True) as ready, \
+             patch.object(pipeline, '_calendar_io', return_value=True) as sync:
+            effect_payload = policy.calendar_payload(row)
+            self.assertEqual(effect_payload['target'], dict(
+                calendar_id='owner-reply-order@group.calendar.google.com', timezone='Europe/Rome',
+                duration_min=60, reminder_minutes=30,
+                start='2030-01-01T10:00:00+01:00', end='2030-01-01T11:00:00+01:00'))
+            digest = policy.payload_hash(effect_payload)
+            # Isolate grant persistence, not effect_allowed: only the explicit
+            # owner/token and the exact sealed target/payload may authorize I/O.
+            with patch('policy._calendar_allowed', side_effect=lambda conn, mid, hashed, token:
+                       mid == 42 and hashed == digest and token == authorization) as grant:
+                pipeline.action(dict(type='calendar', id=2, authority_message_id=42,
+                                     authorization=authorization))
+        ready.assert_called_once_with()
+        sync.assert_called_once_with(effect_payload)
+        self.effect.assert_called_once_with(self.conn, f'{authorization}:synced',
+                                            42, 'calendar', effect_payload,
+                                            authorization=authorization)
+        self.assertEqual([c.args[1:] for c in grant.call_args_list],
+                         [(42, digest, authorization)] * 4)
+        self.assertEqual([c.args for c in self.receipt.call_args_list],
+                         [(self.conn, f'{authorization}:synced', 'attempted'),
+                          (self.conn, f'{authorization}:synced', 'accepted')])
+        self.assertFalse(any('work_jobs' in call.args[0] for call in self.conn.execute.call_args_list))
+        self.notify.assert_not_called()
+
+    def test_calendar_owner_sync_key_does_not_replace_explicit_grant(self):
+        self.reply(1, 10, 0, 'running')
+        self.conn.execute.side_effect = None
+        key = 'owner:42:event:0'
+        event = dict(title='Visit', dt='2030-01-01 10:00')
+        row = (jobs.event_id(key), event, 'pending', key)
+        self.conn.execute.return_value.fetchone.return_value = row
+        authorization = 'calendar:offline-owner-grant'
+        with patch.dict(os.environ, {'GCAL_CALENDAR_ID': 'owner-reply-order@group.calendar.google.com'}), \
+             patch.object(config, 'TIMEZONE', 'Europe/Rome'), \
+             patch.object(config, 'GCAL_EVENT_DURATION', 60), \
+             patch.object(pipeline.gcal, 'is_active', return_value=True) as ready, \
+             patch.object(pipeline, '_calendar_io', return_value=True) as sync, \
+             patch('policy._calendar_allowed', return_value=False) as grant:
+            digest = policy.payload_hash(policy.calendar_payload(row))
+            for authority in ({}, dict(authority_message_id=42),
+                              dict(authorization=authorization),
+                              dict(authority_message_id=42, authorization=authorization)):
+                with self.subTest(authority=authority), \
+                     self.assertRaisesRegex(jobs.Deferred, '^Calendar authorization changed$'):
+                    pipeline.action(dict(type='calendar', id=2, **authority))
+        grant.assert_called_once_with(self.conn, 42, digest, authorization)
+        ready.assert_not_called()
+        sync.assert_not_called()
+        self.effect.assert_not_called()
+        self.receipt.assert_not_called()
         self.assertFalse(any('work_jobs' in call.args[0] for call in self.conn.execute.call_args_list))
         self.notify.assert_not_called()
 

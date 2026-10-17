@@ -15,6 +15,7 @@ def section(title, steps=()):
 
 GUIDES = {
     'welcome': ('Configurazione guidata · PI-SECRETARY', (
+        'Segretario personale: documenti, ricerca, memoria, attività e responsabilità. Fatture e ZIP sono funzionalità opzionali.',
         'Prepara un browser sul PC o telefono: i link ufficiali sono indicati in ogni sezione.',
         'Inserisci segreti solo nei prompt nascosti del terminale o sui siti ufficiali, mai in chat o nei log.',
         'INVIO mantiene il valore indicato o salta; [s/N] richiede un sì esplicito. Le risposte vengono salvate subito.',
@@ -30,12 +31,15 @@ GUIDES = {
         'Accedi o registrati su https://openrouter.ai/ e controlla credito e limiti su https://openrouter.ai/settings/credits',
         'Apri https://openrouter.ai/settings/keys → Create Key; scegli nome e limite di spesa, copia la chiave nel prompt nascosto.',
         'La chiave è necessaria prima di avviare l’app. Non incollarla in comandi, screenshot o chat; revocala dal sito se esposta.',
-        'Le comunicazioni elaborate possono essere inviate al provider AI: verifica privacy e policy su https://openrouter.ai/docs/guides/privacy/logging')),
-    'preferences': ('Preferenze e fatture', (
+        'Le comunicazioni elaborate possono essere inviate al provider AI: verifica privacy e policy su https://openrouter.ai/docs/guides/privacy/logging',
+        'Scegli separatamente ogni consenso sorgente/effetto in Permessi AI. Default negato: collegare un account o inserire una chiave NON autorizza l’invio dati.')),
+    'preferences': ('Preferenze del segretario e funzionalità opzionali', (
         'Fuso orario: Europe/Rome gestisce anche l’ora legale; lingua: it per italiano.',
         'Cerca il modello su https://openrouter.ai/models e copia l’identificativo provider/modello, non il nome commerciale; verifica costi e disponibilità.',
         'Ora digest: formato 24 ore HH:MM nel fuso scelto (es. 21:00). Il bot Telegram va collegato per riceverlo.',
-        'Le entità fatture sono facoltative (massimo 4): nome/cartella, partita IVA e descrizione aiutano la classificazione; non sono credenziali fiscali.')),
+        'Le entità fatture sono facoltative (massimo 4): nome/cartella, partita IVA e descrizione aiutano la classificazione; non sono credenziali fiscali.',
+        'Il profilo DB decide i default fatture/ZIP: nuovi disabilitati, legacy preservati. Dopo l’avvio usa Flussi operativi; niente flag env alternativi.',
+        'Modalità observe/active, quiet hours globali e budget monetario locale sono pianificati. Il runtime revisioni ha una propria fascia silenziosa 22–08, non globale. Imposta limiti di spesa presso OpenRouter.')),
     'email': ('Account email', (
         'Scegli il provider della casella, poi un nome riconoscibile e l’indirizzo completo. Sono supportati fino a 50 account.',
         'gmail usa una password per app; outlook è Microsoft personale, m365 è lavoro/scuola e richiedono OAuth, non password.',
@@ -92,7 +96,9 @@ GUIDES = {
         'Il launcher verifica automaticamente il DB scelto; l’app parte solo con il successivo consenso esplicito.',
         'Dopo l’avvio apri http://127.0.0.1:8080 sul server; da remoto usa un tunnel SSH come descritto nel README, non pubblicare HTTP su Internet.',
         'Docker: apri privatamente PI_SECRETARY_HOME/config/dashboard.json sull’host con un editor locale e leggi username/password generati al primo avvio, poi inseriscili nella pagina login.',
-        'Non stampare né condividere il file. Verifica gli interruttori dei connettori: configurazione completata non significa servizio pronto o login ancora valido.')),
+        'Non stampare né condividere il file. Verifica gli interruttori dei connettori: configurazione completata non significa servizio pronto o login ancora valido.',
+        'Apri Cosa seguo per te, Documenti e ricerca, Permessi AI ed Esiti. Un’approvazione non è un invio né un esito verificato.',
+        'Consenso AI separato per email/Telegram/WhatsApp e testo/media: nessun consenso automatico nel wizard. Telegram comprende bot e account personale.')),
 }
 
 

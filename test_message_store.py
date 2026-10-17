@@ -1,4 +1,5 @@
 """Offline tests: mocked database, AI, network and notification APIs."""
+import json
 import unittest
 from unittest.mock import Mock, patch
 from datetime import datetime
@@ -27,6 +28,7 @@ class NativeTests(unittest.TestCase):
 
     def test_whatsapp_existing_row_updates_without_insert_or_analysis(self):
         conn = Mock()
+        conn.execute.return_value.fetchall.return_value = []
         conn.transaction.return_value.__enter__ = Mock()
         conn.transaction.return_value.__exit__ = Mock(return_value=False)
         conn.execute.return_value.fetchone.return_value = (
@@ -41,27 +43,59 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(update.args[1][:2], ('io → Anna', 'WhatsApp · Anna'))
         self.assertFalse(any('INSERT' in c.args[0] for c in calls))
         self.assertFalse(any('message_analysis' in c.args[0] for c in calls))
+        self.derived.assert_called_once_with(conn, 42, historical=False)
 
     def test_whatsapp_enrichment_media_is_guarded_and_body_not_updated(self):
         conn = Mock()
+        conn.execute.return_value.fetchall.return_value = []
         old = {'chat_id': 'g@g.us', 'chat_name': 'Team', 'chat_name_rank': 3,
                'author_name': 'Anna', 'author_name_rank': 3}
         message_store.enrich_whatsapp(conn, (42, old, 'Anna in Team', 'WhatsApp · Team'),
             {'author_name': '123@lid', 'chat_name': 'g@g.us'},
             [{'filename': 'a.pdf', 'path': '/offline/a.pdf'}])
         statements = [c.args[0] for c in conn.execute.call_args_list]
-        self.assertEqual(len(statements), 1)
+        self.assertEqual(len(statements), 2)
+        self.assertIn('INSERT INTO attachments', statements[0])
         self.assertIn('WHERE NOT EXISTS', statements[0])
-        self.assertNotIn('UPDATE whatsapp_messages', statements[0])
+        self.assertIn('SELECT a.id,a.content_type FROM attachments', statements[1])
+        self.assertEqual(conn.execute.call_args.args[1], (42,))
+        self.assertFalse(any('UPDATE whatsapp_messages' in sql for sql in statements))
+        self.derived.assert_called_once_with(conn, 42, historical=False)
 
     def setUp(self):
+        # Minimal native-storage fixtures stop at the derived integration boundary.
+        self.derived = self.enterContext(patch.object(message_store, 'enqueue_derived'))
         for name in ('jobs.submit', 'jobs.set_cursor'):
             p = patch(name)
             p.start()
             self.addCleanup(p.stop)
+        for name in ('db._conn', 'urllib.request.urlopen'):
+            p = patch(name, side_effect=AssertionError('External I/O forbidden in offline tests'))
+            p.start()
+            self.addCleanup(p.stop)
+        for name, value in (('TELEGRAM_BOT_TOKEN', '123:offline'), ('TELEGRAM_CHAT_ID', '7')):
+            p = patch.object(config, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        running = patch.object(main, 'running', True)
+        running.start()
+        self.addCleanup(running.stop)
         switch = patch.object(main.flows, 'enabled', return_value=True)
         switch.start()
         self.addCleanup(switch.stop)
+
+    def _telegram_message(self):
+        return {
+            'update_id': 8, 'from': 'owner', 'text': '/start',
+            'source_id': json.dumps(['bot', '123', '7', 42]),
+            'chat_id': '7', 'chat_type': 'private',
+            'msg_date': '2026-10-14T11:38:00+02:00',
+            'metadata': {
+                'account': 'bot:123', 'update_id': 8, 'message_id': 42,
+                'chat_id': '7', 'chat_type': 'private', 'chat_name': 'owner',
+                'author': 7, 'direction': 'in', 'content_origin': 'direct_text',
+            },
+        }
 
     def test_preserved_ledger_repairs_native_without_ai(self):
         calls = []
@@ -73,41 +107,80 @@ class NativeTests(unittest.TestCase):
         ai.assert_not_called()
 
     def test_owner_command_persisted_before_routing(self):
-        m = {
-            'from': 'owner', 'text': '/start', 'source_id': 'native',
-            'chat_id': '7', 'chat_type': 'private',
-            'msg_date': '2026-10-14T11:38:00+02:00',
-            'metadata': {'chat_id': '7', 'chat_type': 'private'},
-        }
-        calls = []
+        m = self._telegram_message()
+        events = Mock()
         with (
-            patch.object(config, 'TELEGRAM_CHAT_ID', '7'),
             patch.object(telegram, 'fetch_new_messages', return_value=([m], 9)),
-            patch.object(db, 'store_message', side_effect=lambda *a, **k: calls.append('store')),
-            patch.object(db, 'communication_seen', return_value=False),
+            patch.object(db, '_conn') as connect,
+            patch.object(db.message_store, 'store', return_value=42) as store,
+            # Only isolate routing here; native authority is covered by policy tests.
+            patch('policy.can_operate', return_value=True) as can_operate,
+            patch.object(jobs, 'enqueue') as enqueue,
+            patch.object(db, 'communication_seen') as seen,
         ):
-            main.check_telegram({})
-        self.assertEqual(calls, ['store'])
-        jobs.submit.assert_called_once()
+            conn = connect.return_value.__enter__.return_value
+            transaction = conn.transaction.return_value
+            for name, mocked in (('begin', transaction.__enter__), ('store', store),
+                                 ('policy', can_operate), ('enqueue', enqueue),
+                                 ('checkpoint', conn.execute), ('commit', transaction.__exit__)):
+                events.attach_mock(mocked, name)
+            state = {}
+            main.check_telegram(state)
+        self.assertEqual([c[0] for c in events.mock_calls],
+                         ['begin', 'store', 'policy', 'enqueue', 'checkpoint', 'commit'])
+        connect.assert_called_once_with()
+        conn.transaction.assert_called_once_with()
+        transaction.__exit__.assert_called_once_with(None, None, None)
+        store.assert_called_once_with(
+            conn, 'telegram', 'owner', 'Telegram · owner', '/start',
+            ts=m['msg_date'], source_id=m['source_id'],
+            metadata={**m['metadata'], 'is_forwarded': False}, attachments=[])
+        can_operate.assert_called_once_with(conn, 42, 'owner_command', owner_required=True)
+        enqueue.assert_called_once_with(conn, 'owner', 'owner:42',
+                                       {'text': '/start', 'message_id': 42, 'media': False})
+        conn.execute.assert_called_once()
+        self.assertIn('INSERT INTO source_cursors', conn.execute.call_args.args[0])
+        self.assertEqual(conn.execute.call_args.args[1], ('telegram_bot_offset', '9'))
+        self.assertEqual(state['telegram_offset'], 9)
+        seen.assert_not_called()
+        jobs.submit.assert_not_called()
+        jobs.set_cursor.assert_not_called()
 
     def test_thirdparty_never_routes_owner_command(self):
-        m = {'from': 'other', 'text': '/note', 'source_id': 'native', 'unauthorized': True}
-        with patch.object(telegram, 'fetch_new_messages', return_value=([m], 9)), \
-             patch.object(db, 'store_message') as store, patch.object(db, 'communication_seen', return_value=False), \
-             patch.object(main, 'process_message') as process, \
-             patch.object(main, '_handle_user_command') as command, \
-             patch.object(main, 'handle_user_chat') as chat:
-            main.check_telegram({})
+        m = self._telegram_message()
+        m.update({'from': 'other', 'text': '/note', 'unauthorized': True, 'chat_id': '8',
+                  'source_id': json.dumps(['bot', '123', '8', 42]),
+                  'metadata': {**m['metadata'], 'chat_id': '8', 'author': 8}})
+        with (
+            patch.object(telegram, 'fetch_new_messages', return_value=([m], 9)),
+            patch.object(db, '_conn') as connect,
+            patch.object(db.message_store, 'store') as store,
+            patch.object(db, 'communication_seen') as seen,
+            patch.object(jobs, 'enqueue') as enqueue,
+            patch.object(main, 'process_message') as process,
+            patch.object(main, '_handle_user_command') as command,
+            patch.object(main, 'handle_user_chat') as chat,
+        ):
+            state = {}
+            main.check_telegram(state)
+        conn = connect.return_value.__enter__.return_value
+        conn.transaction.assert_called_once_with()
+        conn.transaction.return_value.__exit__.assert_called_once_with(None, None, None)
+        conn.execute.assert_called_once()
+        self.assertIn('INSERT INTO source_cursors', conn.execute.call_args.args[0])
+        self.assertEqual(conn.execute.call_args.args[1], ('telegram_bot_offset', '9'))
+        self.assertEqual(state['telegram_offset'], 9)
         process.assert_not_called()
         store.assert_not_called()
+        seen.assert_not_called()
+        enqueue.assert_not_called()
         jobs.submit.assert_not_called()
+        jobs.set_cursor.assert_not_called()
         command.assert_not_called()
         chat.assert_not_called()
 
     def test_bot_boundary_rejects_supplied_mismatched_or_missing_identity(self):
-        valid = {'from': 'owner', 'text': '/start', 'source_id': 'native',
-                 'chat_id': '7', 'chat_type': 'private',
-                 'metadata': {'chat_id': '7', 'chat_type': 'private'}}
+        valid = self._telegram_message()
         cases = [('7', {'unauthorized': True}), ('', {}), (None, {}),
                  ('7', {'chat_id': '8'}), ('7', {'chat_id': None}),
                  ('7', {'chat_type': 'group'}), ('7', {'chat_type': None}),
@@ -118,15 +191,25 @@ class NativeTests(unittest.TestCase):
             with self.subTest(owner=owner, overrides=overrides), patch.object(
                     config, 'TELEGRAM_CHAT_ID', owner), patch.object(
                     telegram, 'fetch_new_messages', return_value=([{**valid, **overrides}], 9)), patch.object(
-                    db, 'store_message') as store, patch.object(
+                    db, '_conn') as connect, patch.object(
+                    db.message_store, 'store') as store, patch.object(
                     db, 'communication_seen') as seen, patch.object(
+                    jobs, 'enqueue') as enqueue, patch.object(
                     main, 'process_message') as process, patch.object(
-                    telegram, 'notify') as notify, patch.object(main, 'running', True):
+                    main, '_handle_user_command') as command, patch.object(
+                    main, 'handle_user_chat') as chat, patch.object(
+                    telegram, 'notify') as notify:
                 state = {}
                 main.check_telegram(state)
                 self.assertEqual(state['telegram_offset'], 9)
-                jobs.set_cursor.assert_called_with('telegram_bot_offset', 9)
-                for call in (store, seen, process, notify, jobs.submit):
+                conn = connect.return_value.__enter__.return_value
+                conn.transaction.assert_called_once_with()
+                conn.transaction.return_value.__exit__.assert_called_once_with(None, None, None)
+                conn.execute.assert_called_once()
+                self.assertIn('INSERT INTO source_cursors', conn.execute.call_args.args[0])
+                self.assertEqual(conn.execute.call_args.args[1], ('telegram_bot_offset', '9'))
+                for call in (store, seen, process, notify, jobs.submit, jobs.set_cursor,
+                             enqueue, command, chat):
                     call.assert_not_called()
 
     def test_timestamp_timezone_preserved(self):
@@ -160,12 +243,14 @@ class NativeTests(unittest.TestCase):
                   'chat': {'id': 7, 'type': 'private', 'first_name': 'Other'},
                   'from': {'id': 7, 'first_name': 'Other', 'last_name': 'User',
                            'username': 'otheruser'}, 'text': 'quando x allora y'}}
-        with patch.object(config, 'TELEGRAM_BOT_TOKEN', 'mock'), \
-             patch.object(config, 'TELEGRAM_CHAT_ID', ''), \
-               patch.object(telegram, 'acquire_poll_lock'), \
-             patch.object(telegram, '_call', return_value={'result': [update]}):
+        with (
+            patch.object(config, 'TELEGRAM_BOT_TOKEN', 'mock'),
+            patch.object(config, 'TELEGRAM_CHAT_ID', ''),
+            patch.object(telegram, 'acquire_poll_lock'),
+            patch.object(telegram, '_call', return_value={'result': [update]}),
+        ):
             msgs, offset = telegram.fetch_new_messages(0)
-           self.assertEqual(msgs, [])
+        self.assertEqual(msgs, [])
         self.assertEqual(offset, 6)
 
     def test_telegram_full_name_and_chat_name(self):

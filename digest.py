@@ -14,7 +14,10 @@ import brain
 import config
 import db
 import flows
-from connectors import telegram
+import jobs
+import json
+import policy
+import uuid
 
 DIGEST_WINDOW_HOURS = 24
 PLANNING_WINDOW_HOURS = 48
@@ -72,10 +75,9 @@ def plan_pending_tasks(tasks: list, now: datetime, until: datetime) -> None:
                 })
             except ValueError:
                 continue
-            # Le attività esplicite dell'utente sono autorizzate; le comunicazioni
-            # esterne restano proposte, come nella pipeline di analisi.
+            # A deadline, even owner-originated, is NOT a current Calendar intent.
             save_event(conn, event, key, f"task:{task['id']}",
-                       approved=source_message is None)
+                       approved=False)
 
 
 def planning_agenda(now: datetime, until: datetime) -> list:
@@ -107,6 +109,106 @@ def _parse_digest_time() -> (int, int):
         return 21, 0  # default 21:00
 
 
+def _permitted_sources(conn, comm_rows, tasks, appointments):
+    """Gate EVERY native source before model egress, not display labels/summary.
+
+    Unknown provenance (legacy tasks and remote Calendar) is omitted from AI.
+    Never reuse message_analysis summaries: those may contain denied attachments.
+    No image bytes/paths or transcripts are loaded, so no media egress is needed.
+    """
+    sources = set()
+    decisions = {}
+
+    def allowed(mid):
+        if type(mid) is not int or mid <= 0:
+            return False
+        if mid not in decisions:
+            decisions[mid] = policy.can_operate(conn, mid, 'ai_text')
+        if decisions[mid]:
+            sources.add(mid)
+        return decisions[mid]
+
+    communications = []
+    for item in comm_rows:
+        if allowed(item['id']):
+            communications.append(dict(ts=item['ts'], channel=item['channel'], sender=item['sender'],
+                subject=item['subject'], summary=item['body'] or '', category='altro',
+                priority='normale', needs_action=False, action='', direction=item['direction']))
+    safe_tasks = []
+    for task in tasks:
+        # Both origins matter when an owner updates a task inferred from email.
+        origins = {task.get(field) for field in ('source_message', 'owner_origin_message')
+                   if task.get(field) is not None}
+        if origins and all(allowed(mid) for mid in origins):
+            safe_tasks.append(task)
+    safe_appointments = []
+    for item in appointments:
+        row = conn.execute('SELECT sync_key FROM appointments WHERE id=%s', (item['id'],)).fetchone()
+        mid = None
+        if row:
+            from pipeline import _event_origin
+            mid = _event_origin(conn, row[0])
+        if allowed(mid):
+            # Event notes/title can derive from an attachment. Only the display
+            # fields below reach summarize_day; media-derived events are omitted
+            # unless the source also permits ai_media.
+            attached = conn.execute('SELECT 1 FROM attachments WHERE message_id=%s LIMIT 1', (mid,)).fetchone()
+            if attached and not policy.can_operate(conn, mid, 'ai_media'):
+                continue
+            safe_appointments.append(item)
+    return communications, safe_tasks, safe_appointments, sorted(sources)
+
+
+def _sources_current(conn, sources, media_sources=()):
+    return all(policy.can_operate(conn, mid, 'ai_text')
+               and (mid not in media_sources or policy.can_operate(conn, mid, 'ai_media'))
+               for mid in sources)
+
+
+def _queue_notification(conn, day, text, source_ids, media_source_ids=()):
+    """Trusted scheduler writer ONLY. Seal exact text + job in ONE transaction.
+
+    Not a model tool/public request endpoint. Nothing in action payloads can
+    create these rows. A date/recipient is write-once, including uncertain sends.
+    """
+    recipient = str(config.TELEGRAM_CHAT_ID or '').strip()
+    if not recipient.isdecimal() or int(recipient) <= 0:
+        raise jobs.Deferred('Digest recipient unavailable')
+    datetime.strptime(day, '%Y-%m-%d')
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError('Empty digest')
+    sources = sorted(set(source_ids))
+    media = sorted(set(media_source_ids))
+    with conn.transaction():
+        jobs.assert_current(conn)
+        conn.execute('SELECT pg_advisory_xact_lock(73190429)')
+        flow = conn.execute("SELECT enabled FROM flow_settings WHERE flow='digest' FOR SHARE").fetchone()
+        if not flow or flow[0] is not True or not set(media).issubset(sources):
+            raise jobs.Deferred('Digest flow paused')
+        if not _sources_current(conn, sources, media):
+            raise jobs.Deferred('Digest data policy changed')
+        existing = conn.execute('''SELECT effect_key FROM system_notifications
+            WHERE system='digest' AND scope=%s::date AND recipient=%s FOR UPDATE''', (day, recipient)).fetchone()
+        if existing:
+            return existing[0]
+        effect_payload = dict(text=text, html=False, recipient=recipient)
+        digest = policy.payload_hash(effect_payload)
+        key = f'digest:{day}:{digest}'
+        token = 'digest:' + uuid.uuid4().hex
+        payload = dict(type='notify', text=text, html=False, flow='digest', digest_day=day,
+                       system='digest', system_authorization=token)
+        queued = jobs.enqueue(conn, 'action', key, payload)
+        if not queued:
+            # A foreign/preexisting job must never be promoted to trusted work.
+            raise ValueError('Digest job identity conflict')
+        conn.execute('''INSERT INTO system_notifications
+            (token,system,scope,recipient,effect_key,job_id,payload,payload_hash,source_ids,media_source_ids)
+            VALUES (%s,'digest',%s::date,%s,%s,%s,%s,%s,%s,%s)''',
+            (token, day, recipient, key, queued[0], json.dumps(effect_payload), digest, sources, media))
+        jobs.assert_current(conn)
+        return key
+
+
 def send_daily_digest() -> bool:
     """Accoda recap delle ultime 24 ore e piano delle successive 48 ore.
 
@@ -118,12 +220,30 @@ def send_daily_digest() -> bool:
     window_start = (now.astimezone(timezone.utc) - timedelta(hours=DIGEST_WINDOW_HOURS)).astimezone(now.tzinfo)
     until = (now.astimezone(timezone.utc) + timedelta(hours=PLANNING_WINDOW_HOURS)).astimezone(now.tzinfo)
 
-    # comunicazioni delle ultime 24 ore (finestra mobile, non giorno di calendario)
-    comm_rows = db.communications_since(hours=DIGEST_WINDOW_HOURS)
-
     tasks = db.pending_tasks(until)
     plan_pending_tasks(tasks, now, until)
-    appointments = planning_agenda(now, until)
+    # Native IDs and RAW text only. The legacy query concatenates unconditionally
+    # media transcripts and previously generated AI summaries, so cannot be used.
+    with db._conn() as conn, conn.transaction():
+        jobs.assert_current(conn)
+        rows = conn.execute('''SELECT id,ts,channel,sender,subject,LEFT(body,2000),direction
+            FROM communications WHERE ts>=%s AND ts<=%s ORDER BY ts,id''', (window_start, now)).fetchall()
+        comm_rows = [dict(zip(('id', 'ts', 'channel', 'sender', 'subject', 'body', 'direction'), row))
+                     for row in rows]
+        # Remote Calendar has no native consent source; do not send it to AI.
+        appointments = db.appointments_between(now, until)
+        comm_rows, tasks, appointments, sources = _permitted_sources(conn, comm_rows, tasks, appointments)
+        media_sources = [mid for mid in sources if conn.execute(
+            'SELECT 1 FROM attachments WHERE message_id=%s LIMIT 1', (mid,)).fetchone()]
+        # Derived task titles can include attachment content as well.
+        if media_sources and not all(policy.can_operate(conn, mid, 'ai_media') for mid in media_sources):
+            # Raw message text remains independently permitted; omit all derived
+            # tasks/events for denied media rather than infer from old summaries.
+            denied = {mid for mid in media_sources if not policy.can_operate(conn, mid, 'ai_media')}
+            tasks = [t for t in tasks if not denied.intersection(
+                (t.get('source_message'), t.get('owner_origin_message')))]
+            appointments = []
+            media_sources = [mid for mid in media_sources if mid not in denied]
 
     # brain's legacy formatter only knows timestamp deadlines. Supply an explicit
     # label in its input, and retain a deterministic section even if AI omits it.
@@ -134,8 +254,14 @@ def send_daily_digest() -> bool:
                      if is_owner_task(t) else t for t in tasks]
 
     # testo generato dall'AI: senza parse_mode HTML (caratteri < > & rompono il parse)
-    summary = (brain.summarize_day(comm_rows, appointments, tasks=summary_tasks,
-                                   planning_start=now, planning_end=until) or "").strip()
+    with db._conn() as conn, conn.transaction():
+        jobs.assert_current(conn)
+        if not _sources_current(conn, sources, media_sources):
+            raise jobs.Deferred('Digest data policy changed')
+    # With no consented native input, use a local neutral recap, not an AI call.
+    summary = ((brain.summarize_day(comm_rows, appointments, tasks=summary_tasks,
+                                   planning_start=now, planning_end=until) or '').strip()
+               if comm_rows or appointments or summary_tasks else 'Nessuna fonte autorizzata per il riepilogo AI.')
     if not summary:
         raise RuntimeError('Digest vuoto')
     if owner_lines:
@@ -145,10 +271,9 @@ def send_daily_digest() -> bool:
     header = ("🌙 Riassunto delle ultime 24 ore\n"
               f"da {window_start.strftime('%d/%m %H:%M')} a {now.strftime('%d/%m %H:%M')}\n"
               f"📅 Piano fino al {until.strftime('%d/%m %H:%M')} ({config.TIMEZONE})\n\n")
-    import jobs
     day = now.strftime('%Y-%m-%d')
-    jobs.submit('action', f'digest:{day}', {'type':'notify','text':header+summary,
-        'html':False, 'flow':'digest', 'digest_day':day})
+    with db._conn() as conn, conn.transaction():
+        _queue_notification(conn, day, header + summary, sources, media_sources)
     return True  # queued, not delivered; the outbox records actual completion
 
 

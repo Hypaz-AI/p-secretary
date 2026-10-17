@@ -22,6 +22,20 @@ class OwnerReminderTests(unittest.TestCase):
         network = patch('urllib.request.urlopen', side_effect=AssertionError('Network forbidden'))
         network.start()
         self.addCleanup(network.stop)
+        # Scheduling/labels are isolated from practice reviews and receipt SQL.
+        self.enterContext(patch('secretary.due_reviews'))
+        self.enterContext(patch('secretary_runtime.backlog'))
+        self.enterContext(patch('capabilities.enabled', return_value=False))
+        self.enterContext(patch('policy.can_operate', side_effect=lambda conn, mid, effect, **kw:
+            effect == 'notify' and mid == 42))
+        self.effect = self.enterContext(patch('policy.prepare_effect', return_value=True))
+        self.receipt = self.enterContext(patch('policy.record_receipt', return_value=True))
+        cursor = self.conn.execute.return_value
+        def execute(sql, *args):
+            if sql.startswith('SELECT COALESCE(owner_origin_message,source_message)'):
+                return MagicMock(**{'fetchone.return_value': (42,)})
+            return cursor
+        self.conn.execute.side_effect = execute
         self.now = datetime(2030, 3, 30, 12, tzinfo=ZoneInfo('Europe/Rome'))
         self.task = dict(id=7, version=3, title='Pagare fattura', deadline=None,
                          source_message=None, owner_deadline_date=date(2030, 3, 31),
@@ -223,13 +237,16 @@ class OwnerReminderTests(unittest.TestCase):
     def test_action_labels_timed_default_as_default_not_requested(self):
         when = datetime.now(timezone.utc) - timedelta(minutes=1)
         self.conn.execute.return_value.fetchone.side_effect = [
-            (3, None, None, when), ('Pagare fattura', when, None, None)]
+            (3, None, None, when), ('Pagare fattura', when, None, None),
+            (3, None, None, when)]  # Recheck the version/time immediately before send.
         with patch('connectors.telegram.notify', return_value=True) as notify:
             pipeline.action(self.payload(when))
         text = notify.call_args.args[0]
         self.assertIn('default alla scadenza', text)
         self.assertNotIn('promemoria richiesto', text)
         self.assertFalse(notify.call_args.kwargs['html'])
+        self.assertEqual(self.effect.call_args.args[2:4], (42, 'notify'))
+        self.assertEqual([c.args[2] for c in self.receipt.call_args_list], ['attempted', 'accepted'])
 
     def test_action_suppresses_stale_and_labels_current_default(self):
         with patch('task_reconciliation.reminder_is_current', return_value=False), \
@@ -271,18 +288,35 @@ class OwnerReminderTests(unittest.TestCase):
 
     def test_digest_surfaces_date_default_even_if_ai_omits_task(self):
         task = dict(self.task, owner_deadline_date=date(2000, 1, 1))
+        self.conn.execute.return_value.fetchall.return_value = []
+        # No attachments; enabled digest flow; no existing sealed notification.
+        self.conn.execute.return_value.fetchone.side_effect = [None, (True,), None]
         with patch('digest.datetime') as clock, \
-             patch('db.communications_since', return_value=[]), \
+             patch('config.TELEGRAM_CHAT_ID', '7'), \
+             patch('policy.can_operate', side_effect=lambda conn, mid, effect, **kw:
+                   mid == 42 and effect == 'ai_text') as grant, \
              patch('db.pending_tasks', return_value=[task]), \
-             patch('digest.plan_pending_tasks'), patch('digest.planning_agenda', return_value=[]), \
+             patch('digest.plan_pending_tasks'), patch('db.appointments_between', return_value=[]), \
              patch('brain.summarize_day', return_value='Recap') as summary, \
-             patch('jobs.submit') as submit:
+             patch('jobs.enqueue', return_value=(1,)) as enqueue:
             clock.now.return_value = self.now
-            digest.send_daily_digest()
-        text = submit.call_args.args[2]['text']
+            self.assertTrue(digest.send_daily_digest())
+        enqueue.assert_called_once()
+        payload = enqueue.call_args.args[3]
+        self.assertEqual(payload['system'], 'digest')
+        self.assertFalse(payload['html'])
+        text = payload['text']
         for label in ('#7', '2000-01-01', 'solo data', 'default 09:00 locale', 'arretrata'):
             self.assertIn(label, text)
+        summary.assert_called_once()
         self.assertIn('solo data', summary.call_args.kwargs['tasks'][0]['title'])
+        self.assertEqual([c.args[1:] for c in grant.call_args_list], [(42, 'ai_text')] * 3)
+        seals = [c.args[1] for c in self.conn.execute.call_args_list
+                 if 'INSERT INTO system_notifications' in c.args[0]]
+        self.assertEqual(len(seals), 1)
+        self.assertEqual(seals[0][0], payload['system_authorization'])
+        self.assertEqual(seals[0][2], '7')
+        self.assertEqual(seals[0][-2:], ([42], []))
         self.assertIsNone(task['deadline'])
 
 

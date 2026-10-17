@@ -10,7 +10,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import installer
 import setup_telegram_account as telegram
@@ -31,19 +31,30 @@ class WizardFixTests(unittest.TestCase):
 
     def test_telegram_expired_invalid_and_2fa(self):
         from telethon import errors
-        sent = SimpleNamespace(type=type('SentCodeTypeApp', (), {})(), timeout=0, phone_code_hash='secret-hash')
-        client = SimpleNamespace(connect=AsyncMock(), disconnect=AsyncMock(), get_me=AsyncMock(return_value=None),
+        identity = SimpleNamespace(id=7, bot=False, phone='391234567')
+        sent = SimpleNamespace(type=type('SentCodeTypeApp', (), {})(), timeout=0,
+                               next_type=type('CodeTypeSms', (), {})(), phone_code_hash='secret-hash')
+        client = SimpleNamespace(connect=AsyncMock(), disconnect=AsyncMock(),
+                                 get_me=AsyncMock(side_effect=[None, identity]),
                                  send_code_request=AsyncMock(return_value=sent), sign_in=AsyncMock(side_effect=[
                                      errors.PhoneCodeInvalidError(None), errors.PhoneCodeExpiredError(None),
-                                     errors.SessionPasswordNeededError(None), SimpleNamespace(bot=False)]))
+                                     errors.SessionPasswordNeededError(None), identity]))
         with patch('telethon.TelegramClient', return_value=client), patch.object(telegram, 'api_credentials', return_value=(1, 'hash')), \
              patch.object(telegram, 'session_path', return_value=Path('/unused')), patch.object(telegram, 'secure_session'), \
              patch.object(telegram.config, 'TELEGRAM_PHONE', '+391234567'), patch.object(telegram.config, 'set_env'), \
              patch('builtins.input', return_value=''), patch.object(telegram, 'login_code', side_effect=['bad', 'old', 'r', 'new']), \
-             patch.object(telegram.getpass, 'getpass', return_value='password'):
+             patch.object(telegram.getpass, 'getpass', return_value='password'), \
+             patch.object(telegram, 'verify_identity', wraps=telegram.verify_identity) as verify:
             asyncio.run(telegram.authorize())
         self.assertEqual(client.send_code_request.await_count, 2)
         self.assertEqual(client.sign_in.await_count, 4)
+        client.sign_in.assert_has_awaits([
+            call(phone='+391234567', code=code, phone_code_hash='secret-hash')
+            for code in ('bad', 'old', 'new')
+        ] + [call(password='password')])
+        self.assertEqual(client.get_me.await_count, 2)
+        self.assertEqual(verify.call_args_list, [call(identity, '+391234567')] * 2)
+        client.disconnect.assert_awaited_once()
 
     def test_delivery_metadata_does_not_print_hash(self):
         output = io.StringIO()

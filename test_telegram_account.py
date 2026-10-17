@@ -239,11 +239,14 @@ class AccountTests(unittest.IsolatedAsyncioTestCase):
     def test_native_edit_sql_no_schema_reset(self):
         conn = MagicMock()
         conn.execute.return_value.fetchone.return_value = (12,)
-        message_store.store(conn, 'telegram (account)', '8', '', 'edited',
-                            ts='2026-10-14T10:00:00+00:00', source_id='scoped',
-                            metadata={'account': 'user:7', 'chat_id': '-100123',
-                                      'revision_date': '2026-10-14T11:00:00+00:00'},
-                            update_existing=True)
+        # This test owns native edit SQL, not catalogue/runtime schemas.
+        with patch.object(message_store, 'enqueue_derived') as derived:
+            message_store.store(conn, 'telegram (account)', '8', '', 'edited',
+                                ts='2026-10-14T10:00:00+00:00', source_id='scoped',
+                                metadata={'account': 'user:7', 'chat_id': '-100123',
+                                          'revision_date': '2026-10-14T11:00:00+00:00'},
+                                update_existing=True)
+        derived.assert_called_once_with(conn, 12, historical=False)
         sql = '\n'.join(c.args[0] for c in conn.execute.call_args_list)
         self.assertIn('INSERT INTO telegram_messages', sql)
         self.assertIn('DO UPDATE SET body=excluded.body', sql)

@@ -110,16 +110,36 @@ def init(approved_reset: bool = False) -> int:
                 "del database. Nessuna protezione read-only è stata disabilitata.")
         if approved_reset:
             raise RuntimeError('Destructive history resets are no longer supported')
-        result = message_store.migrate(conn, SCHEMA, False)
-        import jobs
-        jobs.migrate(conn)
-        import task_reconciliation
-        task_reconciliation.migrate(conn)
-        from connectors import media_archive
-        media_archive.migrate(conn)
-        import owner_dialogue
-        owner_dialogue.migrate(conn)
-        return result
+        with conn.transaction():
+            # Capture installation provenance before the base migration creates
+            # its receipt table. Serialize concurrent first starts as well.
+            conn.execute('SELECT pg_advisory_xact_lock(73190421)')
+            legacy = bool(conn.execute("SELECT to_regclass('schema_migrations')").fetchone()[0])
+            result = message_store.migrate(conn, SCHEMA, False)
+            import jobs
+            jobs.migrate(conn)
+            import task_reconciliation
+            task_reconciliation.migrate(conn)
+            from connectors import media_archive
+            media_archive.migrate(conn)
+            import owner_dialogue
+            owner_dialogue.migrate(conn)
+            import capabilities
+            capabilities.migrate(conn, legacy=legacy)
+            import policy
+            policy.migrate(conn)
+            import secretary
+            secretary.migrate(conn)
+            import knowledge
+            knowledge.migrate(conn)
+            import secretary_runtime
+            secretary_runtime.migrate(conn)
+            migrate_notes(conn)
+            import execution
+            execution.migrate(conn)
+            import ai_budget
+            ai_budget.migrate(conn)
+            return result
 
 
 # ------------------------------------------------------- comunicazioni ----
@@ -176,7 +196,7 @@ def communications_for_day(day=None) -> list:
     """Tutte le comunicazioni di un giorno (default: oggi), ordinate per ora."""
     with _conn() as conn:
         rows = conn.execute(
-            """SELECT ts, channel, sender, subject,
+            """SELECT id, ts, channel, sender, subject,
                                             concat_ws(E'\n\n', COALESCE(summary, LEFT(body, 2000)),
                                                 (SELECT string_agg('[' || t.kind || '] ' || t.text, E'\n\n' ORDER BY a.id)
                                                  FROM attachments a JOIN media_transcripts t ON t.attachment_id=a.id
@@ -186,7 +206,7 @@ def communications_for_day(day=None) -> list:
                WHERE day = COALESCE(%(day)s, (now() AT TIME ZONE %(tz)s)::date)
                ORDER BY ts""",
             {"day": day, "tz": config.TIMEZONE}).fetchall()
-        cols = ["ts", "channel", "sender", "subject", "summary",
+        cols = ["id", "ts", "channel", "sender", "subject", "summary",
                 "category", "priority", "needs_action", "action", "direction"]
         return [dict(zip(cols, r)) for r in rows]
 
@@ -284,11 +304,42 @@ def upcoming_appointments(days: int = 7) -> list:
 
 
 # ------------------------------------------------------------------- note ----
-def add_note(text: str) -> int:
-    with _conn() as conn:
+NOTES_VERSION = 'personal_memory_provenance_v1'
+NOTE_TYPES = frozenset(('personal', 'preference', 'fact', 'instruction', 'context'))
+
+
+def migrate_notes(conn):
+    """Add provenance without rewriting existing notes or granting authority."""
+    with conn.transaction():
+        conn.execute('SELECT pg_advisory_xact_lock(73190421)')
+        if conn.execute('SELECT 1 FROM schema_migrations WHERE version=%s',
+                        (NOTES_VERSION,)).fetchone():
+            return
+        conn.execute('''ALTER TABLE notes ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'personal';
+            ALTER TABLE notes ADD COLUMN IF NOT EXISTS source_message BIGINT;
+            ALTER TABLE notes ADD COLUMN IF NOT EXISTS source_revision TEXT;
+            ALTER TABLE notes ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 1''')
+        conn.execute('INSERT INTO schema_migrations(version,reset_rows) VALUES (%s,0)',
+                     (NOTES_VERSION,))
+
+
+def _note_provenance(kind, source_message, source_revision):
+    if kind not in NOTE_TYPES:
+        raise ValueError('Invalid memory kind')
+    if source_message is not None and (type(source_message) is not int or source_message <= 0):
+        raise ValueError('Invalid memory source')
+    if source_revision is not None and (not isinstance(source_revision, str)
+            or not source_revision or len(source_revision) > 200 or source_message is None):
+        raise ValueError('Invalid memory source revision')
+
+
+def add_note(text: str, *, kind='personal', source_message=None, source_revision=None) -> int:
+    _note_provenance(kind, source_message, source_revision)
+    with _conn() as conn, conn.transaction():
         row = conn.execute(
-            "INSERT INTO notes (text) VALUES (%(t)s) RETURNING id",
-            {"t": text}).fetchone()
+            '''INSERT INTO notes (text,kind,source_message,source_revision)
+               VALUES (%s,%s,%s,%s) RETURNING id''',
+            (text, kind, source_message, source_revision)).fetchone()
         return row[0]
 
 
@@ -300,14 +351,16 @@ def recent_notes(limit: int = 5) -> list:
         return [r[0] for r in rows]
 
 
-def personal_memories() -> list:
-    """Tutta la memoria personale, anche dopo riavvii o lunghi periodi."""
+def personal_memories(*, provenance=False) -> list:
+    """All notes; the default id/text return contract remains unchanged."""
     with _conn() as conn:
-        rows = conn.execute("SELECT id, text FROM notes ORDER BY id").fetchall()
-        return [dict(id=row[0], text=row[1]) for row in rows]
+        fields = ('id', 'text', 'kind', 'source_message', 'source_revision', 'version') if provenance else ('id', 'text')
+        rows = conn.execute(f"SELECT {', '.join(fields)} FROM notes ORDER BY id").fetchall()
+        return [dict(zip(fields, row)) for row in rows]
 
 
-def apply_personal_memories(changes: list, known_ids: set, conn=None, expected=None) -> int:
+def apply_personal_memories(changes: list, known_ids: set, conn=None, expected=None, *,
+                            kind='personal', source_message=None, source_revision=None) -> int:
     """Applica note; con conn usa la transazione del chiamante, senza chiuderla.
 
     expected è lo snapshot id/testo (mappa o lista di note) per il CAS di update/delete.
@@ -315,6 +368,8 @@ def apply_personal_memories(changes: list, known_ids: set, conn=None, expected=N
     """
     from contextlib import ExitStack
 
+    # Provenance is caller-supplied, never a model boolean authorizing a write.
+    _note_provenance(kind, source_message, source_revision)
     changed = 0
     with ExitStack() as stack:
         if conn is None:
@@ -339,14 +394,16 @@ def apply_personal_memories(changes: list, known_ids: set, conn=None, expected=N
             text = change.get('text', '').strip()
             if operation == 'add':
                 row = conn.execute(
-                    '''INSERT INTO notes(text) SELECT %s WHERE NOT EXISTS
+                    '''INSERT INTO notes(text,kind,source_message,source_revision)
+                       SELECT %s,%s,%s,%s WHERE NOT EXISTS
                        (SELECT 1 FROM notes WHERE lower(trim(text))=lower(trim(%s)))
-                       RETURNING id''', (text, text)).fetchone()
+                       RETURNING id''', (text, kind, source_message, source_revision, text)).fetchone()
                 changed += bool(row)
             elif identity in known_ids:
                 if operation == 'update':
-                    result = conn.execute('UPDATE notes SET text=%s WHERE id=%s AND text<>%s',
-                                          (text, identity, text))
+                    result = conn.execute('''UPDATE notes SET text=%s,version=version+1,
+                        source_message=%s,source_revision=%s WHERE id=%s AND text<>%s''',
+                        (text, source_message, source_revision, identity, text))
                 else:
                     result = conn.execute('DELETE FROM notes WHERE id=%s', (identity,))
                 changed += result.rowcount

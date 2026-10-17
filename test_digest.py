@@ -1,4 +1,5 @@
 """Regressioni offline per recap e pianificazione persistente a 48 ore."""
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -7,6 +8,7 @@ from zoneinfo import ZoneInfo
 import brain
 import db
 import digest
+import jobs
 
 
 class DigestTests(unittest.TestCase):
@@ -24,21 +26,48 @@ class DigestTests(unittest.TestCase):
         return dict(id=7, title='Inviare documenti', deadline=deadline, source_message=source)
 
     def test_empty_day_still_queues_plan_and_uses_exact_48_hours_at_dst(self):
+        self.conn.execute.return_value.fetchall.return_value = []
+        # Enabled digest flow; no previously sealed notification for this day.
+        self.conn.execute.return_value.fetchone.side_effect = [(True,), None]
         with patch('digest.datetime') as clock, \
-             patch('db.communications_since', return_value=[]), \
+             patch('config.TELEGRAM_CHAT_ID', '7'), \
              patch('db.pending_tasks', return_value=[]) as pending, \
              patch('digest.plan_pending_tasks') as plan, \
-             patch('digest.planning_agenda', return_value=[]), \
-             patch('brain.summarize_day', return_value='Piano disponibile') as summarize, \
-             patch('jobs.submit') as submit:
+             patch('db.appointments_between', return_value=[]) as agenda, \
+             patch('brain.summarize_day') as summarize, \
+             patch('jobs.enqueue', return_value=(1,)) as enqueue:
             clock.now.return_value = self.now
             self.assertTrue(digest.send_daily_digest())
         end = pending.call_args.args[0]
         self.assertEqual((end.astimezone(timezone.utc) - self.now.astimezone(timezone.utc)).total_seconds(), 48 * 3600)
+        self.assertNotEqual(end.utcoffset(), self.now.utcoffset())
         plan.assert_called_once_with([], self.now, end)
-        self.assertEqual(summarize.call_args.kwargs['planning_end'], end)
-        self.assertIn('Piano disponibile', submit.call_args.args[2]['text'])
-        self.assertFalse(submit.call_args.args[2]['html'])
+        agenda.assert_called_once_with(self.now, end)
+        summarize.assert_not_called()  # No consented native input: local recap only.
+        enqueue.assert_called_once()
+        payload = enqueue.call_args.args[3]
+        self.assertIn('Nessuna fonte autorizzata per il riepilogo AI.', payload['text'])
+        self.assertIn(end.strftime('%d/%m %H:%M'), payload['text'])
+        self.assertFalse(payload['html'])
+        self.assertEqual((payload['type'], payload['system'], payload['flow']),
+                         ('notify', 'digest', 'digest'))
+        self.assertEqual(payload['digest_day'], self.now.strftime('%Y-%m-%d'))
+        seals = [c.args[1] for c in self.conn.execute.call_args_list
+                 if 'INSERT INTO system_notifications' in c.args[0]]
+        self.assertEqual(len(seals), 1)
+        self.assertEqual(seals[0][:5], (payload['system_authorization'], payload['digest_day'],
+                                      '7', enqueue.call_args.args[2], 1))
+        self.assertEqual(json.loads(seals[0][5]), dict(text=payload['text'], html=False, recipient='7'))
+        self.assertEqual(seals[0][-2:], ([], []))
+
+    def test_digest_without_valid_recipient_never_queues_notification(self):
+        for recipient in (None, '', '-7', 'invalid'):
+            with self.subTest(recipient=recipient), patch('config.TELEGRAM_CHAT_ID', recipient), \
+                 patch('jobs.enqueue') as enqueue:
+                with self.assertRaisesRegex(jobs.Deferred, 'Digest recipient unavailable'):
+                    digest._queue_notification(self.conn, '2099-10-24', 'Piano', [])
+                enqueue.assert_not_called()
+        self.conn.execute.assert_not_called()
 
     def test_pending_query_includes_old_and_undated_but_not_completed(self):
         self.conn.execute.return_value.fetchall.return_value = [(7, 'Old task', None, 3)]
@@ -49,7 +78,7 @@ class DigestTests(unittest.TestCase):
         self.assertNotIn('created_at', sql)
         self.assertEqual(params, (self.until,))
 
-    def test_explicit_task_schedules_stable_event_and_delayed_reminder(self):
+    def test_explicit_task_creates_stable_proposal_and_delayed_reminder(self):
         deadline = self.now + timedelta(hours=40)
         self.conn.execute.return_value.fetchone.side_effect = [(deadline, 0, 'Inviare documenti', None), None]
         with patch('jobs.enqueue', return_value=(1,)) as enqueue, \
@@ -59,7 +88,8 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(enqueue.call_args.args[2], 'task-reminder:7')
         self.assertEqual(save.call_args.args[2], 'task:7:v0')
         self.assertEqual(enqueue.call_args.args[3]['deadline'], deadline.isoformat())
-        self.assertTrue(save.call_args.kwargs['approved'])
+        self.assertEqual(save.call_args.args[1]['dt'], deadline.isoformat())
+        self.assertFalse(save.call_args.kwargs['approved'])  # A deadline is not Calendar intent.
         updates = [c for c in self.conn.execute.call_args_list if 'available_at=' in c.args[0]]
         self.assertEqual(updates[0].args[1][0], deadline - timedelta(hours=24))
 

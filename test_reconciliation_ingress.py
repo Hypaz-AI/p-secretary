@@ -1,5 +1,6 @@
 """Offline reconciliation ingress contracts: no network or PostgreSQL."""
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -21,6 +22,8 @@ class StorageTests(unittest.TestCase):
         self.conn.execute.return_value.fetchone.return_value = (42,)
         self.queue = self.enterContext(patch.object(task_reconciliation, 'queue'))
         self.enterContext(patch.object(media_archive, 'enqueue_message'))
+        # Keep base reconciliation contracts separate from bootstrap integration.
+        self.enterContext(patch.object(message_store, 'enqueue_derived'))
 
     def store(self, channel='telegram', **kwargs):
         return message_store.store(self.conn, channel, 'sender', 'subject', 'body',
@@ -109,17 +112,48 @@ class LiveTests(unittest.TestCase):
         self.enterContext(patch.object(main.flows, 'enabled', return_value=True))
         self.enterContext(patch.object(main.flows, 'mark'))
 
-    def test_authorized_bot_archive_opts_in_even_when_already_seen(self):
-        m = {'from': 'owner', 'text': '/task x', 'source_id': 'native',
+    def test_authorized_bot_archive_queues_atomically_even_when_already_seen(self):
+        m = {'update_id': 8, 'from': 'owner', 'text': '/task x',
+             'source_id': json.dumps(['bot', '123', '7', 42]),
              'chat_id': '7', 'chat_type': 'private',
-             'metadata': {'chat_id': '7', 'chat_type': 'private'}}
+             'metadata': {'account': 'bot:123', 'update_id': 8, 'message_id': 42,
+                          'chat_id': '7', 'chat_type': 'private', 'chat_name': 'owner',
+                          'author': 7, 'direction': 'in', 'content_origin': 'direct_text'}}
+        events = Mock()
         with patch.object(main.config, 'TELEGRAM_CHAT_ID', '7'), \
+             patch.object(main.config, 'TELEGRAM_BOT_TOKEN', '123:offline'), \
              patch.object(main.telegram, 'fetch_new_messages', return_value=([m], 9)), \
-             patch.object(db, 'store_message', return_value=42) as store, \
-             patch.object(db, 'communication_seen', return_value=True), \
-             patch.object(jobs, 'set_cursor'), patch.object(jobs, 'submit') as submit:
-            main.check_telegram({})
-        self.assertTrue(store.call_args.kwargs['reconcile'])
+             patch.object(db, '_conn') as connect, \
+             patch.object(message_store, 'store', return_value=42) as store, \
+             patch('policy.can_operate', return_value=True) as allowed, \
+             patch.object(db, 'communication_seen', return_value=True) as seen, \
+             patch.object(jobs, 'enqueue') as enqueue, \
+             patch.object(jobs, 'set_cursor') as cursor, patch.object(jobs, 'submit') as submit:
+            conn = connect.return_value.__enter__.return_value
+            transaction = conn.transaction.return_value
+            for name, mocked in (('begin', transaction.__enter__), ('store', store),
+                                 ('policy', allowed), ('enqueue', enqueue),
+                                 ('checkpoint', conn.execute), ('commit', transaction.__exit__)):
+                events.attach_mock(mocked, name)
+            state = {}
+            main.check_telegram(state)
+        self.assertEqual([c[0] for c in events.mock_calls],
+                         ['begin', 'store', 'policy', 'enqueue', 'checkpoint', 'commit'])
+        connect.assert_called_once_with()
+        conn.transaction.assert_called_once_with()
+        transaction.__exit__.assert_called_once_with(None, None, None)
+        store.assert_called_once_with(conn, 'telegram', 'owner', 'Telegram · owner', '/task x',
+            ts=None, source_id=m['source_id'],
+            metadata={**m['metadata'], 'is_forwarded': False}, attachments=[])
+        allowed.assert_called_once_with(conn, 42, 'owner_command', owner_required=True)
+        enqueue.assert_called_once_with(conn, 'owner', 'owner:42',
+                                       {'text': '/task x', 'message_id': 42, 'media': False})
+        conn.execute.assert_called_once()
+        self.assertIn('INSERT INTO source_cursors', conn.execute.call_args.args[0])
+        self.assertEqual(conn.execute.call_args.args[1], ('telegram_bot_offset', '9'))
+        self.assertEqual(state['telegram_offset'], 9)
+        seen.assert_not_called()
+        cursor.assert_not_called()
         submit.assert_not_called()
 
     def test_whatsapp_incoming_outgoing_and_seen_opt_in_before_ack(self):

@@ -23,6 +23,8 @@ class AttachmentTests(unittest.TestCase):
         self.addCleanup(patched.stop)
         self.conn = MagicMock()
         self.conn.transaction.side_effect = lambda: nullcontext()
+        # Catalogue/runtime integration is covered by test_secretary_bootstrap.
+        self.derived = self.enterContext(patch.object(message_store, 'enqueue_derived'))
 
     def test_persist_deduplicates_pdf_and_empty_attachment(self):
         for data in (b'%PDF-test', b'', b'<xml/>'):
@@ -58,12 +60,14 @@ class AttachmentTests(unittest.TestCase):
         self.assertEqual(Path(args[4]).read_bytes(), att['data'])
         self.assertIsNone(args[5])
         self.assertEqual(att['data'], b'%PDF-test')
+        self.derived.assert_called_once_with(self.conn, 42, historical=False)
 
     def test_duplicate_message_does_not_write_attachments(self):
         self.conn.execute.return_value.fetchone.side_effect = [None, (42,)]
         message_store.store(self.conn, 'email', 's', 't', 'b', source_id='id',
                             attachments=[{'data': b'pdf'}])
         self.assertFalse(self.root.exists())
+        self.derived.assert_called_once_with(self.conn, 42, historical=False)
 
     def test_pipeline_load_preserves_legacy_blob_and_new_path(self):
         path = email_attachments.persist(b'new')

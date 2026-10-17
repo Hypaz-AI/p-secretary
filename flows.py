@@ -4,6 +4,7 @@ import time
 
 import config
 import db
+import capabilities
 
 LABELS = {
     'email': 'Email · acquisizione e analisi',
@@ -20,18 +21,19 @@ _lock = threading.Lock()
 
 
 def init():
-    with db._conn() as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS flow_settings (
-            flow TEXT PRIMARY KEY, enabled BOOLEAN NOT NULL DEFAULT TRUE,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT now())''')
+    with db._conn() as conn, conn.transaction():
+        conn.execute(capabilities.FLOW_SCHEMA)
+        defaults = capabilities.flow_defaults(conn)
         for flow in LABELS:
-            conn.execute('INSERT INTO flow_settings(flow) VALUES (%s) ON CONFLICT DO NOTHING', (flow,))
+            conn.execute('''INSERT INTO flow_settings(flow,enabled) VALUES (%s,%s)
+                ON CONFLICT DO NOTHING''', (flow, defaults.get(flow, True)))
 
 
 def settings():
     with db._conn() as conn:
         rows = dict(conn.execute('SELECT flow,enabled FROM flow_settings').fetchall())
-        return {flow: rows.get(flow, True) for flow in LABELS}
+        defaults = capabilities.flow_defaults(conn)
+        return {flow: rows.get(flow, defaults.get(flow, True)) for flow in LABELS}
 
 
 def enabled(flow):

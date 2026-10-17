@@ -49,6 +49,12 @@ class OfflineTests(unittest.TestCase):
         if db.psycopg is not None:
             self.mock('db.psycopg.connect', side_effect=AssertionError('PostgreSQL forbidden'))
         self.mock('config.TIMEZONE', 'Europe/Rome')
+        # Lifecycle units explicitly grant local owner effects and AI data use;
+        # Calendar remains a proposal unless the individual test grants it.
+        self.gate = self.mock('policy.can_operate', side_effect=lambda conn, mid, effect, **kw:
+            effect in {'owner_command', 'ai_text', 'ai_media', 'memory_write'})
+        self.mock('policy.metadata_for', return_value=dict(metadata=dict(
+            content_origin='direct_text', is_forwarded=False)))
 
     def mock(self, target, *args, **kwargs):
         patcher = patch(target, *args, **kwargs)
@@ -110,6 +116,11 @@ class WindowTests(OfflineTests):
 
 
 class SearchTests(OfflineTests):
+    def setUp(self):
+        super().setUp()
+        # These units test recall SQL/budgets, not native provenance resolution.
+        self.sources = self.mock('owner_dialogue.allows_source', return_value=True)
+
     def test_stopwords_empty_numeric_and_short_words(self):
         self.assertEqual(od.search_query('Come cosa quando dove ricordi oggi domani grazie? 123 a xy'), '')
 
@@ -141,24 +152,40 @@ class SearchTests(OfflineTests):
         query = od.search_query(text)
         self.conn.execute.return_value.fetchall.return_value = [(9, ANCHOR, 'Contratto originale', None)]
         result = od.recall(self.conn, text, [], MID, [98, 99])
-        sql, params = self.conn.execute.call_args.args
+        sql, params = next(s for s in self.statements() if 'websearch_to_tsquery' in s[0])
         self.assertEqual(params, (query, MID, [98, 99]))
         self.assertNotIn(text, sql)
         self.assertNotIn(query, sql)
         for fragment in ('websearch_to_tsquery', 'completed_at IS NOT NULL', 'message_id < %s',
                          'ANY(%s::bigint[])', 'ts_rank_cd', 'message_id DESC LIMIT 8'):
             self.assertIn(fragment, sql)
-        self.assertEqual(result, [dict(message_id=9, date=str(ANCHOR), owner='Contratto originale', assistant='')])
+        self.assertEqual(result, [dict(message_id=9, date=str(ANCHOR), owner='Contratto originale',
+                                      assistant=od.ASSISTANT_OMITTED)])
+        self.sources.assert_called_once_with(self.conn, dict(source_type='message', source_id=9))
 
     def test_recall_excerpts_and_total_unicode_budget(self):
         self.conn.execute.return_value.fetchall.return_value = [
-            (i, ANCHOR, 'à' * 8000, 'a' * 4000) for i in range(8)]
+            (i, ANCHOR, 'à' * 8000, 'a' * 4000) for i in range(1, 9)]
         result = od.recall(self.conn, 'contratto', [], MID, [])
         self.assertTrue(result)
         self.assertLess(len(result), 8)
         self.assertEqual(len(result[0]['owner']), 4500)
-        self.assertEqual(len(result[0]['assistant']), 2000)
+        self.assertTrue(all(e['assistant'] == od.ASSISTANT_OMITTED for e in result))
         self.assertLessEqual(sum(od.tokens(json.dumps(e, ensure_ascii=False)) for e in result), od.RECALL_TOKENS)
+
+    def test_recall_excludes_denied_owner_or_source_and_masks_legacy_answers(self):
+        self.conn.execute.return_value.fetchall.return_value = [
+            (7, ANCHOR, 'PRIVATE_NON_OWNER', 'PRIVATE_ANSWER'),
+            (8, ANCHOR, 'PRIVATE_DENIED_SOURCE', 'PRIVATE_ANSWER'),
+            (9, ANCHOR, 'Contratto autorizzato', 'PRIVATE_LEGACY_ANSWER')]
+        self.gate.side_effect = lambda conn, mid, effect, **kw: mid != 7
+        self.sources.side_effect = lambda conn, source: source['source_id'] != 8
+        result = od.recall(self.conn, 'contratto', [], MID, [])
+        self.assertEqual(result, [dict(message_id=9, date=str(ANCHOR), owner='Contratto autorizzato',
+                                      assistant=od.ASSISTANT_OMITTED)])
+        self.assertNotIn('PRIVATE_', json.dumps(result))
+        self.assertEqual(self.sources.call_args_list, [
+            call(self.conn, dict(source_type='message', source_id=mid)) for mid in (8, 9)])
 
     def test_recall_stops_before_first_overbudget_entry(self):
         self.conn.execute.return_value.fetchall.return_value = [(1, ANCHOR, 'x', 'y')]
@@ -200,6 +227,11 @@ class MigrationTests(OfflineTests):
 
 
 class ContextTests(OfflineTests):
+    def setUp(self):
+        super().setUp()
+        # Context ordering, task shape and photo budgets use pre-authorized rows.
+        self.sources = self.mock('owner_dialogue.allows_source', return_value=True)
+
     def load(self, rows, tasks=()):
         self.conn.execute.return_value.fetchone.return_value = ('Summary', 5)
         self.conn.execute.return_value.fetchall.side_effect = [rows, list(tasks)]
@@ -207,17 +239,25 @@ class ContextTests(OfflineTests):
             result = od.load_context(MID, 'contratto')
         return result, recall
 
-    def test_context_completed_prior_turns_chronological_tasks_and_summary(self):
+    def test_context_completed_prior_users_chronological_tasks_and_masked_summary(self):
         rows = [(9, ANCHOR, 'Nuovo', 'Risposta nuova', False),
                 (8, ANCHOR, 'Vecchio', 'Risposta vecchia', False)]
         task = (7, 'Pagare', None, 'open', '2026-01-01', None, 3)
         result, recall = self.load(rows, [task])
         self.assertEqual(result['recent_ids'], [8, 9])
+        self.assertEqual([m['message_id'] for m in result['history']], [8, 9])
+        self.assertEqual([m['role'] for m in result['history']], ['user', 'user'])
         self.assertIn('Vecchio', result['history'][0]['content'])
-        self.assertEqual((result['summary'], result['summarized_through']), ('Summary', 5))
+        self.assertIn('Nuovo', result['history'][1]['content'])
+        self.assertNotIn('Risposta', json.dumps(result['history']))
+        self.assertEqual((result['summary'], result['summarized_through']), (od.CONTEXT_OMITTED, 5))
         self.assertEqual(result['tasks'][0]['version'], 3)
         self.assertEqual(result['tasks'][0]['owner_deadline_date'], '2026-01-01')
-        recall.assert_called_once_with(self.conn, 'contratto', result['history'], MID, [8, 9])
+        recall_history = []
+        for item in result['history']:
+            recall_history.extend([item, dict(role='assistant', content=od.ASSISTANT_OMITTED,
+                                              message_id=item['message_id'])])
+        recall.assert_called_once_with(self.conn, 'contratto', recall_history, MID, [8, 9])
         statements = self.statements()
         self.assertIn('completed_at IS NOT NULL AND message_id < %s', statements[1][0])
         self.assertIn('ORDER BY message_id DESC LIMIT 100', statements[1][0])
@@ -231,6 +271,21 @@ class ContextTests(OfflineTests):
         self.assertEqual(result['history'], [])
         self.assertEqual(result['tasks'], [])
 
+    def test_denied_sources_are_removed_before_history_tasks_and_photo_loading(self):
+        rows = [(9, ANCHOR, 'Autorizzato', 'PRIVATE_LEGACY_ANSWER', False),
+                (8, ANCHOR, 'PRIVATE_DENIED_PHOTO', 'PRIVATE_ANSWER', True)]
+        tasks = [(7, 'Pagare', None, 'open', None, None, 3),
+                 (6, 'PRIVATE_DENIED_TASK', None, 'open', None, None, 1)]
+        self.sources.side_effect = lambda conn, source: (
+            source['source_type'], source['source_id']) in {('message', 9), ('task', 7)}
+        with patch.object(pipeline, 'load_message') as load:
+            result, _ = self.load(rows, tasks)
+        self.assertEqual(result['recent_ids'], [9])
+        self.assertEqual([m['message_id'] for m in result['history']], [9])
+        self.assertEqual([t['id'] for t in result['tasks']], [7])
+        self.assertNotIn('PRIVATE_', json.dumps(result, default=str))
+        load.assert_not_called()
+
     def test_only_last_two_recent_photos_are_rehydrated_without_persisting_urls(self):
         rows = [(i, ANCHOR, f'Foto {i}', 'Vista', True) for i in (3, 2, 1)]
         parts = [dict(type='image_url', image_url={'url': 'data:image/png;base64,FAKE'})]
@@ -238,7 +293,9 @@ class ContextTests(OfflineTests):
                 patch.object(media_text, 'image_parts', return_value=parts):
             result, _ = self.load(rows)
         self.assertEqual(load.call_args_list, [call(2), call(3)])
+        self.assertEqual([m['role'] for m in result['history']], ['user'] * 3)
         self.assertIsInstance(result['history'][0]['content'], str)
+        self.assertEqual(result['history'][1]['content'][1:], parts)
         self.assertEqual(result['history'][2]['content'][1:], parts)
         self.assertFalse(any('UPDATE' in s[0] or 'INSERT' in s[0] for s in self.statements()))
 
@@ -309,10 +366,16 @@ class LeaseTests(OfflineTests):
 class RespondTests(OfflineTests):
     def setUp(self):
         super().setUp()
+        # Durability tests retain the real egress assertion, with authorized sources.
+        self.sources = self.mock('owner_dialogue.allows_source', return_value=True)
         self.acquire = self.mock('owner_dialogue.acquire', return_value=(TOKEN, (ANCHOR, None, None)))
-        self.load = self.mock('owner_dialogue.load_context', return_value=context())
+        self.load = self.mock('owner_dialogue.load_context', return_value=context(summary=od.CONTEXT_OMITTED))
         self.real_compact = od.compact
         self.compact = self.mock('owner_dialogue.compact')
+        # These tests exercise dialogue durability, not retrieval/practice models.
+        self.retrieve = self.mock('owner_dialogue.retrieve', return_value=({}, {}))
+        self.secretary_prepare = self.mock('secretary.prepare', return_value=None)
+        self.mock('db.personal_memories', return_value=[])
         self.prepare = self.mock('owner_commitments.prepare', return_value=[])
         self.memory_prepare = self.mock('brain.prepare_user_memories', return_value=dict(
             changes=[], known=[], status='nessuna modifica necessaria'))
@@ -324,6 +387,16 @@ class RespondTests(OfflineTests):
         self.enqueue = self.mock('jobs.enqueue')
         self.notify = self.mock('connectors.telegram.notify', side_effect=AssertionError('Direct send forbidden'))
         self.conn.execute.return_value.fetchone.return_value = (1,)
+        self.owner_text = 'Richiesta'
+        self.cursor = self.conn.execute.return_value
+        self.conn.execute.side_effect = self.execute
+
+    def execute(self, sql, *args):
+        if sql.startswith('SELECT body FROM telegram_messages'):
+            return MagicMock(**{'fetchone.return_value': (self.owner_text,)})
+        if sql.startswith('SELECT sync_state FROM appointments'):
+            return MagicMock(**{'fetchone.return_value': (getattr(self, 'calendar_state', 'proposal'),)})
+        return self.cursor
 
     def persisted(self, saved=None, response=None):
         self.acquire.return_value = (TOKEN, (ANCHOR, plan() if saved is None else saved, response))
@@ -346,6 +419,22 @@ class RespondTests(OfflineTests):
         self.compact.assert_called_once_with(MID, self.load.return_value, TOKEN)
         self.assert_released()
 
+    def test_saved_plan_replay_after_ai_consent_revoked_never_calls_models(self):
+        self.persisted(plan(commitments=[{'prepared': True}], current_text=self.owner_text))
+        self.gate.side_effect = lambda conn, mid, effect, **kw: effect == 'owner_command'
+        self.apply.return_value = dict(confirmations=['Attività #7 salvata.'])
+        with patch('brain._chat', side_effect=AssertionError('Replay inference forbidden')) as model:
+            response = od.respond(self.owner_text, MID)
+        self.assertIn('Attività #7 salvata.', response)
+        self.apply.assert_called_once_with(self.conn, [{'prepared': True}], MID)
+        for mocked in (self.chat, self.prepare, self.memory_prepare, self.secretary_prepare,
+                       self.retrieve, model):
+            mocked.assert_not_called()
+        self.assertTrue(all(c.args[2] == 'owner_command' for c in self.gate.call_args_list))
+        self.assertFalse(any('SET plan=' in s[0] for s in self.statements()))
+        self.enqueue.assert_called_once()
+        self.assert_released()
+
     def test_completed_response_replay_only_enqueues_same_chunks(self):
         response = 'à' * 7001
         self.persisted(response=response)
@@ -355,7 +444,7 @@ class RespondTests(OfflineTests):
             mock.assert_not_called()
         expected = [call(self.conn, 'action', f'owner-reply:{MID}:{i}',
                         dict(type='notify', text=response[start:start + 3500], html=False,
-                            owner_reply_mid=MID, owner_reply_chunk=i))
+                            message_id=MID, owner_reply_mid=MID, owner_reply_chunk=i))
                     for i, start in enumerate(range(0, len(response), 3500))]
         self.assertEqual(self.enqueue.call_args_list, expected * 2)
         self.assertFalse(any('UPDATE owner_exchanges' in s[0] for s in self.statements()))
@@ -364,13 +453,17 @@ class RespondTests(OfflineTests):
     def test_new_plan_receives_original_time_context_and_images_before_persist(self):
         images = [dict(type='image_url')]
         changes = [{'prepared': True}]
+        tasks = [dict(id=7, title='Pagare', status='open', version=3)]
+        self.load.return_value['tasks'] = tasks
         self.prepare.return_value = changes
         self.assertEqual(od.respond('Richiesta', MID, images), 'Risposta modello')
         self.acquire.assert_called_once_with(MID, 'Richiesta', True)
-        self.prepare.assert_called_once_with('Richiesta', [], ANCHOR)
+        self.prepare.assert_called_once_with('Richiesta', [], ANCHOR, tasks=tasks)
+        self.sources.assert_any_call(self.conn, dict(source_type='task', source_id=7))
         dialogue = self.chat.call_args.kwargs['dialogue']
         self.assertEqual(dialogue['message_time'], str(ANCHOR))
         self.assertEqual(dialogue['summary'], self.load.return_value['summary'])
+        self.assertEqual(dialogue['tasks'], tasks)
         self.assertEqual(dialogue['commitments']['changes'], changes)
         self.assertEqual(self.chat.call_args.kwargs['images'], images)
         sql, params = next(s for s in self.statements() if 'SET plan=' in s[0])
@@ -382,6 +475,9 @@ class RespondTests(OfflineTests):
 
     def test_effects_reply_and_outbox_share_fenced_transaction_with_stable_event_keys(self):
         events = [dict(title='Visita', dt='2026-01-02 15:00'), dict(title='Riunione', dt='2026-01-03 10:00')]
+        self.owner_text = 'Crea un appuntamento in agenda.'
+        self.calendar_state = 'pending'
+        self.gate.side_effect = lambda conn, mid, effect, **kw: effect in {'owner_command', 'calendar_write'}
         saved = plan(events=events, commitments=[{'prepared': True}])
         self.persisted(saved)
         self.apply.return_value = dict(confirmations=['Attività #7 salvata.'])
@@ -390,27 +486,37 @@ class RespondTests(OfflineTests):
         tx.__enter__.side_effect = lambda: trace.append('begin')
         tx.__exit__.side_effect = lambda *args: trace.append('end') or False
         self.apply.side_effect = lambda *args: trace.append('tasks') or dict(confirmations=['Attività #7 salvata.'])
-        self.save.side_effect = lambda *args: trace.append('event') or 42
+        self.save.side_effect = lambda *args, **kwargs: trace.append('event') or 42
         self.enqueue.side_effect = lambda *args: trace.append('outbox')
-        execute = self.conn.execute.return_value
         def sql(statement, *args):
             if 'FOR UPDATE' in statement:
                 trace.append('fence')
             if 'SET response=' in statement:
                 trace.append('response')
-            return execute
+            return self.execute(statement, *args)
         self.conn.execute.side_effect = sql
-        response = od.respond('Richiesta', MID)
-        self.assertEqual(trace, ['begin', 'fence', 'tasks', 'event', 'event', 'response', 'outbox', 'end'])
+        response = od.respond(self.owner_text, MID)
+        self.assertEqual(trace, ['begin', 'fence', 'tasks', 'event', 'event', 'fence', 'response', 'outbox', 'end'])
         self.assertEqual(self.save.call_args_list,
-                         [call(self.conn, event, f'owner:{MID}:event:{i}', 'dialogo utente')
+                         [call(self.conn, event, f'owner:{MID}:event:{i}', 'dialogo utente', approved=True)
                           for i, event in enumerate(events)])
         self.assertIn('Attività #7 salvata.', response)
         self.assertIn('non ancora confermata', response)
         self.assertNotIn(saved['reply'], response)
         self.conn.commit.assert_not_called()
 
+    def test_calendar_without_remote_grant_saves_only_local_proposal(self):
+        self.owner_text = 'Crea un appuntamento in agenda.'
+        event = dict(title='Visita', dt='2030-01-02 15:00')
+        self.persisted(plan(events=[event]))
+        response = od.respond(self.owner_text, MID)
+        self.save.assert_called_once_with(self.conn, event, f'owner:{MID}:event:0',
+                                          'dialogo utente', approved=True)
+        self.assertIn('proposta locale; Calendar non autorizzato', response)
+        self.assertNotIn('sincronizzazione Calendar in coda', response)
+
     def test_clarification_replaces_speculative_prose_and_blocks_all_events(self):
+        self.owner_text = 'Spostalo'
         self.prepare.side_effect = owner_commitments.Clarification('Quale contratto?')
         self.parse.return_value = ('Fatto!', [dict(title='Speculativo')])
         self.assertEqual(od.respond('Spostalo', MID), 'Quale contratto?')
@@ -430,6 +536,7 @@ class RespondTests(OfflineTests):
         self.assertIn('non disponibile', self.chat.call_args.kwargs['dialogue']['commitments']['error'])
 
     def test_stale_task_plan_finishes_with_durable_clarification(self):
+        self.owner_text = 'Spostala'
         self.persisted(plan(commitments=[{'prepared': True}], events=[dict(title='Do not create')]))
         self.apply.side_effect = owner_commitments.StaleBatch('L’attività è cambiata: confermi?')
         response = od.respond('Spostala', MID)
@@ -440,26 +547,29 @@ class RespondTests(OfflineTests):
         self.assert_released()
 
     def test_memory_is_applied_only_inside_fenced_effects_transaction(self):
+        self.owner_text = 'Aggiorna la memoria con la nuova preferenza.'
         memory = dict(known=[dict(id=3, text='Preferenza precedente')],
                       changes=[dict(operation='update', id=3, text='Nuova preferenza')])
         self.persisted(plan(memory_plan=memory))
         with patch('db.apply_personal_memories', return_value=1) as apply_memory:
-            response = od.respond('Correggi la preferenza', MID)
+            response = od.respond(self.owner_text, MID)
         apply_memory.assert_called_once_with(memory['changes'], {3}, conn=self.conn,
-                                             expected=memory['known'])
+                                             expected=memory['known'], source_message=MID)
         self.assertIn('Memoria personale aggiornata', response)
 
     def test_stale_memory_is_not_confirmed(self):
+        self.owner_text = 'Dimentica la nota.'
         self.persisted(plan(memory_plan=dict(known=[], changes=[dict(operation='delete', id=3)])))
         with patch('db.apply_personal_memories', side_effect=ValueError('stale')):
-            response = od.respond('Dimentica', MID)
+            response = od.respond(self.owner_text, MID)
         self.assertIn('confermare nuovamente', response)
         self.assertNotIn('Memoria personale aggiornata', response)
 
     def test_invalid_event_produces_failure_confirmation_without_save(self):
+        self.owner_text = 'Crea un appuntamento in agenda.'
         self.persisted(plan(events=[dict(title='Invalid')]))
         self.validate.side_effect = ValueError('invalid date')
-        self.assertIn('Appuntamento non creato: invalid date', od.respond('Richiesta', MID))
+        self.assertIn('Appuntamento non creato: invalid date', od.respond(self.owner_text, MID))
         self.save.assert_not_called()
 
     def test_blank_reply_gets_explicit_fallback(self):
@@ -476,9 +586,17 @@ class RespondTests(OfflineTests):
         self.assert_released()
 
     def test_expiry_between_plan_and_effects_prevents_effects_but_preserves_plan(self):
-        self.conn.execute.return_value.fetchone.side_effect = [(1,), None]
+        # Only dialogue-lease reads expire; authorization may do other DB reads.
+        lease = MagicMock()
+        lease.fetchone.side_effect = [(1,), None]
+        def execute(sql, *args):
+            if 'FROM owner_dialogue_state' in sql and 'FOR UPDATE' in sql:
+                return lease
+            return self.execute(sql, *args)
+        self.conn.execute.side_effect = execute
         with self.assertRaises(jobs.Deferred):
             od.respond('Richiesta', MID)
+        self.assertEqual(lease.fetchone.call_count, 2)
         self.assertTrue(any('SET plan=' in s[0] for s in self.statements()))
         self.assertFalse(any('SET response=' in s[0] for s in self.statements()))
         self.apply.assert_not_called()
@@ -494,10 +612,11 @@ class RespondTests(OfflineTests):
         self.assert_released()
 
     def test_effect_failure_rolls_back_response_and_delivery_and_releases(self):
+        self.owner_text = 'Crea un appuntamento in agenda.'
         self.persisted(plan(events=[dict(title='Visita', dt='2026-01-02 15:00')]))
         self.save.side_effect = RuntimeError('save failed')
         with self.assertRaisesRegex(RuntimeError, 'save failed'):
-            od.respond('Richiesta', MID)
+            od.respond(self.owner_text, MID)
         self.assertIs(self.conn.transaction.return_value.__exit__.call_args.args[0], RuntimeError)
         self.assertFalse(any('SET response=' in s[0] for s in self.statements()))
         self.enqueue.assert_not_called()
@@ -541,6 +660,8 @@ class RespondTests(OfflineTests):
 class SummaryTests(OfflineTests):
     def setUp(self):
         super().setUp()
+        # Exercise compaction/checkpoints, not native provenance DB queries.
+        self.sources = self.mock('owner_dialogue.allows_source', return_value=True)
         self.chat = self.mock('brain._chat', return_value='  Nuovo riepilogo  ')
         self.ctx = context(recent_ids=[30, 31])
         self.conn.execute.return_value.fetchall.return_value = [(6, ANCHOR, 'Domanda', 'Risposta')]
@@ -557,8 +678,11 @@ class SummaryTests(OfflineTests):
         self.assertIn('ORDER BY message_id LIMIT 20', sql)
         self.assertEqual(self.chat.call_args.kwargs, dict(max_tokens=od.SUMMARY_TOKENS))
         payload = json.loads(self.chat.call_args.args[1])
-        self.assertEqual(payload['previous'], self.ctx['summary'])
+        self.assertEqual(payload['previous'], od.CONTEXT_OMITTED)
         self.assertEqual(payload['exchanges'][0][1], str(ANCHOR))
+        self.assertEqual(payload['exchanges'][0][2:], ['Domanda', od.ASSISTANT_OMITTED])
+        self.assertNotIn(self.ctx['summary'], self.chat.call_args.args[1])
+        self.assertNotIn('Risposta', self.chat.call_args.args[1])
         update, args = self.updates()[0]
         self.assertEqual(args, ('Nuovo riepilogo', 6, TOKEN, 5))
         for fragment in ('token=%s', 'lease_until>now()', 'summarized_through=%s'):
@@ -613,10 +737,10 @@ class SummaryTests(OfflineTests):
             (i, ANCHOR, 'a' * 20000, 'b' * 10000) for i in range(6, 26)]
         od.compact(MID, self.ctx, TOKEN)
         entries = json.loads(self.chat.call_args.args[1])['exchanges']
-        self.assertEqual(len(entries), 1)
-        self.assertEqual((len(entries[0][2]), len(entries[0][3])), (12000, 6000))
+        self.assertEqual([e[0] for e in entries], ['6', '7'])
+        self.assertTrue(all(len(e[2]) == 12000 and e[3] == od.ASSISTANT_OMITTED for e in entries))
         self.assertLessEqual(sum(od.tokens(json.dumps(e, ensure_ascii=False)) for e in entries), od.RECENT_TOKENS)
-        self.assertEqual(self.updates()[0][1][1], 6)
+        self.assertEqual(self.updates()[0][1][1], 7)
 
 
 if __name__ == '__main__':

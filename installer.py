@@ -71,6 +71,10 @@ def provision_database(config_dir, existing, external=None):
 
 
 def valid_preference(key, value):
+    if key in ('SECRETARY_REVIEW_QUIET_START', 'SECRETARY_REVIEW_QUIET_END'):
+        return value.isdecimal() and 0 <= int(value) <= 23
+    if key in ('SECRETARY_REVIEW_MIN_MINUTES', 'SECRETARY_REVIEW_ACK_MINUTES'):
+        return value.isdecimal() and (5 if key == 'SECRETARY_REVIEW_MIN_MINUTES' else 1) <= int(value) <= 10080
     if key == 'TIMEZONE':
         try:
             ZoneInfo(value)
@@ -136,12 +140,14 @@ def configure_preferences(config, edit=False):
     for key, label in [('TIMEZONE', 'Timezone (es. Europe/Rome)'), ('LANGUAGE', 'Lingua (es. it)'),
                        ('OPENROUTER_MODEL', 'Modello OpenRouter (input nativi testo e immagini obbligatori)'), ('DIGEST_TIME', 'Ora digest (HH:MM)')]:
         prompt_missing(config, key, label, edit=edit)
+    print('Documenti, ricerca, memoria e attività non richiedono una configurazione contabile.')
+    print('Fatture/ZIP sono facoltativi: dopo l’avvio scegli i flussi nella dashboard; nessun consenso AI viene dato qui.')
     add_new = True
     for i in range(1, 5):
         prefix = f'INVOICE_ENTITY{i}_'
         existing = any(key.startswith(prefix) for key in read_env(config.CONFIG_FILE))
         if not existing:
-            if not add_new or not confirm(f'Aggiungere entità fatture {i}?'):
+            if not add_new or not confirm(f'Opzionale · configurare entità fatture {i} (non abilita il flusso)?'):
                 add_new = False
                 continue
         for suffix, label in [('NAME', 'Nome entità/cartella'), ('VAT', 'Partita IVA'), ('DESC', 'Descrizione entità')]:
@@ -197,7 +203,7 @@ def _wizard(edit=False):
     state = progress(state_file)
     sections = {'identity', 'preferences', 'email', 'database', 'setups'}
     if edit:
-        print('Configure: 1 identità/OpenRouter, 2 preferenze/entità, 3 email, 4 database, 5 setup opzionali, INVIO tutto')
+        print('Configure: 1 identità/OpenRouter, 2 preferenze e funzionalità opzionali, 3 email, 4 database, 5 setup opzionali, INVIO tutto')
         while True:
             choice = input('Sezione: ').strip()
             if choice in ('', '1', '2', '3', '4', '5'):

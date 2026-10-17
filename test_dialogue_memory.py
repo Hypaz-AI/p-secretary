@@ -172,11 +172,11 @@ class MemoryApplicationTests(unittest.TestCase):
 class DurableChatMemoryTests(unittest.TestCase):
     def chat(self, dialogue):
         with ExitStack() as stack:
-            for target in ('db.communications_for_day', 'db.upcoming_appointments', 'db.all_rules'):
-                stack.enter_context(patch(target, return_value=[]))
-            stack.enter_context(patch('connectors.gcal.is_active', return_value=False))
             guards = [stack.enter_context(patch(target, side_effect=AssertionError(target)))
-                      for target in ('db.personal_memories', 'db.apply_personal_memories',
+                      for target in ('db._conn', 'db.communications_for_day',
+                                     'db.upcoming_appointments', 'db.all_rules',
+                                     'connectors.gcal.is_active', 'connectors.gcal.upcoming_events',
+                                     'db.personal_memories', 'db.apply_personal_memories',
                                      'brain.remember_user', 'brain.prepare_user_memories',
                                      'brain._chat')]
             request = stack.enter_context(patch('brain._owner_chat_request', return_value='Risposta'))

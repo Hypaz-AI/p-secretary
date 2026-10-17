@@ -21,6 +21,8 @@ class MediaArchiveTests(unittest.TestCase):
         network = patch('urllib.request.urlopen', side_effect=AssertionError('Network forbidden'))
         network.start()
         self.addCleanup(network.stop)
+        # These contracts predate catalogue/runtime hooks; bootstrap tests cover them.
+        self.derived = self.enterContext(patch.object(message_store, 'enqueue_derived'))
 
     def test_image_representation_uses_native_vision_and_main_model(self):
         with patch.object(config, 'OPENROUTER_API_KEY', 'test'), patch.object(
@@ -38,16 +40,22 @@ class MediaArchiveTests(unittest.TestCase):
                 ('image/jpeg', 'describe_image', config.OPENROUTER_MODEL)):
             with self.subTest(mime=mime):
                 self.conn.execute.reset_mock()
-                self.conn.execute.return_value.fetchone.side_effect = [None,
-                    ('file', mime, None, b'bytes', {'duration': 123})]
+                self.derived.reset_mock()
+                row = ('file', mime, None, b'bytes', {'duration': 123}, 42)
+                self.conn.execute.return_value.fetchone.side_effect = [None, row, row]
+                # Consent/provenance and revocation are exercised in bootstrap tests.
                 with patch.object(config, 'OPENROUTER_API_KEY', 'test'), patch.object(
-                        media_text, converter, return_value='testo completo') as convert:
+                        media_text, converter, return_value='testo completo') as convert, patch.object(
+                        media_archive, '_media_allowed', return_value=True) as allowed:
                     media_archive.process({'attachment_id': 8})
                 self.assertEqual(convert.call_args.args[0]['duration'], 123)
                 sql, args = self.conn.execute.call_args.args
                 self.assertIn('ON CONFLICT(attachment_id) DO NOTHING', sql)
                 self.assertEqual(args, (8, media_text.kind({'content_type': mime}), 'testo completo', model))
                 self.assertFalse(any('UPDATE ' in c.args[0] for c in self.conn.execute.call_args_list))
+                self.assertEqual([c.args for c in allowed.call_args_list],
+                                 [(self.conn, 42), (self.conn, 42)])
+                self.derived.assert_called_once_with(self.conn, 42)
 
     def test_successful_result_is_reused_on_retry(self):
         self.conn.execute.return_value.fetchone.return_value = (1,)
@@ -58,13 +66,16 @@ class MediaArchiveTests(unittest.TestCase):
         describe.assert_not_called()
 
     def test_failed_conversion_is_retryable_without_partial_save(self):
-        self.conn.execute.return_value.fetchone.side_effect = [None, ('v', 'audio/ogg', None, b'audio', {})]
+        self.conn.execute.return_value.fetchone.side_effect = [
+            None, ('v', 'audio/ogg', None, b'audio', {}, 42)]
         with patch.object(config, 'OPENROUTER_API_KEY', 'test'), patch.object(
-                media_text, 'convert', side_effect=RuntimeError('provider unavailable')):
-            with self.assertRaises(RuntimeError):
+                media_text, 'convert', side_effect=RuntimeError('provider unavailable')), patch.object(
+                media_archive, '_media_allowed', return_value=True):
+            with self.assertRaisesRegex(RuntimeError, 'provider unavailable'):
                 media_archive.process({'attachment_id': 8})
         self.assertFalse(any('INSERT INTO media_transcripts' in c.args[0]
                              for c in self.conn.execute.call_args_list))
+        self.derived.assert_not_called()
 
     def test_cached_media_text_keeps_caption_and_includes_all_attachments(self):
         attachments = [dict(id=i, content_type='image/png', transcript=f'Immagine {i}') for i in range(12)]
@@ -77,6 +88,7 @@ class MediaArchiveTests(unittest.TestCase):
         self.assertIn('parlato completo', text)
 
     def test_consumer_defers_until_media_text_is_persisted(self):
+        self.conn.execute.return_value.fetchone.return_value = ('pending', 0, None)
         for mime in ('audio/ogg', 'image/png'):
             with self.subTest(mime=mime), patch.object(media_text, 'convert') as convert:
                 with self.assertRaises(jobs.Deferred):
@@ -109,11 +121,16 @@ class MediaArchiveTests(unittest.TestCase):
                        dict(id=9, content_type='image/png', transcript='scadenza 20 ottobre')]
         with patch.object(pipeline, 'load_message', return_value=(
                 ('whatsapp', 'sender', 'subject', 'caption', 'source'), attachments)), patch(
-                'flows.enabled', return_value=True), patch('brain.analyze', return_value={'category': 'errore'}) as analyze:
+            'flows.enabled', return_value=True), patch.object(
+            pipeline.policy, 'can_operate', return_value=True) as allowed, patch(
+            'brain.analyze', return_value={'category': 'errore'}) as analyze:
             with self.assertRaisesRegex(RuntimeError, 'Analysis unavailable'):
                 pipeline.analyze({'message_id': 42})
         self.assertIn('voce', analyze.call_args.args[2])
         self.assertIn('scadenza 20 ottobre', analyze.call_args.args[2])
+        self.assertEqual([c.args for c in allowed.call_args_list],
+                 [(self.conn, 42, effect) for effect in
+                  ('extract', 'ai_text', 'ai_media', 'ai_text', 'ai_media')])
 
     def test_migration_backfills_existing_media_without_provider_calls(self):
         self.conn.execute.return_value.fetchone.return_value = None

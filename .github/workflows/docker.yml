@@ -12,11 +12,52 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m unittest -v test_installer
+      - run: pip install -r requirements.txt
+      - name: Explicit dashboard, execution and AI budget security contracts
+        run: |
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP" \
+            PI_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
+            python -m unittest -v test_secretary_dashboard test_secretary_execution test_secretary_budget
+      - name: Full offline discovery (no deployment dotenv or inherited credentials)
+        run: |
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP" \
+            PI_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
+            python -m unittest discover -v
       - run: sh -n pi-secretary
+      - run: node --check web/app.js
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: false
           platforms: linux/amd64
+  postgres-integration:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: secretary_test
+          POSTGRES_PASSWORD: disposable-ci-only
+          POSTGRES_DB: secretary_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U secretary_test -d secretary_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Full discovery with disposable PostgreSQL, never DATABASE_URL
+        env:
+          TEST_PORT: ${{ job.services.postgres.ports[5432] }}
+        run: |
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP" \
+            PI_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
+            PI_SECRETARY_TEST_DATABASE_URL="postgresql://secretary_test:disposable-ci-only@127.0.0.1:$TEST_PORT/secretary_test" \
+            python -m unittest discover -v

@@ -218,6 +218,15 @@ class LifecycleTests(OfflineTests):
 
 
 class ReconcileTests(OfflineTests):
+    """Lifecycle only; real egress gates live in test_reconciliation_task_privacy.py."""
+
+    def setUp(self):
+        super().setUp()
+        # Deliberately isolate lifecycle snapshots from native provenance/data-policy SQL.
+        # This fixture does not claim that email/model certainty grants task authority.
+        self.enterContext(patch.object(tr.policy, 'can_operate', return_value=True))
+        self.enterContext(patch.object(tr, '_allows_candidate', return_value=True))
+
     def run_reconcile(self, count=1, result=None, body='Invoice paid', attachments=None,
                       apply_status='applied', task_state=('open', 3), record=12):
         rows = [(i, 'Invoice', None, 3, 1, 'sender', 'subject', 'original') for i in range(7, 7 + count)]

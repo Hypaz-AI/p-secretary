@@ -3,6 +3,7 @@ import contextlib
 import io
 import os
 from pathlib import Path
+import shlex
 import unittest
 from unittest.mock import patch
 
@@ -60,7 +61,11 @@ class SetupUITests(unittest.TestCase):
 
     def test_image_includes_shared_module(self):
         root = Path(__file__).resolve().parent
-        self.assertIn('COPY setup_ui.py ', (root / 'Dockerfile').read_text())
+        dockerfile = (root / 'Dockerfile').read_text().replace('\\\n', ' ')
+        copies = [shlex.split(line, comments=True) for line in dockerfile.splitlines()
+              if line.lstrip().upper().startswith('COPY ')]
+        self.assertTrue(any('setup_ui.py' in args[1:-1] for args in copies),
+                'setup_ui.py must be a COPY source, including grouped COPY instructions')
 
 
 if __name__ == '__main__':

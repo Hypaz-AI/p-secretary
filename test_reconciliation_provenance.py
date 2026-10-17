@@ -17,7 +17,13 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import db
 import historical_import
+import jobs
+import knowledge
 import message_store
+import owner_dialogue
+import policy
+import secretary
+import secretary_runtime
 import task_reconciliation
 from connectors import media_archive, telegram_account as tg, whatsapp
 
@@ -43,12 +49,19 @@ class ProvenanceStorageTests(unittest.TestCase):
                             check=True, capture_output=True)
         cls.conn = psycopg.connect(host=directory, dbname='postgres', autocommit=True)
         cls.addClassCleanup(cls.conn.close)
-        message_store.migrate(cls.conn, '')
+        # Exercise real derived queues without touching any configured/global DB.
+        message_store.migrate(cls.conn, db.SCHEMA)
+        for module in (jobs, task_reconciliation, media_archive, owner_dialogue,
+                       policy, secretary, knowledge, secretary_runtime):
+            module.migrate(cls.conn)
         cls.conn.execute('CREATE TABLE queued (mid BIGINT, revision TEXT)')
 
     def setUp(self):
-        self.conn.execute('TRUNCATE email_messages, whatsapp_messages, telegram_messages, '
-                          'attachments, queued')
+        # Roll back all per-test native/derived state; secretary FKs forbid the old
+        # native-table TRUNCATE and append-only tables must not be reset globally.
+        self.enterContext(self.conn.transaction(force_rollback=True))
+        self.enterContext(patch.object(db, '_conn',
+            side_effect=AssertionError('Configured DB forbidden in isolated SQL tests')))
         self.enterContext(patch.object(media_archive, 'enqueue_message'))
         self.queue = self.enterContext(patch.object(task_reconciliation, 'queue',
             side_effect=lambda conn, mid, revision='': conn.execute(
@@ -152,10 +165,13 @@ class ProvenanceStorageTests(unittest.TestCase):
         self.assertEqual(self.queued(), [])
 
     def test_caller_rollback_removes_historical_insert(self):
-        with self.assertRaises(RuntimeError), self.conn.transaction():
+        with self.assertRaisesRegex(RuntimeError, '^abort$'), self.conn.transaction():
             self.store(historical=True)
             raise RuntimeError('abort')
         self.assertEqual(self.conn.execute('SELECT count(*) FROM telegram_messages').fetchone()[0], 0)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM work_jobs').fetchone()[0], 0)
+        self.assertEqual(self.conn.execute(
+            'SELECT count(*) FROM secretary_runtime_observations').fetchone()[0], 0)
 
     def test_supplied_id_helper_uses_native_metadata_not_view(self):
         mid = self.store('email (personal)', historical=True)

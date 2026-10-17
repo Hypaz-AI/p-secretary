@@ -6,7 +6,7 @@ import smtplib
 import ssl
 from email.header import decode_header
 from email.message import EmailMessage
-from email.utils import parseaddr
+from email.utils import getaddresses, parseaddr
 
 import config
 from connectors import ms_oauth
@@ -76,6 +76,14 @@ def _parse_msg(raw: bytes, account: dict) -> dict:
     msg = email.message_from_bytes(raw)
     sender = _decode(msg.get("From"))
     subject = _decode(msg.get("Subject"))
+    recipients = {key: [address for _, address in getaddresses(msg.get_all(key, []))]
+                  for key in ('to', 'cc', 'bcc')}
+    thread_metadata = {
+        'in_reply_to': ' '.join(msg.get_all('In-Reply-To', [])) or None,
+        'references': ' '.join(msg.get_all('References', [])) or None,
+        'recipients': recipients,
+        'recipient_headers': {key: msg.get_all(key, []) for key in recipients},
+    }
     return {
         "uid": "",
         "account": account["name"],
@@ -87,6 +95,8 @@ def _parse_msg(raw: bytes, account: dict) -> dict:
         "attachments": _attachments(msg),
         "date": msg.get("Date", ""),
         "message_id": msg.get('Message-ID'),
+        **thread_metadata,
+        'metadata': thread_metadata,
     }
 
 
@@ -118,7 +128,8 @@ def fetch_new_messages(account: dict, seen_uids: set) -> list:
             if timestamp and datetime.fromisoformat(timestamp) < cutoff:
                 continue
             entry['source_id'] = identity
-            entry['metadata'] = {'account': account['address'].lower(), 'folder': 'INBOX',
+            entry['metadata'] = {**entry.get('metadata', {}),
+                                 'account': account['address'].lower(), 'folder': 'INBOX',
                                  'uidvalidity': validity, 'uid': uid_str,
                                  'message_id': entry['message_id'], 'direction': 'in'}
             messages.append(entry)
@@ -228,7 +239,7 @@ def iter_history_messages(account, start, end):
                                  folder_index, uid_text, type(exc).__name__)
                     continue
                 entry.update(uid=uid.decode('ascii'), direction=direction, ts=ts)
-                entry['metadata'] = {'account': account['address'].lower(),
+                entry['metadata'] = {**entry.get('metadata', {}), 'account': account['address'].lower(),
                                      'folder': folder, 'uidvalidity': validity,
                                      'uid': entry['uid'], 'message_id': entry['message_id'],
                                      'direction': direction}
@@ -288,7 +299,8 @@ def fetch_day_messages(account: dict, day: str, historical: bool = False) -> lis
                     entry["direction"] = direction
                     validity_data = imap.response('UIDVALIDITY')[1]
                     validity = validity_data[0].decode() if validity_data and validity_data[0] else None
-                    entry['metadata'] = {'account': account['address'].lower(), 'folder': folder,
+                    entry['metadata'] = {**entry.get('metadata', {}),
+                                         'account': account['address'].lower(), 'folder': folder,
                                          'uidvalidity': validity, 'uid': entry['uid'],
                                          'message_id': entry['message_id'], 'direction': direction}
                     entry['source_id'] = json_identity(account['address'].lower(), folder, validity, entry['uid'])

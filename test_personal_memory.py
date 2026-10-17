@@ -42,25 +42,28 @@ class PersonalMemoryTests(unittest.TestCase):
         ):
             self.assertTrue(brain.remember_user('Fatto', []).startswith('errore:'))
 
-    def test_old_memories_recalled_and_new_memory_visible_immediately(self):
-        old = [{'id': n, 'text': f'Preferenza {n}'} for n in range(15)]
-        updated = old + [{'id': 16, 'text': 'Preferisce il tè'}]
+    def test_authorized_old_memories_and_new_memory_visible_in_durable_projection(self):
+        old = [{'id': n, 'text': f'Preferenza {n}'} for n in range(1, 16)]
+        dialogue = {'memory_plan': {'known': old, 'changes': [
+            {'operation': 'add', 'text': 'Preferisce il tè'}]}}
         response = MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps({
             'choices': [{'message': {'content': 'Risposta'}}]
         }).encode()
-        with patch('db.personal_memories', side_effect=[old, updated]), patch(
-            'brain.remember_user', return_value='successo: 1 modifica'
-        ), patch('db.communications_for_day', return_value=[]), patch(
-            'db.upcoming_appointments', return_value=[]
-        ), patch('db.all_rules', return_value=[]), patch(
-            'connectors.gcal.is_active', return_value=False
-        ), patch('brain.urllib.request.urlopen', return_value=response) as request:
-            brain.chat_with_user('Preferisco il tè')
+        with patch('db.personal_memories') as read, patch(
+            'brain.remember_user'
+        ) as remember, patch('db._conn') as connect, patch(
+            'brain.urllib.request.urlopen', return_value=response
+        ) as request:
+            brain.chat_with_user('Preferisco il tè', dialogue=dialogue)
+        read.assert_not_called()
+        remember.assert_not_called()
+        connect.assert_not_called()
         messages = json.loads(request.call_args.args[0].data)['messages']
-        self.assertIn('Preferenza 0', messages[1]['content'])
+        self.assertIn('Preferenza 1', messages[1]['content'])
         self.assertIn('Preferisce il tè', messages[1]['content'])
-        self.assertIn('ESITO MEMORIA: successo:', messages[0]['content'])
+        self.assertIn('ESITO MEMORIA: piano preparato, non ancora salvato', messages[0]['content'])
+        self.assertNotIn('ESITO MEMORIA: successo:', messages[0]['content'])
 
 
 if __name__ == '__main__':

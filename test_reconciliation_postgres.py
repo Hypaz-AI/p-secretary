@@ -5,6 +5,7 @@ when local server binaries and psycopg are available; otherwise it skips.
 Neither configured DATABASE_URL nor PI_SECRETARY_TEST_DATABASE_URL is used.
 No application, worker, AI, external service, or existing database is started.
 """
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -19,10 +20,12 @@ import uuid
 import db
 import jobs
 import message_store
+import owner_dialogue
+import policy
 import task_reconciliation as reconciliation
 
 
-class ReconciliationPostgresTests(unittest.TestCase):
+class _PostgresFixture(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
@@ -74,13 +77,23 @@ class ReconciliationPostgresTests(unittest.TestCase):
         self.conn.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(self.schema)))
         self.conn.execute("SET statement_timeout='5s'")
         self.conn.execute("SET lock_timeout='2s'")
-        message_store.migrate(self.conn, db.SCHEMA)
-        jobs.migrate(self.conn)
+        self.enterContext(patch.object(policy.config, 'TELEGRAM_CHAT_ID', '7'))
+        self.enterContext(patch.object(policy.config, 'TELEGRAM_BOT_TOKEN', '123:offline'))
+        self.enterContext(patch('urllib.request.urlopen', side_effect=AssertionError('Network forbidden')))
 
     def drop_schema(self):
         from psycopg import sql
         self.conn.execute('SET search_path TO pg_catalog')
         self.conn.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(self.schema)))
+
+
+class ReconciliationPostgresTests(_PostgresFixture):
+    def setUp(self):
+        super().setUp()
+        message_store.migrate(self.conn, db.SCHEMA)
+        jobs.migrate(self.conn)
+        owner_dialogue.migrate(self.conn)
+        policy.migrate(self.conn)
 
     def task(self, **fields):
         title = fields.pop('title', 'Send report')
@@ -89,13 +102,32 @@ class ReconciliationPostgresTests(unittest.TestCase):
         return self.conn.execute('INSERT INTO tasks(title,deadline) VALUES (%s,%s) RETURNING id',
                                  (title, deadline)).fetchone()[0]
 
-    def message(self, table='telegram_messages', *, metadata=None, ts=None, acquired=None):
+    def message(self, table='telegram_messages', *, metadata=None, ts=None, acquired=None, owner=True):
         from psycopg import sql
         self.assertIn(table, message_store.TABLES.values())
         acquired = acquired or datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
-        return self.conn.execute(sql.SQL('''INSERT INTO {}(channel,body,metadata,ts,acquired_at)
-            VALUES (%s,%s,%s,%s,%s) RETURNING id''').format(sql.Identifier(table)),
-            (table.split('_')[0], 'Report sent', json.dumps(metadata or {}), ts, acquired)).fetchone()[0]
+        native = ('offline', None, None, 'in')
+        metadata = dict(metadata or {})
+        source_id, message_id = uuid.uuid4().hex, None
+        if table == 'telegram_messages':
+            # Authority comes from native columns, not sender labels or model flags.
+            identity = '7' if owner else '8'
+            native = ('bot:123', identity, identity, 'in')
+            message_id = int(uuid.uuid4().hex[:8], 16) + 1
+            source_id = json.dumps(['bot', '123', identity, message_id])
+            metadata = {**dict(chat_type='private', content_origin='direct_text', is_forwarded=False,
+                              account=native[0], chat_id=identity, author=identity, direction='in',
+                              message_id=message_id), **metadata}
+        return self.conn.execute(sql.SQL('''INSERT INTO {}
+            (channel,body,metadata,ts,acquired_at,account,chat_id,author,direction,source_id,message_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id''').format(sql.Identifier(table)),
+            (table.split('_')[0], 'Report sent', json.dumps(metadata), ts, acquired, *native,
+             source_id, str(message_id) if message_id is not None else None)).fetchone()[0]
+
+    def grant_ai(self, effect, channel='telegram'):
+        self.assertIn(effect, ('ai_text', 'ai_media'))
+        self.conn.execute('''INSERT INTO data_policies(channel,effect,allowed) VALUES (%s,%s,TRUE)
+            ON CONFLICT(channel,effect) DO UPDATE SET allowed=TRUE''', (channel, effect))
 
     def proposal(self, task, key, **fields):
         data = dict(task_id=task, expected_version=0, evidence_key=key,
@@ -119,6 +151,67 @@ class ReconciliationPostgresTests(unittest.TestCase):
         self.conn.execute("""UPDATE work_jobs SET status='running',token='old-lease',
             lease_until=now()+interval '1 hour' WHERE key=%s""", (f'task-reminder:{task}',))
         return appointment
+
+    def test_policy_receipts_use_actual_columns_and_never_allow_a_repeated_attempt(self):
+        mid, payload = self.message(), {'text': 'Local owner notice', 'recipient': '7'}
+        with self.conn.transaction():
+            self.assertTrue(policy.prepare_effect(self.conn, 'receipt', mid, 'notify', payload,
+                                                  owner_required=True))
+        row = self.conn.execute('''SELECT message_id,effect,owner_required,status,token,
+            "authorization",payload_hash FROM effect_receipts WHERE key='receipt' ''').fetchone()
+        self.assertEqual(row, (mid, 'notify', True, 'authorized', None, None, policy.payload_hash(payload)))
+        self.assertTrue(policy.record_receipt(self.conn, 'receipt', 'attempted'))
+        self.assertFalse(policy.record_receipt(self.conn, 'receipt', 'attempted'))
+        self.assertTrue(policy.record_receipt(self.conn, 'receipt', 'accepted'))
+        self.assertTrue(policy.record_receipt(self.conn, 'receipt', 'verified'))
+        with self.conn.transaction():
+            self.assertFalse(policy.prepare_effect(self.conn, 'receipt', mid, 'notify', payload,
+                                                   owner_required=True))
+        with self.assertRaisesRegex(ValueError, 'identity conflict'), self.conn.transaction():
+            policy.prepare_effect(self.conn, 'receipt', mid, 'notify', {'text': 'Changed'},
+                                  owner_required=True)
+        self.assertEqual(self.conn.execute('SELECT status FROM effect_receipts').fetchall(), [('verified',)])
+
+    def test_policy_receipt_attempt_rechecks_native_attestation_and_cannot_rearm_blocked(self):
+        mid, payload = self.message(), {'text': 'Owner-only notice'}
+        self.assertTrue(policy.prepare_effect(self.conn, 'revoke', mid, 'notify', payload,
+                                              owner_required=True))
+        self.conn.execute("UPDATE telegram_messages SET metadata=metadata-'content_origin' WHERE id=%s", (mid,))
+        self.assertFalse(policy.record_receipt(self.conn, 'revoke', 'attempted'))
+        self.assertEqual(self.conn.execute('SELECT status FROM effect_receipts').fetchone(), ('blocked',))
+        self.conn.execute('''UPDATE telegram_messages SET metadata=metadata ||
+            '{"content_origin":"direct_text"}'::jsonb WHERE id=%s''', (mid,))
+        self.assertFalse(policy.prepare_effect(self.conn, 'revoke', mid, 'notify', payload, owner_required=True))
+        self.assertFalse(policy.record_receipt(self.conn, 'revoke', 'attempted'))
+
+    def test_nullable_receipt_source_is_not_a_blanket_system_authorization(self):
+        payload = {'text': 'Unsealed notice', 'recipient': '7'}
+        for authorization in (None, True, 'digest:unsealed', 'calendar:unsealed'):
+            with self.subTest(authorization=authorization):
+                self.assertFalse(policy.prepare_effect(self.conn, 'unsealed', None, 'notify', payload,
+                                                       authorization=authorization))
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM effect_receipts').fetchone(), (0,))
+
+    def test_policy_ai_receipt_requires_explicit_consent_and_rechecks_revocation(self):
+        mid, payload = self.message('email_messages'), {'text': 'Local evidence'}
+        self.assertFalse(policy.prepare_effect(self.conn, 'ai', mid, 'ai_text', payload))
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM effect_receipts').fetchone(), (0,))
+        self.grant_ai('ai_text', channel='email')
+        self.assertTrue(policy.prepare_effect(self.conn, 'ai', mid, 'ai_text', payload))
+        self.conn.execute("UPDATE data_policies SET allowed=FALSE WHERE channel='email' AND effect='ai_text'")
+        self.assertFalse(policy.record_receipt(self.conn, 'ai', 'attempted'))
+        self.assertEqual(self.conn.execute('SELECT status FROM effect_receipts').fetchone(), ('blocked',))
+
+    def test_policy_native_attestations_cannot_be_substituted_by_owner_flags(self):
+        for overrides in ({'content_origin': None}, {'content_origin': 'caption'},
+                          {'content_origin': 'transcript'}, {'is_forwarded': None},
+                          {'is_forwarded': True}, {'forward_origin': {}},
+                          {'quote': {'text': 'Report sent'}}, {'message_id': '42'},
+                          {'account': 'bot:999'}, {'author': '8'}):
+            with self.subTest(overrides=overrides):
+                mid = self.message(metadata={**overrides, 'owner': True, 'trusted': True})
+                self.assertTrue(policy.can_operate(self.conn, mid, 'task_propose'))
+                self.assertFalse(policy.can_operate(self.conn, mid, 'task_apply'))
 
     def test_migrate_is_idempotent_and_fences_only_unfinished_legacy_reminders(self):
         task = self.task()
@@ -298,6 +391,189 @@ class ReconciliationPostgresTests(unittest.TestCase):
                 self.proposal(task, 'caller-rollback', message_id=mid)), 'applied')
             raise RuntimeError('caller abort')
         self.assertEqual(self.snapshot(), before)
+
+    def test_third_party_evidence_needs_verified_current_owner_confirmation(self):
+        reconciliation.migrate(self.conn)
+        task = self.task()
+        self.derived_work(task)
+        mid = self.message(owner=False)
+        proposal = reconciliation._record(self.conn, self.proposal(task, 'third-party', message_id=mid))
+        before = self.snapshot()
+        self.assertEqual(reconciliation.apply_change(self.conn, proposal), 'blocked')
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.conn.execute('''SELECT effect,allowed,reason FROM effect_audit
+            WHERE message_id=%s ORDER BY id''', (mid,)).fetchall(),
+            [('task_propose', True, 'allowed'), ('task_apply', False, 'owner_required')])
+
+        # Only this explicitly manual confirmation supplies current owner authority.
+        authority = self.message()
+        self.assertEqual(reconciliation.apply_change(self.conn, proposal,
+            authority_message_id=authority), 'applied')
+        self.assertEqual(self.conn.execute('SELECT status,version,last_evidence_id FROM tasks').fetchone(),
+                         ('done', 1, mid))
+        self.assertEqual(self.conn.execute('''SELECT effect,allowed,reason FROM effect_audit
+            WHERE message_id=%s ORDER BY id''', (authority,)).fetchall(),
+            [('owner_command', True, 'allowed')])
+
+    def test_owner_confirmation_cannot_promote_historical_evidence(self):
+        reconciliation.migrate(self.conn)
+        task = self.task()
+        self.derived_work(task)
+        mid = self.message(metadata={'historical': True})
+        proposal = reconciliation._record(self.conn, self.proposal(task, 'history', message_id=mid))
+        authority = self.message()
+        before = self.snapshot()
+        self.assertEqual(reconciliation.apply_change(self.conn, proposal,
+            authority_message_id=authority), 'blocked')
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.conn.execute('''SELECT effect,allowed,reason FROM effect_audit
+            WHERE message_id=%s ORDER BY id''', (mid,)).fetchall(),
+            [('task_propose', False, 'historical')])
+
+    def test_reconciliation_requires_exact_text_and_media_data_grants(self):
+        reconciliation.migrate(self.conn)
+        task, mid = self.task(), self.message()
+        # NULL source_message no longer supplies consent. This lifecycle fixture
+        # is an owner task with a separately authorized native origin.
+        origin = self.message(acquired=datetime(2026, 10, 15, tzinfo=timezone.utc))
+        self.conn.execute('UPDATE tasks SET created_at=%s,owner_origin_message=%s WHERE id=%s',
+                          (datetime(2026, 10, 15, tzinfo=timezone.utc), origin, task))
+        attachments = [{'content_type': 'image/png'}]
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM data_policies').fetchone()[0], 0)
+        before = self.snapshot()
+        with patch.object(db, '_conn', side_effect=lambda: nullcontext(self.conn)), \
+             patch.object(reconciliation.flows, 'enabled', return_value=True), \
+             patch.object(reconciliation.pipeline, 'load_message', return_value=(
+                 ('telegram', 'owner', '', 'Report sent', 'source'), attachments)), \
+             patch.object(reconciliation.media_text, 'message_text', return_value='Report sent'), \
+             patch.object(reconciliation.documents, 'attachment_text', return_value=''), \
+             patch.object(reconciliation.brain, 'reconcile_tasks', return_value={'changes': []}) as ai:
+            with self.assertRaisesRegex(jobs.Deferred, 'data policy blocked'):
+                reconciliation.reconcile({'message_id': mid})
+            self.grant_ai('ai_text', channel='email')
+            with self.assertRaisesRegex(jobs.Deferred, 'data policy blocked'):
+                reconciliation.reconcile({'message_id': mid})
+            self.grant_ai('ai_text')
+            with self.assertRaisesRegex(jobs.Deferred, 'media policy blocked'):
+                reconciliation.reconcile({'message_id': mid})
+            ai.assert_not_called()
+            self.assertEqual(self.snapshot(), before)
+            self.assertEqual(self.conn.execute('SELECT count(*) FROM task_reconciliation_runs').fetchone()[0], 0)
+            self.grant_ai('ai_media')
+            reconciliation.reconcile({'message_id': mid})
+        ai.assert_called_once()
+        self.assertEqual(ai.call_args.args[4], attachments)
+        self.assertEqual(ai.call_args.args[5][0]['id'], task)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.conn.execute('SELECT key FROM task_reconciliation_runs').fetchall(),
+                         [(reconciliation._key(mid),)])
+
+
+class PolicyMigrationPostgresTests(_PostgresFixture):
+    def test_full_bootstrap_and_replay_preserve_policy_receipts_and_default_deny(self):
+        with patch.object(db, 'available', return_value=True), patch.object(
+                db, '_conn', side_effect=lambda: nullcontext(self.conn)):
+            self.assertEqual(db.init(), 0)
+            self.assertEqual(self.conn.execute('SELECT provenance FROM secretary_profile').fetchone(), ('fresh',))
+            before = self.conn.execute('SELECT * FROM schema_migrations ORDER BY version').fetchall()
+            self.assertEqual(db.init(), 0)
+        self.assertEqual(self.conn.execute('SELECT * FROM schema_migrations ORDER BY version').fetchall(), before)
+        self.assertIn(policy.VERSION, {row[0] for row in before})
+        for table in ('data_policies', 'effect_audit', 'effect_receipts',
+                      'calendar_effect_grants', 'system_notifications', 'work_jobs'):
+            self.assertEqual(self.conn.execute('SELECT count(*) FROM ' + table).fetchone(), (0,), table)
+
+    def test_minimal_installed_schema_upgrades_receipts_without_rewriting_existing_rows(self):
+        # Only the durable job key is a dependency; do not synthesize the entire
+        # secretary bootstrap just to exercise an installed policy upgrade.
+        self.conn.execute('''CREATE TABLE work_jobs (id BIGINT PRIMARY KEY);
+            CREATE TABLE effect_receipts (
+                key TEXT PRIMARY KEY, message_id BIGINT NOT NULL, effect TEXT NOT NULL,
+                payload_hash TEXT NOT NULL, owner_required BOOLEAN NOT NULL DEFAULT FALSE,
+                status TEXT NOT NULL CHECK(status IN
+                    ('authorized','attempted','accepted','verified','failed','uncertain','blocked')),
+                job_id BIGINT, token TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+            INSERT INTO work_jobs(id) VALUES (9);
+            INSERT INTO effect_receipts(key,message_id,effect,payload_hash,status)
+                VALUES ('legacy',42,'notify','old-hash','uncertain')''')
+        before = self.conn.execute('SELECT * FROM effect_receipts').fetchone()
+        policy.migrate(self.conn)
+        self.assertEqual(self.conn.execute('SELECT * FROM effect_receipts').fetchone(), (*before, None))
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM data_policies').fetchone(), (0,))
+        self.assertIsNone(self.conn.execute("SELECT to_regclass('telegram_messages')").fetchone()[0])
+        self.assertEqual(self.conn.execute('''SELECT is_nullable FROM information_schema.columns
+            WHERE table_schema=current_schema() AND table_name='effect_receipts'
+            AND column_name='message_id' ''').fetchone(), ('YES',))
+        self.conn.execute("INSERT INTO data_policies(channel,effect,allowed,version) VALUES ('email','ai_text',TRUE,8)")
+        self.conn.execute('''INSERT INTO system_notifications
+            (token,system,scope,recipient,effect_key,job_id,payload,payload_hash,source_ids,media_source_ids)
+            VALUES ('digest:fixture','digest','2026-10-16','7','digest-fixture',9,'{}','hash','{}','{}')''')
+        for _ in range(2):
+            policy.migrate(self.conn)
+        self.assertEqual(self.conn.execute('SELECT * FROM effect_receipts').fetchone(), (*before, None))
+        self.assertEqual(self.conn.execute('SELECT channel,effect,allowed,version FROM data_policies').fetchall(),
+                         [('email', 'ai_text', True, 8)])
+        self.assertEqual(self.conn.execute('SELECT * FROM work_jobs').fetchall(), [(9,)])
+        self.assertEqual(self.conn.execute('SELECT job_id FROM system_notifications').fetchall(), [(9,)])
+        with self.assertRaises(db.psycopg.errors.ForeignKeyViolation), self.conn.transaction():
+            self.conn.execute('UPDATE system_notifications SET job_id=10')
+        self.assertEqual(self.conn.execute('SELECT count(*),min(reset_rows) FROM schema_migrations WHERE version=%s',
+                                          (policy.VERSION,)).fetchone(), (1, 0))
+
+    def test_policy_migration_preserves_explicit_consent_and_caller_rollback(self):
+        self.conn.execute('''CREATE TABLE work_jobs (id BIGINT PRIMARY KEY);
+            CREATE TABLE data_policies (
+                channel TEXT NOT NULL, effect TEXT NOT NULL, allowed BOOLEAN NOT NULL DEFAULT FALSE,
+                version BIGINT NOT NULL DEFAULT 1, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY(channel,effect));
+            INSERT INTO data_policies(channel,effect,allowed,version)
+                VALUES ('email','ai_text',TRUE,8),('telegram','ai_media',FALSE,12)''')
+        before = self.conn.execute('SELECT * FROM data_policies ORDER BY channel,effect').fetchall()
+        with self.assertRaisesRegex(RuntimeError, 'caller abort'), self.conn.transaction():
+            policy.migrate(self.conn)
+            self.assertEqual(self.conn.execute('SELECT * FROM data_policies ORDER BY channel,effect').fetchall(), before)
+            raise RuntimeError('caller abort')
+        self.assertIsNone(self.conn.execute("SELECT to_regclass('schema_migrations')").fetchone()[0])
+        self.assertIsNone(self.conn.execute("SELECT to_regclass('effect_receipts')").fetchone()[0])
+        self.assertEqual(self.conn.execute('SELECT * FROM data_policies ORDER BY channel,effect').fetchall(), before)
+        policy.migrate(self.conn)
+        self.assertEqual(self.conn.execute('SELECT * FROM data_policies ORDER BY channel,effect').fetchall(), before)
+
+    def test_missing_or_unkeyed_job_dependency_rolls_back_every_policy_relation(self):
+        with self.assertRaises(db.psycopg.errors.UndefinedTable):
+            policy.migrate(self.conn)
+        for table in ('schema_migrations', 'data_policies', 'effect_audit', 'effect_receipts',
+                      'calendar_effect_grants', 'system_notifications'):
+            self.assertIsNone(self.conn.execute('SELECT to_regclass(%s)', (table,)).fetchone()[0], table)
+        self.conn.execute('CREATE TABLE work_jobs (id BIGINT NOT NULL)')
+        with self.assertRaises(db.psycopg.errors.InvalidForeignKey):
+            policy.migrate(self.conn)
+        self.assertIsNone(self.conn.execute("SELECT to_regclass('schema_migrations')").fetchone()[0])
+        self.assertIsNone(self.conn.execute("SELECT to_regclass('effect_receipts')").fetchone()[0])
+        self.conn.execute('ALTER TABLE work_jobs ADD PRIMARY KEY (id)')
+        policy.migrate(self.conn)
+        self.assertEqual(self.conn.execute('SELECT version FROM schema_migrations').fetchall(), [(policy.VERSION,)])
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM data_policies').fetchone(), (0,))
+
+    def test_legacy_bootstrap_never_backfills_owner_attestation_or_ai_consent(self):
+        message_store.migrate(self.conn, db.SCHEMA)
+        jobs.migrate(self.conn)
+        mid = self.conn.execute('''INSERT INTO telegram_messages
+            (channel,body,account,chat_id,author,direction,source_id,message_id,metadata)
+            VALUES ('telegram','Report sent','bot:123','7','7','in',
+                '["bot","123","7",42]','42',
+                '{"account":"bot:123","chat_id":"7","author":"7","direction":"in",
+                  "chat_type":"private","message_id":42,"owner":true,"trusted":true}') RETURNING id''').fetchone()[0]
+        before = self.conn.execute('SELECT * FROM telegram_messages').fetchall()
+        with patch.object(db, 'available', return_value=True), patch.object(
+                db, '_conn', side_effect=lambda: nullcontext(self.conn)):
+            db.init()
+        self.assertEqual(self.conn.execute('SELECT * FROM telegram_messages').fetchall(), before)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM data_policies').fetchone(), (0,))
+        self.assertTrue(policy.can_operate(self.conn, mid, 'task_propose'))
+        self.assertFalse(policy.can_operate(self.conn, mid, 'owner_command'))
+        self.assertFalse(policy.can_operate(self.conn, mid, 'ai_text'))
 
 
 if __name__ == '__main__':

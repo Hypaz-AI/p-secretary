@@ -5,6 +5,7 @@ private files: publishing the env pointer last makes a batch atomic, even on cra
 """
 import hashlib
 import hmac
+import importlib.util
 import imaplib
 import ipaddress
 import json
@@ -52,6 +53,50 @@ INTERACTIVE = {
     'TELEGRAM_CHAT_ID': 'Autorizzazione proprietario: setup_telegram.py nel terminale; non modificabile dal web.',
 }
 
+# No consumer exists for these GLOBAL controls. Review-only settings below
+# have a separate, narrower runtime contract; do not imply global enforcement.
+PLANNED = {
+    'SECRETARY_MODE': 'Pianificato: observe/active non applicato dal runtime. Non è un interruttore di sicurezza.',
+    'SECRETARY_QUIET_HOURS': 'Pianificato: quiet hours non applicate. DIGEST_TIME e soglia notifiche sono separati.',
+    'SECRETARY_AI_DAILY_BUDGET': 'Pianificato: nessun tetto monetario giornaliero locale. Impostare limiti presso OpenRouter.',
+}
+REVIEW_FIELDS = {
+    'SECRETARY_REVIEW_QUIET_START': 'Ora locale 0–23 di inizio silenzio per le sole notifiche di revisione; default 22.',
+    'SECRETARY_REVIEW_QUIET_END': 'Ora locale 0–23 di fine silenzio revisioni; default 8. Inizio=fine disattiva questa fascia.',
+    'SECRETARY_REVIEW_MIN_MINUTES': 'Intervallo minimo delle revisioni (5–10080 minuti), default 60; non un budget monetario.',
+    'SECRETARY_REVIEW_ACK_MINUTES': 'Attesa minima per riproporre contenuto di revisione invariato (1–10080 minuti), default 1440.',
+}
+BUDGET_FIELDS = {
+    'AI_BUDGET_DAILY_CALLS': 'Tetto tentativi HTTP AI per giorno UTC nei Worker; default 200. Ogni retry conta.',
+    'AI_BUDGET_DAILY_TOKENS': 'Tetto prenotazioni conservative/consumi AI per giorno UTC nei Worker; default 500000. Nessun rimborso delle prenotazioni.',
+    'AI_BUDGET_MAX_INFLIGHT': 'Massimo richieste AI simultanee nei Worker; default 2. Slot incerti richiedono riconciliazione operatore.',
+    'AI_BUDGET_MAX_OUTPUT_TOKENS': 'Massimo token output per tentativo AI nei Worker (1–65536); default 65536. Non è un limite monetario.',
+}
+
+
+def _budget_supported():
+    return importlib.util.find_spec('ai_budget') is not None
+
+
+def _review_runtime_supported():
+    return importlib.util.find_spec('secretary_runtime') is not None
+
+
+def secretary_support():
+    review_supported = _review_runtime_supported()
+    budget_supported = _budget_supported()
+    return {'features': [
+        dict(id='secretary_mode', supported=False, status='planned', description=PLANNED['SECRETARY_MODE']),
+        dict(id='quiet_hours', supported=review_supported,
+             status='supported' if review_supported else 'planned',
+             description='Quiet hours solo notifiche di revisione: SECRETARY_REVIEW_QUIET_START/END (22–08). Richiede migrazione/worker runtime; non blocca digest o emergenze.'),
+           dict(id='ai_daily_budget', supported=budget_supported,
+               status='supported' if budget_supported else 'planned',
+               description='Tetti reali chiamate/token e concorrenza nei Worker via ai_budget; richiedono ledger/migrazione. Chiamate dirette legacy escluse. Nessun tetto monetario garantito.'),
+        dict(id='output_token_budget', supported=True, status='supported',
+             description='Budget output per richiesta e un retry su troncamento; non un limite di spesa.'),
+    ]}
+
 
 def field_metadata(key):
     """Public, static UI hints: never derive defaults/help from saved credentials."""
@@ -92,7 +137,20 @@ def field_metadata(key):
         'DASHBOARD_COOKIE_SECURE': 'true solo con accesso HTTPS; false per HTTP locale.',
         'WA_CHROMIUM_PATH': 'Percorso del Chromium di sistema usato dal ponte WhatsApp.',
     }
-    result = {'type': 'password' if secret(key) else 'text', 'description': descriptions.get(key, '')}
+    result = {'type': 'password' if secret(key) else 'text',
+              'description': PLANNED.get(key, REVIEW_FIELDS.get(key, BUDGET_FIELDS.get(key, descriptions.get(key, ''))))}
+    if key in PLANNED:
+        result.update(supported=False, status='planned')
+    if key == 'SECRETARY_MODE':
+        result.update(type='select', options=['observe', 'active'])
+    if key in REVIEW_FIELDS:
+        result.update(type='number', min=0 if key.endswith(('_START', '_END')) else 5 if key.endswith('_MIN_MINUTES') else 1,
+                      max=23 if key.endswith(('_START', '_END')) else 10080, step=1,
+                      supported=_review_runtime_supported())
+    if key in BUDGET_FIELDS:
+        result.update(type='number', min=1,
+                      max=65536 if key == 'AI_BUDGET_MAX_OUTPUT_TOKENS' else 2147483647,
+                      step=1, supported=_budget_supported())
     email = re.fullmatch(r'EMAIL\d+_(.+)', key)
     invoice = re.fullmatch(r'INVOICE_ENTITY\d+_(.+)', key)
     if email:
@@ -143,6 +201,9 @@ def schema():
             'TELEGRAM_USER_DIALOG_LIMIT', 'TELEGRAM_USER_MESSAGE_LIMIT', 'TELEGRAM_USER_RECOVERY_INTERVAL'],
         'Calendar': ['GCAL_ENABLED', 'GCAL_CALENDAR_ID', 'GCAL_EVENT_DURATION', 'GCAL_SERVICE_ACCOUNT_JSON'],
         'Preferenze': ['TIMEZONE', 'LANGUAGE', 'DIGEST_TIME', 'NOTIFY_PRIORITY_THRESHOLD', 'POLL_INTERVAL'],
+        'Segretario · funzionalità pianificate': list(PLANNED),
+        'Segretario · notifiche di revisione': list(REVIEW_FIELDS),
+        'AI · limiti Worker (non monetari)': list(BUDGET_FIELDS),
         'Deployment (sola lettura)': sorted(DEPLOYMENT),
     }
     for i in range(1, 51):
@@ -156,10 +217,18 @@ def schema():
 
 
 def secret(key):
+    if key in BUDGET_FIELDS:
+        return False
     return key in ('DATABASE_URL', 'GCAL_SERVICE_ACCOUNT_JSON') or any(s in key for s in ('PASSWORD', 'TOKEN', 'API_KEY', 'API_HASH'))
 
 
 def readonly(key):
+    if key in PLANNED:
+        return PLANNED[key]
+    if key in REVIEW_FIELDS and not _review_runtime_supported():
+        return 'Modulo secretary_runtime non installato; impostazione non applicabile.'
+    if key in BUDGET_FIELDS and not _budget_supported():
+        return 'Modulo ai_budget non installato; impostazione non applicabile.'
     if key in DEPLOYMENT or key in config.DEPLOYMENT_ENV_KEYS:
         return 'Imposto dal deployment/ambiente: modificare esternamente e ricreare il container; il file non prevale su Docker.'
     return INTERACTIVE.get(key, '')
@@ -301,6 +370,9 @@ def verify_calendar(values, raw):
 def validate(changes, values):
     for key, value in changes.items():
         spec = field_metadata(key)
+        if key in BUDGET_FIELDS and (not value.isascii() or not value.isdecimal()
+                                    or not 1 <= int(value) <= spec['max']):
+            raise ValueError('Limite AI fuori intervallo')
         if (spec['type'] == 'select' and value not in spec['options']
             and not (re.fullmatch(r'EMAIL\d+_AUTH', key) and value == '')):
             raise ValueError('Scelta non valida: ' + key)

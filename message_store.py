@@ -12,6 +12,56 @@ TABLES = {'email': 'email_messages', 'whatsapp': 'whatsapp_messages',
           'telegram': 'telegram_messages'}
 
 
+def enqueue_derived(conn, message_id, *, historical=False):
+    """Caller-atomic catalogue + live inbox, lazily loaded to avoid db cycles.
+
+    Runtime requires the complete bootstrap. Missing schemas/import failures
+    deliberately propagate: a partially migrated installation must not silently
+    lose indexing or bypass policy. Tests of base storage can mock this boundary.
+    """
+    import knowledge
+    receipt = knowledge.enqueue(conn, message_id)
+    if historical:
+        return receipt
+    import secretary_runtime
+    secretary_runtime.observe(conn, message_id)
+    revision = receipt.get('revision')
+    if revision:
+        _refresh_observation(conn, message_id, revision)
+    return receipt
+
+
+def _refresh_observation(conn, mid, revision):
+    """Rearm only changed evidence, never failed/blocked work or identical retries.
+
+    observe holds the secretary write lock. The ingress revision lives in input
+    until runtime saves a plan, then its source revision is authoritative. Clearing
+    a superseded running token fences the old worker before it can publish.
+    """
+    row = conn.execute('''SELECT status,input,plan FROM secretary_runtime_observations
+        WHERE message_id=%s FOR UPDATE''', (mid,)).fetchone()
+    if row is None:
+        return
+    status, saved, plan = row
+    saved = saved or {}
+    sources = saved.get('sources') or []
+    previous = sources[0].get('revision') if plan is not None and sources else saved.get('ingress_revision')
+    if previous == revision:
+        return
+    marker = json.dumps(dict(ingress_revision=revision))
+    if previous is None and status == 'pending' and plan is None:
+        conn.execute('''UPDATE secretary_runtime_observations SET input=%s
+            WHERE message_id=%s''', (marker, mid))
+        return
+    rearmed = conn.execute('''UPDATE work_jobs SET status='pending',attempts=0,
+        available_at=now(),finished_at=NULL,error=NULL,token=NULL,lease_until=NULL
+        WHERE kind='secretary_review' AND key=%s AND status IN ('pending','running','done')
+        RETURNING id''', (f'secretary-observe:{mid}',)).fetchone()
+    if rearmed:
+        conn.execute('''UPDATE secretary_runtime_observations SET status='pending',input=%s,plan=NULL
+            WHERE message_id=%s''', (marker, mid))
+
+
 def reconciliation_excluded(conn, message_id):
     """Read durable provenance, including for pipeline callers with supplied IDs.
 
@@ -78,6 +128,8 @@ def enrich_whatsapp(conn, row, meta, attachments):
              mid, att.get('filename'), att.get('path')))
     from connectors import media_archive
     media_archive.enqueue_message(conn, mid)
+    enqueue_derived(conn, mid, historical=(meta.get('historical') is True
+                                          or merged.get('historical') is True))
     return mid
 
 
@@ -163,7 +215,7 @@ def store(conn, channel, sender, subject, body, ts=None, source_id=None,
     # not by transport metadata. Duplicate/enrichment paths preserve stored state.
     meta.pop('historical', None)
     if historical:
-      meta['historical'] = True
+        meta['historical'] = True
     table = TABLES[native(channel)]
     dt = datetime.fromisoformat(ts) if ts else None
     if dt and dt.tzinfo is None:
@@ -227,6 +279,8 @@ def store(conn, channel, sender, subject, body, ts=None, source_id=None,
                     and not (len(existing) > 1 and existing[1] is True)):
                 import task_reconciliation
                 task_reconciliation.queue(conn, mid)
+            enqueue_derived(conn, mid, historical=(historical
+                or len(existing) > 1 and existing[1] is True))
             return mid
         if update_existing:
             # An accepted edit can replace/remove the media. Never reuse the old
@@ -255,6 +309,8 @@ def store(conn, channel, sender, subject, body, ts=None, source_id=None,
             revision = (datetime.fromisoformat(meta['revision_date'])
                         .astimezone(timezone.utc).isoformat() if update_existing else '')
             task_reconciliation.queue(conn, row[0], revision=revision)
+        enqueue_derived(conn, row[0], historical=(historical
+            or len(row) > 1 and row[1] is True))
         return row[0]
 
 

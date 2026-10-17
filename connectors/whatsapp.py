@@ -556,7 +556,7 @@ class WhatsAppBridge:
       path = self.spool_dir / (identity.encode().hex() + '.json')
       try:
         entry = json.loads(path.read_text())
-        if entry.get('enriched') and entry.get('version') == version:
+        if entry.get('id') == identity and entry.get('enriched') and entry.get('version') == version:
           path.unlink(missing_ok=True)
       except (OSError, ValueError):
         pass
@@ -573,7 +573,9 @@ class WhatsAppBridge:
         media_dir.mkdir(parents=True, exist_ok=True)
         from connectors.storage import FileLock
         if self.proc:
-          return True
+          if self.proc.poll() is None:
+            return True
+          self.stop()  # Release dead process streams, identity and profile lock.
         try:
           self.session_lock = FileLock(session_dir / '.owner.lock', blocking=False)
           self.session_lock.__enter__()
@@ -598,32 +600,48 @@ class WhatsAppBridge:
         except (OSError, ValueError):
             self.session_lock.__exit__()
             self.session_lock = None
+            self.proc = None
             print('[whatsapp] avvio fallito; controllare Node, cache e dipendenze')
             return False
 
-        threading.Thread(target=self._reader, daemon=True).start()
+        threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
         print('[whatsapp] ponte avviato; per autenticare usare setup_whatsapp.py')
         return True
 
     def stop(self) -> None:
-        if self.proc:
-            stop_process(self.proc)
-            self.proc = None
+      proc, self.proc = self.proc, None
+      self.ready, self.self_wid = False, ''
+      try:
+        if proc:
+          try:
+            if proc.poll() is None:
+              stop_process(proc)
+            else:
+              proc.wait()
+          finally:
+            for stream in (proc.stdin, proc.stdout):
+              if stream is not None:
+                stream.close()
+      finally:
         if self.session_lock:
           self.session_lock.__exit__()
           self.session_lock = None
-        self.ready = False
 
     # ---- lettura eventi --------------------------------------
-    def _reader(self) -> None:
-        assert self.proc and self.proc.stdout
-        for line in self.proc.stdout:
+    def _reader(self, proc=None) -> None:
+        proc = proc or self.proc
+        assert proc and proc.stdout
+        for line in proc.stdout:
+            if self.proc is not proc:
+                return  # An old reader must not update a restarted bridge.
             line = line.strip()
             if not line.startswith("{"):
                 continue
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
                 continue
             etype = event.get("type")
             if etype == "qr":
@@ -654,13 +672,42 @@ class WhatsAppBridge:
       cutoff = self.history_cutoff()
       end = datetime.now(ZoneInfo(config.TIMEZONE)) + timedelta(minutes=5)
       msgs = []
-      for path in sorted(self.spool_dir.glob('*.json'))[:200]:
+      import time
+      now = time.time()
+
+      def quarantine(path):
+        # Do not touch a file the live bridge might still be enriching/writing.
+        # Rename only unchanged stale files; never delete potentially useful data.
         try:
+          before = path.lstat()
+          if path.is_symlink() or not path.is_file() or now - before.st_mtime < 3600:
+            return
+          target = self.spool_dir / 'quarantine'
+          target.mkdir(mode=0o700, exist_ok=True)
+          if path.lstat() != before:
+            return
+          import uuid
+          path.rename(target / (path.name + '.' + uuid.uuid4().hex + '.quarantined'))
+        except OSError:
+          pass
+
+      for path in sorted(self.spool_dir.glob('*.json')):
+        if len(msgs) >= 200:
+          break
+        try:
+          if path.is_symlink():
+            continue
           m = json.loads(path.read_text())
+          if (not isinstance(m, dict) or not isinstance(m.get('id'), str) or not m['id']
+              or path.name != m['id'].encode().hex() + '.json'):
+            quarantine(path)
+            continue
           if not m.get('enriched'):
+            quarantine(path)
             continue
           dt = datetime.fromtimestamp(m['timestamp'], ZoneInfo(config.TIMEZONE))
           if not cutoff <= dt < end or m.get('chat_id') == 'status@broadcast':
+            quarantine(path)
             continue
           m['msg_date'] = dt.isoformat()
           m['metadata'] = {'account': self.self_wid, 'chat_id': m.get('chat_id'),
@@ -672,7 +719,8 @@ class WhatsAppBridge:
             if key in m:
               m['metadata'][key] = m[key]
           msgs.append(m)
-        except (ValueError, KeyError, OSError, TypeError):
+        except (ValueError, KeyError, OSError, TypeError, OverflowError):
+          quarantine(path)
           continue
       return msgs
 

@@ -14,6 +14,7 @@ Pipeline:
    fatture del mese appena concluso.
 """
 import re
+import json
 import signal
 import sys
 import time
@@ -423,46 +424,72 @@ def check_telegram(state: dict):
     flows.mark('telegram_bot', 'running' if flows.enabled('telegram_bot') else 'paused')
     offset = state.get("telegram_offset", 0)
     download_dir = config.DATA_DIR / "tg_files"
-    msgs, offset = telegram.fetch_new_messages(offset, download_dir=download_dir)
+    msgs, fetched_offset = telegram.fetch_new_messages(offset, download_dir=download_dir)
+    import jobs
+    import policy
+    from connectors import media_text
+
+    def checkpoint(conn, value):
+        # Same commit as the native archive AND its processing job(s).
+        conn.execute('''INSERT INTO source_cursors(key,value) VALUES (%s,%s)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now()''',
+            ('telegram_bot_offset', json.dumps(value)))
+
     for m in msgs:
         if not running:
-            break
-        metadata = m.get('metadata') or {}
-        if (m.get('unauthorized')
-                or not telegram.is_owner_chat(m.get('chat_id'), m.get('chat_type'))
-                or not telegram.is_owner_chat(metadata.get('chat_id'), metadata.get('chat_type'))):
+            return
+        update_id = m.get('update_id')
+        if type(update_id) is not int or update_id < offset:
+            raise ValueError('Missing or unordered native Telegram update identity')
+        metadata = dict(m.get('metadata') or {})
+        authorized_chat = (not m.get('unauthorized')
+                and telegram.is_owner_chat(m.get('chat_id'), m.get('chat_type'))
+                and telegram.is_owner_chat(metadata.get('chat_id'), metadata.get('chat_type')))
+        if not authorized_chat:
+            with db._conn() as conn, conn.transaction():
+                checkpoint(conn, update_id + 1)
+            state['telegram_offset'] = offset = update_id + 1
             continue
-        channel = 'telegram'
-        chat_name = (m.get('metadata') or {}).get('chat_name') or 'bot'
-        mid = db.store_message(channel, m['from'], f'Telegram · {chat_name}', m.get('text', ''),
-            ts=m.get('msg_date'), source_id=m.get('source_id'), metadata=m.get('metadata'),
-            attachments=m.get('attachments'), reconcile=True)
-        if m.get('source_id') and db.communication_seen(channel, m['source_id']):
-            continue
-        # comandi rapidi / regole insegnate dall'utente
-        from connectors import media_text
-        if (m.get("text") and not m.get('attachments')) or any(
-                media_text.kind(a) for a in m.get('attachments', [])):
-            import jobs
-            jobs.submit('owner', f'owner:{mid}', {'text':m.get('text', ''), 'message_id':mid,
-                                               'media': bool(m.get('attachments'))})
-            continue
-        # solo file/allegato senza testo: analisi normale (fattura ecc.)
-        if not flows.enabled('telegram_bot'):
-            continue
-        process_message(
-            channel="telegram",
-            sender=m["from"],
-            subject=f"(file utente via Telegram · {chat_name})",
-            body=m.get("text", ""),
-            state=state,
-            attachments=m.get("attachments", []),
-            msg_date=m.get('msg_date'), source_id=m.get('source_id'),
-            metadata=m.get('metadata'), message_id=mid,
-        )
-    import jobs
-    jobs.set_cursor('telegram_bot_offset', offset)
-    state["telegram_offset"] = offset
+        attachments = m.get('attachments') or []
+        text = m.get('text') or ''
+        indirect_fields = ('forward_origin', 'forward_date', 'forward_from', 'forward_from_chat',
+                           'forward_sender_name', 'is_automatic_forward', 'is_forwarded',
+                           'forwarded', 'quote', 'external_reply', 'via_bot', 'sender_chat')
+        for key in indirect_fields:
+            if key in m:
+                metadata[key] = m[key]
+        indirect = any(metadata.get(k) not in (None, False, '', {}) for k in indirect_fields)
+        metadata['is_forwarded'] = indirect
+        audio = any(media_text.kind(a) == 'audio' for a in attachments)
+        # Attest transport text/caption, never extracted document text or a placeholder.
+        # New connectors supply this directly; this adapter supports older transports.
+        if 'content_origin' not in metadata:
+            synthetic = text.startswith(('(file:', '\n[Media non scaricato:', '\n[Documento non scaricato:'))
+            metadata['content_origin'] = ('forwarded' if indirect else 'direct_text'
+                if text.strip() and not synthetic else 'direct_audio' if audio else 'attachment')
+        chat_name = metadata.get('chat_name') or 'bot'
+        with db._conn() as conn, conn.transaction():
+            mid = db.message_store.store(conn, 'telegram', m['from'], f'Telegram · {chat_name}', text,
+                ts=m.get('msg_date'), source_id=m.get('source_id'), metadata=metadata,
+                attachments=attachments)
+            owner = policy.can_operate(conn, mid, 'owner_command', owner_required=True)
+            route_dialogue = metadata.get('content_origin') in ('direct_text', 'direct_audio')
+            route_dialogue = route_dialogue or any(media_text.kind(a) == 'image' for a in attachments)
+            if owner and not indirect and route_dialogue:
+                # Any direct caption (PDF/XML/video/etc.), not just voice/photo.
+                jobs.enqueue(conn, 'owner', f'owner:{mid}',
+                             dict(text=text, message_id=mid, media=bool(attachments)))
+            else:
+                # Forwarded/indirect owner messages are evidence, never slash/rule authority.
+                jobs.enqueue(conn, 'analysis', f'analysis:{mid}', dict(message_id=mid))
+            checkpoint(conn, update_id + 1)
+        state['telegram_offset'] = offset = update_id + 1
+    # Filtered/empty transport updates have no content to archive. Never consume
+    # this high-water mark on shutdown or after a partial/failed batch.
+    if running and fetched_offset > offset:
+        with db._conn() as conn, conn.transaction():
+            checkpoint(conn, fetched_offset)
+        state['telegram_offset'] = fetched_offset
     if flows.observed().get('telegram_bot', {}).get('status') == 'running':
         flows.mark('telegram_bot', 'idle' if config.TELEGRAM_BOT_TOKEN else 'not_configured')
 
@@ -518,6 +545,8 @@ _owner_context = threading.local()
 def _owner_job(payload):
     # Scope archived identity to this job, including exceptions and retries.
     try:
+        import owner_dialogue
+        owner_dialogue.authorize(payload['message_id'])
         _owner_context.message_id = payload['message_id']
         _run_owner_job(payload)
     finally:
@@ -525,11 +554,25 @@ def _owner_job(payload):
 
 
 def _run_owner_job(payload):
-    text = payload['text']
-    if payload.get('media'):
-        import pipeline
-        from connectors import media_text
-        row, attachments = pipeline.load_message(payload['message_id'])
+    import owner_dialogue
+    import pipeline
+    from connectors import media_text
+    mid = payload['message_id']
+    # Retry payloads cannot replace the archived current request or hide media.
+    row, attachments = pipeline.load_message(mid)
+    text = row[3]
+    with db._conn() as conn:
+        saved = conn.execute('SELECT plan,response FROM owner_exchanges WHERE message_id=%s', (mid,)).fetchone()
+        direct = owner_dialogue._current_text(conn, mid, text)
+    if saved and (saved[0] is not None or saved[1] is not None):
+        # No model, media conversion or new data grant is needed to replay a
+        # committed receipt/persisted plan. respond still fences owner authority.
+        owner_dialogue.respond(text, mid)
+        return
+    if not attachments and direct and owner_dialogue.command(text, mid):
+        return
+    owner_dialogue.authorize(mid, ai=True, media=bool(attachments))
+    if attachments:
         images = media_text.image_parts(attachments)
         # Only the owner's caption and voice are privileged current text.
         # Image OCR remains visible through vision/archive, never owner evidence.
@@ -540,7 +583,7 @@ def _run_owner_job(payload):
             handle_user_chat(text, images=images)
         else:
             handle_user_chat(text)
-    elif not _handle_user_command(text):
+    else:
         handle_user_chat(text)
 
 
@@ -565,6 +608,79 @@ def _reconcile_job(payload):
         if earlier:
             raise jobs.Deferred('Earlier message analysis is unfinished')
     task_reconciliation.reconcile(payload)
+
+
+def _analysis_job(payload):
+    """Indirect owner content is analyzed as evidence, never as task authority."""
+    import jobs
+    import pipeline
+    import policy
+    mid = payload['message_id']
+    with db._conn() as conn:
+        meta = policy.metadata_for(conn, mid)
+    native = meta.get('metadata') or {}
+    indirect = any(native.get(k) not in (None, False, '', {}) for k in (
+        'is_forwarded', 'forward_origin', 'forward_date', 'forward_from', 'forward_from_chat',
+        'forward_sender_name', 'forwarded', 'quote', 'external_reply', 'via_bot',
+        'sender_chat', 'is_automatic_forward'))
+    if meta.get('channel') != 'telegram' or not indirect:
+        return pipeline.analyze(payload)
+    if not flows.enabled('telegram_bot'):
+        raise jobs.Deferred('Source paused')
+    row, attachments = pipeline.load_message(mid)
+    def gate(conn):
+        jobs.assert_current(conn)
+        if not policy.can_operate(conn, mid, 'extract'):
+            raise jobs.Deferred('Analysis provenance no longer eligible')
+        for effect in ('ai_text', 'ai_media') if attachments else ('ai_text',):
+            if not policy.can_operate(conn, mid, effect):
+                raise jobs.Deferred('Analysis AI data permission required in dashboard')
+    with db._conn() as conn:
+        gate(conn)
+        if conn.execute('SELECT 1 FROM message_analysis WHERE message_id=%s', (mid,)).fetchone():
+            return
+    channel, sender, subject, body, source_id = row
+    if attachments:
+        from connectors import media_text
+        body = media_text.message_text(body, attachments)
+    with db._conn() as conn:
+        gate(conn)
+    verdict = brain.normalize_verdict(brain.analyze(subject, sender, body, channel, attachments))
+    if verdict['category'] == 'errore':
+        raise RuntimeError('Analysis unavailable')
+    # Retain observations, not suggested commands/events from forwarded text.
+    verdict.update(needs_action=False, action='', appointments=[])
+    with db._conn() as conn, conn.transaction():
+        gate(conn)
+        conn.execute('SELECT pg_advisory_xact_lock(%s)', (mid,))
+        if conn.execute('SELECT 1 FROM message_analysis WHERE message_id=%s', (mid,)).fetchone():
+            return
+        db.message_store.analyze(conn, mid, channel, verdict, False, source_id)
+        import secretary_runtime
+        secretary_runtime.observe(conn, mid)
+        should_notify = (verdict['urgent'] or verdict['severity'] == 'alta'
+                        or config.priority_at_least(verdict['priority'], config.NOTIFY_PRIORITY_THRESHOLD))
+        if should_notify and policy.can_operate(conn, mid, 'notify'):
+            jobs.enqueue(conn, 'action', f'notify:{mid}', dict(type='notify', message_id=mid,
+                text=format_verdict(channel, sender, subject, verdict)))
+        import capabilities
+        if verdict['is_invoice'] and attachments and capabilities.enabled('invoices', conn=conn):
+            jobs.enqueue(conn, 'action', f'invoice:{mid}', dict(type='invoice', message_id=mid, verdict=verdict))
+        jobs.assert_current(conn)
+
+
+def _schedule_secretary_reviews():
+    import secretary
+    import secretary_runtime
+    with db._conn() as conn, conn.transaction():
+        secretary.due_reviews(conn)
+        secretary_runtime.backlog(conn)
+
+
+def _secretary_review_job(payload):
+    """Use the version/source/consent-fenced, proposal-only runtime coordinator."""
+    import secretary_runtime
+    return secretary_runtime.review(payload)
 
 
 def main():
@@ -599,7 +715,10 @@ def main():
 
     state = actions.load_state()
     import jobs
+    import knowledge
+    import secretary
     import pipeline
+    import execution
     from connectors import media_archive
     state['telegram_offset'] = jobs.cursor('telegram_bot_offset', state.get('telegram_offset', 0))
     flows.init()
@@ -609,11 +728,14 @@ def main():
     import platform_health
     platform_health.register_workers(wa, personal)
 
-    workers = [jobs.Worker('analysis', pipeline.analyze).start(),
+    workers = [jobs.Worker('analysis', _analysis_job).start(),
                jobs.Worker('media', media_archive.process).start(),
                jobs.Worker('reconcile', _reconcile_job).start(),
                jobs.Worker('action', pipeline.action).start(),
-               jobs.Worker('owner', _owner_job).start()]
+               jobs.Worker('owner', _owner_job).start(),
+               jobs.Worker('knowledge', knowledge.index_message).start(),
+               jobs.Worker('secretary_review', _secretary_review_job).start(),
+               jobs.Worker(execution.KIND, execution.execute_approved).start()]
     periodic = {}
     def launch(name, callback):
         old = periodic.get(name)
@@ -646,6 +768,7 @@ def main():
                         launch('email', lambda: flows.run('email', lambda: check_emails(state)))
                     launch('digest', lambda: digest.maybe_send_digest(dict(state)))
                     launch('schedule', pipeline.schedule)
+                    launch('secretary_reviews', _schedule_secretary_reviews)
                     flows.mark('gcal', gcal.readiness() if flows.enabled('gcal') else 'paused')
             except Exception as exc:
                 print(f'[main] cycle failed ({type(exc).__name__})')

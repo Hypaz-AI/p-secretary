@@ -96,6 +96,19 @@ def message_text(body, attachments):
             text = attachment.get('transcript')
             if not text:
                 import jobs
+                # Load terminal state here: existing consumers only supply id
+                # and transcript, so no pipeline/owner schema changes are needed.
+                import db
+                with db._conn() as conn:
+                    row = conn.execute('''SELECT status,attempts,error FROM work_jobs
+                        WHERE kind='media' AND key=%s''',
+                        (f"media:{attachment['id']}",)).fetchone()
+                if row and (row[0] in ('failed', 'blocked', 'done')
+                            or (row[0] == 'pending' and row[1] >= 8)):
+                    reason = ('conversione bloccata: serve consenso esplicito alla policy dati'
+                              if row[0] == 'blocked' else 'conversione non disponibile dopo i tentativi previsti')
+                    sections.append(f'[Media non trascritto: {reason}. Nessun contenuto dedotto.]')
+                    continue
                 raise jobs.Deferred('Trascrizione media in attesa')
             label = 'Trascrizione vocale' if media_kind == 'audio' else 'Immagine: testo e descrizione'
             sections.append(f'[{label}]\n{text}')
