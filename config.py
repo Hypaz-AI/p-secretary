@@ -154,6 +154,35 @@ NOTIFY_PRIORITY_THRESHOLD = get("NOTIFY_PRIORITY_THRESHOLD", "media").lower()
 POLL_INTERVAL = int(get("POLL_INTERVAL", "300"))
 TIMEZONE = get("TIMEZONE", "Europe/Rome")
 LANGUAGE = get("LANGUAGE", "it")
+
+# --- Segretario: modalità operativa e quiet hours globali -----
+# SECRETARY_MODE: "observe" (solo proposte/bozze, nessun invio a terzi) oppure
+# "active" (permette gli invii esplicitamente approvati dal proprietario).
+# Default: observe. Valori non riconosciuti ricadono su observe (fail-safe).
+SECRETARY_MODE = get("SECRETARY_MODE", "observe").lower()
+if SECRETARY_MODE not in ("observe", "active"):
+    SECRETARY_MODE = "observe"
+# Quiet hours GLOBALI (ora locale, 0-23): durante la fascia le notifiche
+# ordinarie non urgenti vengono rinviate all'uscita della fascia stessa.
+# Le emergenze (urgent=true o gravità alta) restano immediate.
+# Inizio=fine disattiva la fascia silenziosa.
+try:
+    QUIET_HOURS_START = int(get("QUIET_HOURS_START", "22"))
+    QUIET_HOURS_END = int(get("QUIET_HOURS_END", "8"))
+except ValueError:
+    QUIET_HOURS_START, QUIET_HOURS_END = 22, 8
+if not (0 <= QUIET_HOURS_START <= 23 and 0 <= QUIET_HOURS_END <= 23):
+    QUIET_HOURS_START, QUIET_HOURS_END = 22, 8
+
+
+def _tz():
+    """ZoneInfo della TIMEZONE configurata, con fallback UTC sicuro."""
+    from zoneinfo import ZoneInfo
+    try:
+        return ZoneInfo(TIMEZONE)
+    except Exception:
+        from datetime import timezone
+        return timezone.utc
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 EMAIL_ATTACHMENTS_DIR = DATA_DIR / "email_attachments"
 

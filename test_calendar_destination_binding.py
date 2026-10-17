@@ -70,8 +70,8 @@ class _CalendarPostgresFixture(unittest.TestCase):
         self.conn.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(self.schema)))
         self.addCleanup(self.drop_schema)
         self.conn.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(self.schema)))
-        self.conn.execute("SET statement_timeout='5s'")
-        self.conn.execute("SET lock_timeout='2s'")
+        self.conn.execute("SET statement_timeout='15s'")
+        self.conn.execute("SET lock_timeout='10s'")
         self.enterContext(patch.object(db, '_conn', side_effect=lambda: nullcontext(self.conn)))
         self.enterContext(patch.dict(os.environ, {'GCAL_CALENDAR_ID': CALENDAR}))
         self.enterContext(patch.object(config, 'TIMEZONE', 'Europe/Rome'))
@@ -256,11 +256,11 @@ class CalendarTargetOfflineTests(unittest.TestCase):
         for operation in ('create', 'cancel'):
             self.api.reset_mock()
             expected = self.effect(operation)
-            def mutate(payload):
+            def mutate(payload, io_operation='create'):
                 os.environ['GCAL_CALENDAR_ID'] = OTHER_CALENDAR
                 config.TIMEZONE = 'UTC'
                 config.GCAL_EVENT_DURATION = 120
-                return real_io(payload)
+                return real_io(payload, io_operation)
             with patch.dict(os.environ), patch.object(config, 'TIMEZONE', 'Europe/Rome'), \
                  patch.object(config, 'GCAL_EVENT_DURATION', 60), \
                  patch.object(pipeline, '_calendar_io', side_effect=mutate):

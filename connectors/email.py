@@ -384,12 +384,31 @@ def mark_as_read(account: dict, uid: str) -> bool:
 
 def send(account: dict, to: str, subject: str, body: str) -> bool:
     """Invia una email dall'account configurato."""
+    return send_with_attachments(account, to, subject, body)
+
+
+def send_with_attachments(account: dict, to: str, subject: str, body: str,
+                           attachments=None) -> bool:
+    """Invia una email, opzionalmente con allegati (nome, bytes, content_type).
+
+    attachments: lista finita di dict {filename, data, content_type}. I bytes
+    sono già stati letti e verificati dal chiamante (hash/limiti): qui si
+    costruisce solo il MIME. Nessun path/URL accettato: solo bytes in memoria.
+    """
     try:
         msg = EmailMessage()
         msg["From"] = account["address"]
         msg["To"] = to
         msg["Subject"] = subject
         msg.set_content(body)
+        for item in (attachments or []):
+            filename = item["filename"]
+            data = item["data"]
+            content_type = item.get("content_type") or "application/octet-stream"
+            maintype, _, subtype = content_type.partition("/")
+            if not subtype:
+                maintype, subtype = "application", "octet-stream"
+            msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
         ctx = ssl.create_default_context()
         with smtplib.SMTP(account["smtp_host"], account["smtp_port"], timeout=30) as smtp:
             smtp.starttls(context=ctx)

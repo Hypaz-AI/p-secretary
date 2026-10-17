@@ -689,8 +689,52 @@ def _apply_review(payload, prepared_input, plan):
         _notify_owner(conn, state, row[0], key, plan)
         conn.execute('''UPDATE secretary_runtime_reviews SET status='applied',result=%s,
             updated_at=now() WHERE operation_key=%s''', (_json(result), key))
+        # Stop condition eseguibili: valuta DOPO l'applicazione, nella stessa
+        # transazione. Una condizione superata sospende la responsabilità e
+        # invalida i permessi pendenti; il lavoro già applicato resta visibile.
+        _evaluate_stop_condition(conn, state, key)
         jobs.assert_current(conn)
         return result
+
+
+def _evaluate_stop_condition(conn, state, key):
+    """Sospende la responsabilità quando la sua stop condition strutturata è superata.
+
+    Fail-closed sulla valutazione (condizioni malformate non fermano nulla:
+    resta sempre la revoca esplicita). La sospensione è registrata come
+    decisione con la condizione che l'ha scatenata, per audit completo.
+    """
+    r = state['responsibility']
+    if r is None:
+        return
+    raw = r.get('stop_condition')
+    if not isinstance(raw, str) or not raw.strip():
+        return
+    try:
+        condition = json.loads(raw)
+    except ValueError:
+        return  # Prosa non-JSON o dati corrotti: mai un arresto nascosto.
+    parsed = secretary.parse_stop_condition(condition)
+    if parsed is None or parsed.get('type') == 'prose':
+        return
+    applied = conn.execute('''SELECT count(*) FROM secretary_runtime_reviews
+        WHERE responsibility_id=%s AND status='applied' ''', (r['id'],)).fetchone()[0]
+    practice_state = state['practice']['state']
+    if not secretary.stop_condition_met(parsed, clock=_now(),
+                                        applied_reviews=applied,
+                                        practice_state=practice_state):
+        return
+    row = conn.execute('''UPDATE secretary_responsibilities SET state='suspended',
+        version=version+1,updated_at=now() WHERE id=%s AND version=%s AND state='active'
+        RETURNING version''', (r['id'], r['version'])).fetchone()
+    if not row:
+        return  # Un altro writer ha già cambiato lo stato; nessuna azione nascosta.
+    secretary._invalidate(conn, 'responsibility', r['id'], key + ':stop')
+    secretary._decision(conn, key + ':stop', 'responsibility_stopped',
+                        dict(responsibility_id=r['id'], version=row[0],
+                             stop_condition=parsed, applied_reviews=applied,
+                             practice_state=practice_state,
+                             reason='structured_stop_condition_met'))
 
 
 def _quiet_until(clock):

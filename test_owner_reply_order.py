@@ -140,7 +140,7 @@ class OwnerReplyOrderTests(unittest.TestCase):
                 pipeline.action(dict(type='calendar', id=2, authority_message_id=42,
                                      authorization=authorization))
         ready.assert_called_once_with()
-        sync.assert_called_once_with(effect_payload)
+        sync.assert_called_once_with(effect_payload, 'create')
         self.effect.assert_called_once_with(self.conn, f'{authorization}:synced',
                                             42, 'calendar', effect_payload,
                                             authorization=authorization)
@@ -173,7 +173,9 @@ class OwnerReplyOrderTests(unittest.TestCase):
                 with self.subTest(authority=authority), \
                      self.assertRaisesRegex(jobs.Deferred, '^Calendar authorization changed$'):
                     pipeline.action(dict(type='calendar', id=2, **authority))
-        grant.assert_called_once_with(self.conn, 42, digest, authorization)
+            # Il digest atteso è quello dell'operazione create (stato pending
+            # su evento non synced): il worker la sigilla come create.
+            grant.assert_called_once_with(self.conn, 42, digest, authorization)
         ready.assert_not_called()
         sync.assert_not_called()
         self.effect.assert_not_called()

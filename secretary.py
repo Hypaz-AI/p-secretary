@@ -47,6 +47,10 @@ PRACTICE_STATES = frozenset(('proposed', 'active', 'waiting', 'blocked', 'comple
 RESPONSIBILITY_TYPES = frozenset(('monitoring', 'collection', 'follow_up'))
 ALLOWED_ACTIONS = frozenset(('review', 'draft', 'request_owner_decision'))
 TRIGGERS = frozenset(('linked_message', 'review_due'))
+# Stop condition eseguibili: forma strutturata e finita, mai un rule engine.
+# Ogni condizione è un oggetto tipizzato con tipo allowlistato e parametri
+# limitati; la valutazione è deterministica e fallisce chiuso su dati mancanti.
+STOP_CONDITION_TYPES = frozenset(('max_reviews', 'deadline', 'practice_state'))
 CHANNELS = frozenset(('email', 'telegram', 'whatsapp'))
 PRACTICE_FIELDS = frozenset(('objective', 'state', 'next_action', 'waiting_for',
                            'next_review_at', 'completion_criteria', 'blocked_reason',
@@ -389,9 +393,14 @@ def _fields(kind, fields, create=False):
             or (create and set(fields) != allowed)):
         raise InvalidPlan('Invalid or missing typed fields')
     fields = fields.copy()
-    for name in ('objective', 'completion_criteria', 'stop_condition'):
+    for name in ('objective', 'completion_criteria'):
         if name in fields:
             _string(fields[name])
+    if 'stop_condition' in fields:
+        # Testo libero (prose) OPPURE oggetto strutturato eseguibile; entrambi
+        # vengono normalizzati in un dizione tipizzato persistibile come JSON.
+        parsed = parse_stop_condition(fields['stop_condition'])
+        fields['stop_condition'] = _dump(parsed) if parsed is not None else ''
     for name in ('next_action', 'waiting_for', 'blocked_reason'):
         if name in fields:
             _string(fields[name], empty=True)
@@ -419,6 +428,65 @@ def _fields(kind, fields, create=False):
         if name in fields:
             _enum_list(fields[name], allowed_values)
     return fields
+
+
+def parse_stop_condition(value):
+    """Valida una stop condition strutturata eseguibile, o None per prose libera.
+
+    Formato: {"type": "max_reviews|deadline|practice_state", ...parametri}.
+    - max_reviews: {"type":"max_reviews","count":N} — ferma dopo N revisioni applicate.
+    - deadline: {"type":"deadline","until":"ISO-8601"} — ferma alla data assoluta.
+    - practice_state: {"type":"practice_state","state":"completed|cancelled"} —
+      ferma quando la pratica raggiunge lo stato indicato.
+    Il testo libero resta consultabile come documentazione, ma non è eseguibile.
+    """
+    if value is None or value == '':
+        return None
+    if type(value) is str:
+        # Prosa: documentazione umana, mai un'esecuzione. Troncata e salvata.
+        return dict(type='prose', text=_string(value, 1000))
+    if type(value) is not dict:
+        raise InvalidPlan('Stop condition must be structured or prose')
+    kind = value.get('type')
+    if kind not in STOP_CONDITION_TYPES:
+        raise InvalidPlan('Unsupported stop condition type')
+    if kind == 'max_reviews':
+        _exact(value, ('type', 'count'))
+        count = value['count']
+        if type(count) is not int or not 1 <= count <= 1000:
+            raise InvalidPlan('max_reviews requires a bounded positive count')
+        return dict(type=kind, count=count)
+    if kind == 'deadline':
+        _exact(value, ('type', 'until'))
+        return dict(type=kind, until=_time(value['until']).isoformat())
+    _exact(value, ('type', 'state'))
+    if value['state'] not in ('completed', 'cancelled'):
+        raise InvalidPlan('practice_state requires a terminal practice state')
+    return dict(type=kind, state=value['state'])
+
+
+def stop_condition_met(condition, *, clock, applied_reviews, practice_state):
+    """Valuta una stop condition strutturata; fail-closed su dati incompleti.
+
+    Ritorna True se la responsabilità deve fermarsi. Prosa e condizioni
+    malformate non fermano mai nulla (fail-open verso il lavoro umano, che resta
+    sempre revocabile esplicitamente); solo condizioni valide e superate fermano.
+    """
+    if not isinstance(condition, dict):
+        return False
+    kind = condition.get('type')
+    try:
+        if kind == 'max_reviews':
+            count = condition.get('count')
+            return type(count) is int and type(applied_reviews) is int and applied_reviews >= count
+        if kind == 'deadline':
+            until = _time(condition.get('until'))
+            return clock is not None and clock >= until
+        if kind == 'practice_state':
+            return condition.get('state') == practice_state
+    except InvalidPlan:
+        return False
+    return False
 
 
 def _validate_state(kind, after, before, evidence, operation):
@@ -1034,6 +1102,83 @@ def accept_link(conn, proposal_id, expected_version, caller):
                       revision=proposal['revision'], evidence=proposal['evidence'])
         _record(conn, key, request, f'Collegamento #{proposal_id}: accettato. Nessuna azione esterna eseguita.', result)
         _queue_review(conn, (p['id'], version), 'observation', mid)
+        jobs.assert_current(conn)
+        return result
+
+
+def link_evidence(conn, *, practice_id, expected_version, message_id, evidence,
+                  caller, operation_key):
+    """Trusted owner API: link an EXISTING native message to a practice.
+
+    Unlike runtime-generated proposals (accept_link), this lets the owner bind
+    arbitrary retrieved evidence directly. The evidence must be an exact excerpt
+    of the CURRENT indexed snapshot of the message; the practice version is a
+    CAS token. No delegation, permission or external action is created.
+    Requires knowledge + runtime migrations. Receipt replay is idempotent.
+    """
+    import knowledge
+    import policy
+
+    _caller(caller)
+    _positive(practice_id)
+    _positive(expected_version, 'expected_version')
+    _positive(message_id, 'message_id')
+    _string(evidence, 1000)
+    _operation_key(operation_key)
+    if not operation_key.startswith('secretary-evidence-link:'):
+        raise InvalidPlan('Explicit evidence-link operation key required')
+    request = dict(practice_id=practice_id, expected_version=expected_version,
+                   message_id=message_id, evidence=evidence, owner_id=caller.owner_id)
+    with conn.transaction():
+        conn.execute('SELECT pg_advisory_xact_lock(%s)', (WRITE_LOCK,))
+        jobs.assert_current(conn)
+        previous = _receipt(conn, operation_key, request)
+        if previous:
+            return previous[1]
+        practice = _fetch(conn, TABLES['practice'], practice_id, lock=True)
+        if practice['version'] != expected_version:
+            raise Conflict('Practice changed since the displayed version')
+        if practice['state'] not in ('active', 'waiting', 'blocked'):
+            raise Conflict('Practice is not open')
+        responsibility = None
+        if practice['responsibility_id'] is not None:
+            responsibility = _check_responsibility(conn, practice['responsibility_id'])
+        for mid in {practice['origin_message']} | ({responsibility['origin_message']}
+                                                    if responsibility else set()):
+            _trusted_message(conn, mid)
+            if not policy.can_operate(conn, mid, 'owner_command', owner_required=True):
+                raise Unauthorized('Practice origin no longer authoritative')
+        # The evidence message itself needs live extract permission, never
+        # owner authority: third-party content is data, not a command.
+        if not policy.can_operate(conn, message_id, 'extract'):
+            raise Unauthorized('Evidence source is not live/permitted')
+        native = knowledge._snapshot(conn, message_id)
+        if not native or native['message'].get('historical', False) is not False:
+            raise Conflict('Evidence must be a current live message')
+        channel = native['message']['channel'].split(' ', 1)[0]
+        column = dict(zip(('email', 'telegram', 'whatsapp'), LINK_COLUMNS)).get(channel)
+        if column is None:
+            raise InvalidPlan('Unsupported native evidence channel')
+        entry = conn.execute('''SELECT e.text,r.revision FROM knowledge_entries e
+            JOIN knowledge_runs r ON r.id=e.run_id WHERE e.message_id=%s
+            AND e.source_type='message' AND e.active ORDER BY e.id DESC LIMIT 1
+            FOR SHARE OF e,r''', (message_id,)).fetchone()
+        if not entry or evidence not in entry[0]:
+            raise Conflict('Evidence is not an exact excerpt of the current snapshot')
+        conn.execute(f'''INSERT INTO secretary_links(practice_id,{column},evidence,origin_message)
+            VALUES (%s,%s,%s,%s) ON CONFLICT(practice_id,{column}) DO NOTHING''',
+            (practice_id, message_id, evidence, practice['origin_message']))
+        version = conn.execute('''UPDATE secretary_practices SET version=version+1,updated_at=now()
+            WHERE id=%s AND version=%s RETURNING version''', (practice_id, expected_version)).fetchone()
+        if not version:
+            raise Conflict('Evidence link compare-and-swap failed')
+        _invalidate(conn, 'practice', practice_id, operation_key)
+        result = dict(practice_id=practice_id, practice_version=version[0],
+                      message_id=message_id, evidence=evidence,
+                      receipt=f'Collegamento evidenza alla pratica #{practice_id} registrato. '
+                              'Nessuna azione esterna eseguita.')
+        _record(conn, operation_key, request, result['receipt'], result)
+        _queue_review(conn, (practice_id, version[0]), 'observation', message_id)
         jobs.assert_current(conn)
         return result
 

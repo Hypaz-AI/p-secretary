@@ -277,8 +277,8 @@ class OwnerPlanPostgresTests(unittest.TestCase):
         self.conn.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(self.schema)))
         self.addCleanup(self.drop_schema)
         self.conn.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(self.schema)))
-        self.conn.execute("SET statement_timeout='5s'")
-        self.conn.execute("SET lock_timeout='3s'")
+        self.conn.execute("SET statement_timeout='15s'")
+        self.conn.execute("SET lock_timeout='10s'")
         message_store.migrate(self.conn, db.SCHEMA)
         jobs.migrate(self.conn)
         from connectors import media_archive

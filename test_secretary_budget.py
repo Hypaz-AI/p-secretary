@@ -59,7 +59,8 @@ class BudgetPureTests(unittest.TestCase):
     def test_finite_defaults(self):
         with patch.object(config, 'get', side_effect=lambda key, default: default):
             self.assertEqual(budget._limits(), dict(DAILY_CALLS=200, DAILY_TOKENS=500000,
-                                                   MAX_INFLIGHT=2, MAX_OUTPUT_TOKENS=65536))
+                                                   MAX_INFLIGHT=2, MAX_OUTPUT_TOKENS=65536,
+                                                   DAILY_COST=Decimal(0)))
 
     def test_thread_cap_fails_before_reserve_and_releases_after_settlement_error(self):
         with patch.object(budget, '_inflight', 2), job_context():

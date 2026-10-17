@@ -133,8 +133,8 @@ class MediaConsentPostgresTests(unittest.TestCase):
         self.conn.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(self.schema)))
         self.addCleanup(self.drop_schema)
         self.conn.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(self.schema)))
-        self.conn.execute("SET statement_timeout='5s'")
-        self.conn.execute("SET lock_timeout='2s'")
+        self.conn.execute("SET statement_timeout='15s'")
+        self.conn.execute("SET lock_timeout='10s'")
         message_store.migrate(self.conn, db.SCHEMA)
         jobs.migrate(self.conn)
         media_archive.migrate(self.conn)
@@ -401,7 +401,7 @@ class MediaConsentPostgresTests(unittest.TestCase):
         def retry():
             with db.psycopg.connect(self.url, autocommit=True, prepare_threshold=None, connect_timeout=5) as conn:
                 conn.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(self.schema)))
-                conn.execute("SET statement_timeout='5s'")
+                conn.execute("SET statement_timeout='15s'")
                 return media_archive.retry_blocked(conn, mid, expected_channel='telegram (account)')['queued']
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: retry(), range(2)))

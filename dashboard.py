@@ -151,7 +151,7 @@ def execution_view():
     return dict(available=True, proposals=proposals, limit=24, truncated=len(rows) > 24,
                 accounts=[dict(account_address=item['address'])
                           for item in config.EMAIL_ACCOUNTS[:50] if item.get('address')],
-                subject=gateway.SUBJECT, documents_supported=False,
+                subject=gateway.SUBJECT, documents_supported=True,
                 delivery_verification_supported=False)
 
 
@@ -545,6 +545,56 @@ def register_secretary(app):
             result = _service('secretary_runtime').acknowledge_dashboard(
                 conn, identity, caller=caller, **data)
         return dict(acknowledgement=result, external_execution=False)
+
+    @app.post('/api/secretary/practices/<int:identity>/links')
+    @bounded
+    def link_evidence(identity):
+        """Owner collega un messaggio nativo esistente come evidenza della pratica.
+
+        Il payload richiede la versione della pratica letta, l'ID del messaggio
+        nativo e un estratto ESATTO del suo snapshot indicizzato: nessun testo
+        arbitrario, metadati o permessi dal browser. Nessuna azione esterna.
+        """
+        _positive(identity)
+        if request.args:
+            raise ValueError('Unknown parameter')
+        data = _json_object(('expected_version', 'message_id', 'evidence', 'operation_key'))
+        _positive(data['expected_version'])
+        _positive(data['message_id'])
+        caller = _owner()
+        with db._conn() as conn, conn.transaction():
+            result = _service('secretary').link_evidence(conn, practice_id=identity,
+                expected_version=data['expected_version'], message_id=data['message_id'],
+                evidence=data['evidence'], caller=caller,
+                operation_key=data['operation_key'])
+        return dict(link=result, external_execution=False)
+
+    @app.get('/api/privacy/messages/<int:identity>/export')
+    @bounded
+    def export_message(identity):
+        """Esportazione JSON di tutto ciò che il sistema conserva di un messaggio."""
+        _positive(identity)
+        if request.args:
+            raise ValueError('Unknown parameter')
+        caller = _owner()
+        with db._conn() as conn, conn.transaction():
+            import privacy
+            return privacy.export_message(conn, identity, caller)
+
+    @app.post('/api/privacy/messages/<int:identity>/erase')
+    @bounded
+    def erase_message(identity):
+        """Oblio coordinato: DB atomico + report dei file da rimuovere verificati."""
+        _positive(identity)
+        if request.args:
+            raise ValueError('Unknown parameter')
+        data = _json_object(('operation_key',))
+        caller = _owner()
+        with db._conn() as conn, conn.transaction():
+            import privacy
+            report = privacy.erase_message(conn, identity, caller,
+                                           operation_key=data['operation_key'])
+        return dict(erase=report, files_pending_verification=report['files_to_delete'])
 
     @app.get('/api/secretary/execution')
     @bounded

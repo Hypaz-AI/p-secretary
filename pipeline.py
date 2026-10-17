@@ -4,7 +4,7 @@ import hashlib
 import re
 import uuid
 from urllib.parse import quote
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from zoneinfo import ZoneInfo
 
 import brain
@@ -100,8 +100,16 @@ def analyze(payload):
             return
         db.message_store.analyze(conn, mid, channel, verdict, False, source_id)
         if notify:
-            jobs.enqueue(conn, 'action', f'notify:{mid}', {'type':'notify', 'message_id':mid,
-                'text':format_verdict(channel, sender, subject, verdict)})
+            import quiet_hours
+            notification = {'type':'notify', 'message_id':mid,
+                'text':format_verdict(channel, sender, subject, verdict),
+                'urgent': bool(verdict['urgent']), 'severity': verdict['severity']}
+            inserted = jobs.enqueue(conn, 'action', f'notify:{mid}', notification)
+            if inserted and not quiet_hours.notification_ready(notification, datetime.now(timezone.utc)):
+                # Fascia silenziosa globale: le notifiche ordinarie non urgenti
+                # vengono rinviate all'uscita della fascia, mai scartate.
+                deferred = quiet_hours.defer_until(datetime.now(timezone.utc))
+                conn.execute('UPDATE work_jobs SET available_at=%s WHERE key=%s', (deferred, f'notify:{mid}'))
         if verdict['needs_action'] and verdict['action'].strip():
             deadline = None
             try:
@@ -235,12 +243,14 @@ def _notification_key(payload):
             'notification:' + jobs.event_id(json.dumps(payload, sort_keys=True)))
 
 
-def _calendar_io(payload):
+def _calendar_io(payload, operation='create'):
     """Use ONLY the sealed destination/body, including conflict reconciliation.
 
     The legacy create/delete wrappers resolve mutable configuration internally,
     after our last fence (and again on 409). Do not use them for granted work.
     _api still owns authentication and HTTP, but cannot change this path/body.
+    operation (create/cancel/update) è fornita dal chiamante sigillato, mai
+    dedotta dal payload o dal modello.
     """
     target, event_id = payload['target'], payload['event_id']
     path = '/calendars/' + quote(target['calendar_id'], safe='') + '/events'
@@ -262,6 +272,16 @@ def _calendar_io(payload):
     description = (event.get('notes') or '').strip()
     if description:
         body['description'] = description
+    # update: l'evento esiste già (synced); PATCH con il corpo sigillato.
+    # Il 404/410 qui è un fallimento, mai una ricreazione silenziosa.
+    if operation == 'update':
+        try:
+            result = gcal._api('PATCH', event_path, body=body)
+        except RuntimeError as exc:
+            if str(exc).startswith(('Google Calendar API 404:', 'Google Calendar API 410:')):
+                return False
+            raise
+        return result.get('id') == event_id
     try:
         result = gcal._api('POST', path, body=body)
     except RuntimeError as exc:
@@ -326,15 +346,26 @@ def action(payload):
             row = conn.execute('SELECT event_id,event_data,sync_state,sync_key FROM appointments WHERE id=%s', (payload['id'],)).fetchone()
             origin = payload.get('authority_message_id')
             authorization = payload.get('authorization')
-        if not row or row[2] in ('proposal','synced','cancelled'):
+        if not row or row[2] in ('proposal','cancelled'):
             return
         if not row[0] or not re.fullmatch('[0-9a-f]{64}', row[0]):
             raise jobs.Deferred('Calendar requires a deterministic event ID')
-        operation = 'cancel' if row[2] == 'cancel_pending' else 'create'
+        # cancel_pending=annulla; update SOLO se dichiarato dal job (un evento
+        # già synced che riceve un nuovo grant pending); altrimenti create.
+        # Il grant sigilla l'operazione esatta: mai dedotta dal solo sync_state.
+        if row[2] == 'cancel_pending':
+            operation = 'cancel'
+        elif payload.get('operation') == 'update' and row[2] == 'pending':
+            operation = 'update'
+        else:
+            operation = 'create'
         try:
             effect_payload = policy.calendar_payload(row, operation)
         except ValueError:
             raise jobs.Deferred('Calendar target unavailable') from None
+        # operation viaggia separato dal payload sigillato: il digest resta
+        # quello del payload calendar, l'operazione è letta dal job payload.
+        calendar_operation = operation
         # Deny changed/legacy/expired/native-revoked grants before readiness:
         # readiness resolves credentials, while authorization is entirely local.
         with db._conn() as conn, conn.transaction():
@@ -343,7 +374,8 @@ def action(payload):
                 raise jobs.Deferred('Calendar authorization changed')
         def assert_target():
             try:
-                if policy.calendar_payload(row, operation) == effect_payload:
+                sealed = policy.calendar_payload(row, operation)
+                if all(effect_payload.get(key) == sealed.get(key) for key in sealed):
                     return
             except ValueError:
                 pass
@@ -362,7 +394,7 @@ def action(payload):
             # Re-read local config after DB/lease checks, at the connector edge.
             jobs.assert_current()
             assert_target()
-            return _calendar_io(effect_payload)
+            return _calendar_io(effect_payload, calendar_operation)
         state = effect_payload['state']
         # Receipts belong to this sealed grant, not another destination's
         # identical deterministic event ID (or an unbound pre-v3 receipt).

@@ -12,7 +12,10 @@ truncation retry, consumes a call and a conservative serialized-input-byte +
 max-output reservation. Reservations are never refunded, even on timeout.
 Reported usage above that estimate is charged too; multimodal tokenization and
 provider accounting cannot be predicted exactly. usage() exposes both values.
-Provider cost is recorded when present, NOT a guaranteed/enforced money budget.
+AI_BUDGET_DAILY_COST (optional, provider currency, default 0=disabled) is an
+enforced daily monetary cap: once the SUM of provider-reported costs for the
+UTC day reaches the cap, further Worker AI calls fail closed. Calls whose cost
+is unreported do not count toward the cap; set a provider-side key limit too.
 
 In-flight slots are process-thread locked AND reserved under a global DB lock.
 A crashed process leaves a reserved slot occupied: only an operator who has
@@ -88,6 +91,18 @@ def _limits():
             raise BudgetUnavailable('Invalid AI budget configuration') from None
         values[name] = value
     values['MAX_OUTPUT_TOKENS'] = min(values['MAX_OUTPUT_TOKENS'], MAX_RETRY_TOKENS)
+    # Tetto monetario giornaliero opzionale (AI_BUDGET_DAILY_COST, valuta del
+    # provider). 0 o assente = nessun tetto monetario, restano call/token.
+    # Il costo riportato dal provider è cumulativo e conservativo: una chiamata
+    # che sfora il tetto viene registrata, ma le successive sono bloccate.
+    try:
+        raw_cost = config.get('AI_BUDGET_DAILY_COST', '0')
+        daily_cost = Decimal(raw_cost)
+        if not daily_cost.is_finite() or daily_cost < 0 or daily_cost > Decimal('1e9'):
+            raise ValueError
+    except (InvalidOperation, ValueError, OverflowError):
+        raise BudgetUnavailable('Invalid AI daily cost configuration') from None
+    values['DAILY_COST'] = daily_cost
     return values
 
 
@@ -131,6 +146,11 @@ def _reserve(context, limits, count):
             if (calls >= limits['DAILY_CALLS'] or tokens + count > limits['DAILY_TOKENS']
                     or active >= limits['MAX_INFLIGHT']):
                 raise BudgetExceeded('AI daily or in-flight budget exhausted')
+            if limits['DAILY_COST'] > 0:
+                spent = conn.execute('''SELECT coalesce(sum(provider_cost),0) FROM secretary_ai_usage
+                    WHERE usage_day=%s AND provider_cost IS NOT NULL''', (day,)).fetchone()[0]
+                if Decimal(spent) >= limits['DAILY_COST']:
+                    raise BudgetExceeded('AI daily monetary budget exhausted')
             conn.execute('''INSERT INTO secretary_ai_usage
                 (id,usage_day,job_id,job_token,reserved_tokens,charged_tokens,state)
                 VALUES (%s,%s,%s,%s,%s,%s,'reserved')''',

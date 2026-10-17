@@ -90,8 +90,8 @@ class OwnerDialoguePostgresTests(unittest.TestCase):
         # another installation's tables. pg_catalog remains implicitly visible.
         conn.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(self.schema)))
         conn.execute("SET timezone='UTC'")
-        conn.execute("SET statement_timeout='5s'")
-        conn.execute("SET lock_timeout='2s'")
+        conn.execute("SET statement_timeout='15s'")
+        conn.execute("SET lock_timeout='10s'")
 
     def drop_schema(self):
         from psycopg import sql

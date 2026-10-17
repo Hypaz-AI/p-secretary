@@ -83,18 +83,46 @@ an arbitrary workflow executor or a declaration that the whole plan is complete.
 
 ## Remaining roadmap / unsupported guarantees
 
+Implemented in this iteration (previously listed as remaining):
+
+- [x] `SECRETARY_MODE` (observe/active): observe (default) blocca ogni invio a
+	terzi nel gateway email; active permette gli invii esplicitamente approvati.
+	Valori non riconosciuti ricadono su observe (fail-safe).
+- [x] Quiet hours globali (`QUIET_HOURS_START/END`, ora locale): le notifiche
+	ordinarie non urgenti vengono rinviate all'uscita della fascia; le emergenze
+	(urgent/gravità alta) restano immediate.
+- [x] Tetto monetario giornaliero opzionale (`AI_BUDGET_DAILY_COST`, valuta del
+	provider, giorni UTC): raggiunto il tetto di costi riportati, le chiamate AI
+	dei worker falliscono chiuse. I costi non riportati non contano: mantenere
+	anche un limite di spesa sulla chiave del provider.
+- [x] Collegamento diretto owner di evidenze esistenti a una pratica
+	(`POST /api/secretary/practices/<id>/links`): estratto esatto dello snapshot
+	indicizzato, CAS sulla versione pratica, nessuna delega creata.
+- [x] Stop condition eseguibili strutturate (`max_reviews`, `deadline`,
+	`practice_state`): valutate dopo ogni revisione applicata nella stessa
+	transazione; sospendono la responsabilità e invalidano i permessi pendenti.
+	La prosa resta documentazione, mai esecuzione.
+- [x] Allegati email nell'invio approvato: bytes ricaricati e riverificati
+	(hash + budget) nella transazione dell'attempt; MIME costruito solo da bytes
+	in memoria, mai path/URL dal client o dal job.
+- [x] Aggiornamento eventi Calendar (operazione `update`): PATCH con corpo
+	sigillato su evento già synced; 404/410 è fallimento, mai ricreazione silenziosa.
+- [x] Oblio/esportazione coordinata per messaggio
+	(`GET /api/privacy/messages/<id>/export`, `POST /api/privacy/messages/<id>/erase`):
+	DB atomico (knowledge, analisi, note, evidenza task, link pratiche, nativi)
+	+ report dei file da rimuovere dopo verifica; esportazione JSON read-only.
+
+Still remaining:
+
 - [ ] Arbitrary workflow and dependency execution beyond bounded review/proposals.
 - [ ] Full typed-memory conflict handling and complete model-input provenance for
 	legacy task/memory write plans; existing origin/CAS/applied-evidence checks are
 	partial coverage, not the finished memory/provenance model.
-- [ ] General owner linking of arbitrary existing evidence to a practice from
-	retrieval; accepting a runtime-generated proposal is narrower.
-- [ ] Executable general stop conditions; stored prose is not a rule engine.
-- [ ] Calendar updates, availability planning and ongoing remote drift detection/
-	reconciliation; sealed create/cancel is narrower.
-- [ ] Email attachments, threaded replies/send-thread metadata and verified delivery.
-- [ ] Global observe/active mode, global quiet hours and monetary spending cap.
-- [ ] Coordinated privacy erase/export across DB, derived text, files and backups.
+- [ ] Calendar availability planning and ongoing remote drift detection/
+	reconciliation; sealed create/update/cancel is narrower.
+- [ ] Email threaded replies/send-thread metadata and verified delivery.
+- [ ] Coordinated privacy erase across DB, derived text, files AND backups:
+	the new per-message erase covers DB + file report, not backup retention.
 - [ ] Replace trusted dashboard SQL fallbacks with public policy/secretary APIs.
 - [ ] Full restored-backup drill, production validation and semantic/quality
 	evaluation; reproducible dependency locking and a hard PDF sandbox also remain.

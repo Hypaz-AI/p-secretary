@@ -291,13 +291,13 @@ def _calendar_target(event, operation):
 
 def calendar_payload(row, operation='create'):
     """Exact connector arguments, trusted destination/time and target state."""
-    if operation not in ('create', 'cancel') or not row or not isinstance(row[1], dict):
+    if operation not in ('create', 'cancel', 'update') or not row or not isinstance(row[1], dict):
         raise ValueError('Invalid calendar snapshot')
     if not isinstance(row[0], str) or not re.fullmatch(r'[0-9a-f]{64}', row[0]):
         raise ValueError('Deterministic Calendar ID required')
     return dict(event_id=row[0], event=row[1],
                 state='cancelled' if operation == 'cancel' else 'synced',
-                target=_calendar_target(row[1], operation))
+                target=_calendar_target(row[1], 'create' if operation == 'update' else operation))
 
 
 def calendar_event_hash(conn, appointment_id, *, operation='create'):
@@ -332,7 +332,7 @@ def grant_calendar(conn, appointment_id, expected_event_hash, owner_message_id, 
         if context and (context.kind != 'owner' or context.message_id != owner_message_id):
             return None
         row = _appointment(conn, appointment_id)
-        if not row or operation not in ('create', 'cancel'):
+        if not row or operation not in ('create', 'cancel', 'update'):
             return None
         try:
             payload = calendar_payload(row, operation)
@@ -349,7 +349,7 @@ def grant_calendar(conn, appointment_id, expected_event_hash, owner_message_id, 
         if not explicit:
             # Natural intent cannot be borrowed to approve an unrelated proposal.
             from owner_dialogue import current_intent
-            if (operation != 'create' or not re.fullmatch(
+            if (operation not in ('create', 'update') or not re.fullmatch(
                     rf'owner:{owner_message_id}:event:\d+', row[3] or '')
                     or not current_intent(text, 'calendar')):
                 return None
@@ -357,6 +357,8 @@ def grant_calendar(conn, appointment_id, expected_event_hash, owner_message_id, 
         states = ('proposal', 'local', 'pending')
         if operation == 'cancel':
             states += ('synced', 'cancel_pending')
+        elif operation == 'update':
+            states += ('synced',)  # L'update richiede un evento già sincronizzato.
         if row[2] not in states or (operation == 'create' and row[4]):
             return None
         old = conn.execute('''SELECT token,NOT revoked AND expires_at>clock_timestamp(),
@@ -407,7 +409,14 @@ def _calendar_allowed(conn, mid, digest, token):
         return False
     if not row or (row[3], row[2], row[4]) != (grant[4], grant[5], grant[6]):
         return False
-    operation = 'cancel' if grant[5] == 'cancel_pending' else 'create'
+    # expected_state distingue le operazioni sigillate: cancel_pending=annulla,
+    # pending su un evento già synced=update, pending altrimenti=create.
+    if grant[5] == 'cancel_pending':
+        operation = 'cancel'
+    elif grant[5] == 'pending' and row[2] == 'synced':
+        operation = 'update'
+    else:
+        operation = 'create'
     try:
         payload = calendar_payload(row, operation)
         if grant[7] != payload['target'] or payload_hash(payload) != digest:

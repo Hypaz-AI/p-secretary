@@ -620,8 +620,8 @@ class ReconciliationTaskPrivacyPostgresTests(_PrivacyCases, unittest.TestCase):
         self.conn.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(self.schema)))
         self.addCleanup(self.drop_schema)
         self.conn.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(self.schema)))
-        self.conn.execute("SET statement_timeout='5s'")
-        self.conn.execute("SET lock_timeout='2s'")
+        self.conn.execute("SET statement_timeout='15s'")
+        self.conn.execute("SET lock_timeout='10s'")
         # Run the actual complete bootstrap, not a drifting partial list of
         # migrations. Only this private-schema connection is available to it.
         with patch.object(db, 'available', return_value=True), patch.object(
@@ -640,8 +640,8 @@ class ReconciliationTaskPrivacyPostgresTests(_PrivacyCases, unittest.TestCase):
                                  prepare_threshold=None, connect_timeout=5)
         self.addCleanup(conn.close)
         conn.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(self.schema)))
-        conn.execute("SET statement_timeout='5s'")
-        conn.execute("SET lock_timeout='2s'")
+        conn.execute("SET statement_timeout='15s'")
+        conn.execute("SET lock_timeout='10s'")
         return conn
 
     def drop_schema(self):

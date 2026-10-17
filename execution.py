@@ -130,18 +130,23 @@ def _account(address):
     return account, fingerprint
 
 
-def _documents(conn, practice_id, documents):
-    """Read native attachment occurrences only; no URL/path supplied by clients."""
+def _documents(conn, practice_id, documents, *, load=False):
+    """Read native attachment occurrences only; no URL/path supplied by clients.
+
+    load=True restituisce anche i bytes verificati per l'invio con allegati;
+    load=False esegue solo la verifica hash/budget usata in preparazione.
+    """
     total = 0
+    loaded = []
     for document in documents:
-        row = conn.execute('''SELECT a.path,octet_length(a.data),
+        row = conn.execute('''SELECT a.path,a.filename,a.content_type,octet_length(a.data),
             CASE WHEN octet_length(a.data)<=%s THEN a.data END
             FROM attachments a WHERE a.id=%s AND EXISTS (
                 SELECT 1 FROM secretary_links l WHERE l.practice_id=%s AND l.document_id=a.id)
             FOR SHARE OF a''', (MAX_DOCUMENT_BYTES, document['id'], practice_id)).fetchone()
         if not row:
             raise sec.Conflict('Document missing or not linked to practice')
-        path, size, data = row
+        path, filename, content_type, size, data = row
         if size is not None and (size > MAX_DOCUMENT_BYTES or size > MAX_TOTAL_BYTES - total):
             raise sec.InvalidPlan('Document byte budget exceeded')
         try:
@@ -159,6 +164,10 @@ def _documents(conn, practice_id, documents):
             raise sec.InvalidPlan('Document byte budget exceeded')
         if hashlib.sha256(data).hexdigest() != document['sha256']:
             raise sec.Conflict('Document bytes changed')
+        if load:
+            loaded.append(dict(filename=filename or 'allegato', data=data,
+                               content_type=content_type or 'application/octet-stream'))
+    return loaded
 
 
 def _native(conn, practice, responsibility=None):
@@ -225,7 +234,7 @@ def email_snapshot(conn, approval_id):
     return dict(approval_id=approval_id, expected_version=approval['version'],
         account_address=proposal['account_address'], subject=proposal['subject'],
         payload=approval['payload'], payload_hash=proposal['payload_hash'], state=approval['state'],
-        expires_at=approval['expires_at'], documents_supported=False)
+        expires_at=approval['expires_at'], documents_supported=True)
 
 
 def _validate(conn, approval_id, version, address, payload):
@@ -295,8 +304,10 @@ def dispatch_email(conn, *, approval_id, expected_version, account_address, payl
             return dict(approval_id=approval_id, dispatch_key=operation_key)
         _validate(conn, approval_id, expected_version, account_address, payload)
         _approval_receipt(conn, approval_id, expected_version, payload, caller.owner_id, approval_operation_key)
-        if payload['documents']:
-            raise UnsupportedEmail('Current email connector cannot send approved attachments')
+        import quiet_hours
+        if not quiet_hours.sends_allowed():
+            raise sec.InvalidPlan('SECRETARY_MODE=observe: invii a terzi disabilitati; '
+                                  'imposta SECRETARY_MODE=active per consentire gli invii approvati')
         conn.execute('''INSERT INTO secretary_email_dispatches
             (approval_id,operation_key,request_hash,approval_version,approval_operation_key,owner_id)
             VALUES (%s,%s,%s,%s,%s,%s)''',
@@ -354,8 +365,9 @@ def execute_approved(payload):
                        payload=approved, subject=SUBJECT, approval_operation_key=grant[2], owner_id=grant[3])
         if grant[4] != sec.payload_hash(request):
             raise sec.Conflict('Dispatch seal changed')
-        if approved['documents']:
-            raise UnsupportedEmail('Current email connector cannot send approved attachments')
+        import quiet_hours
+        if not quiet_hours.sends_allowed():
+            raise sec.InvalidPlan('SECRETARY_MODE=observe: invii a terzi disabilitati')
         jobs.assert_current(conn)
         conn.execute('''INSERT INTO secretary_email_attempts(approval_id,job_id,job_token,state)
             VALUES (%s,%s,%s,'attempted')''', (identity, context.job_id, context.token))
@@ -375,7 +387,14 @@ def execute_approved(payload):
         # Recheck lease and the fresh expiry after any validation/commit delay.
         jobs.assert_current()
         _unexpired(approval)
-        outcome = email.send(account, approved['recipient'], SUBJECT, approved['text'])
+        # Gli allegati vengono ricaricati e riverificati (hash + budget) nella
+        # stessa transazione dell'attempt: nessun path/URL dal job payload.
+        with db._conn() as conn, conn.transaction():
+            jobs.assert_current(conn)
+            attachments = _documents(conn, grant[3] and approval['practice_id'],
+                                     approved['documents'], load=True)
+        outcome = email.send_with_attachments(account, approved['recipient'], SUBJECT,
+                                              approved['text'], attachments)
         state = 'accepted' if outcome is True else 'uncertain'
     except Exception:
         _finish(identity, context, 'uncertain')

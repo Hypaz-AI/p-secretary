@@ -85,7 +85,7 @@ class EmailPureTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.object(config, 'EMAIL_ACCOUNTS', [deepcopy(ACCOUNT)]))
         self.conn = MagicMock()
-        self.send = self.enterContext(patch.object(email, 'send', side_effect=AssertionError('No SMTP')))
+        self.send = self.enterContext(patch.object(email, 'send_with_attachments', side_effect=AssertionError('No SMTP')))
         self.enterContext(patch.object(db, '_conn', side_effect=AssertionError('No DB')))
         self.enterContext(patch('urllib.request.urlopen', side_effect=AssertionError('No HTTP')))
 
@@ -152,11 +152,11 @@ class EmailPureTests(unittest.TestCase):
             digest = hashlib.sha256(b'approved bytes').hexdigest()
             with patch.object(config, 'DATA_DIR', root), patch.object(config, 'INVOICE_DIR', root / 'invoices'):
                 for path in (link, hardlink, root / '.env', '/etc/passwd', uploads / '../outside'):
-                    self.conn.execute.return_value.fetchone.return_value = (str(path), None, None)
+                    self.conn.execute.return_value.fetchone.return_value = (str(path), 'file.txt', 'text/plain', None, None)
                     with self.subTest(path=str(path)), self.assertRaises(sec.Conflict):
                         gateway._documents(self.conn, 1, [dict(id=1, sha256=digest)])
                 hardlink.unlink()
-                self.conn.execute.return_value.fetchone.return_value = (str(source), None, None)
+                self.conn.execute.return_value.fetchone.return_value = (str(source), 'file.txt', 'text/plain', None, None)
                 gateway._documents(self.conn, 1, [dict(id=1, sha256=digest)])
                 source.write_bytes(b'changed')
                 with self.assertRaises(sec.Conflict):
@@ -164,10 +164,10 @@ class EmailPureTests(unittest.TestCase):
 
     def test_documents_reject_oversize_db_bytes_and_wrong_hash(self):
         document = dict(id=1, sha256='a' * 64)
-        self.conn.execute.return_value.fetchone.return_value = (None, gateway.MAX_DOCUMENT_BYTES + 1, None)
+        self.conn.execute.return_value.fetchone.return_value = (None, 'file.txt', 'text/plain', gateway.MAX_DOCUMENT_BYTES + 1, None)
         with self.assertRaises(sec.InvalidPlan):
             gateway._documents(self.conn, 1, [document])
-        self.conn.execute.return_value.fetchone.return_value = (None, 3, b'abc')
+        self.conn.execute.return_value.fetchone.return_value = (None, 'file.txt', 'text/plain', 3, b'abc')
         with self.assertRaises(sec.Conflict):
             gateway._documents(self.conn, 1, [document])
         self.send.assert_not_called()
@@ -183,7 +183,10 @@ class EmailWorkerOfflineTests(unittest.TestCase):
         self.enterContext(patch.object(config, 'TELEGRAM_CHAT_ID', '101'))
         self.enterContext(patch('urllib.request.urlopen', side_effect=AssertionError('No HTTP')))
         self.fence = self.enterContext(patch.object(jobs, 'assert_current'))
-        self.send = self.enterContext(patch.object(email, 'send', return_value=True))
+        self.send = self.enterContext(patch.object(email, 'send_with_attachments', return_value=True))
+        # I test del worker email richiedono la modalità active: il default
+        # observe blocca gli invii a terzi per costruzione.
+        self.enterContext(patch.object(config, 'SECRETARY_MODE', 'active'))
         self.payload = dict(approval_id=1, dispatch_key='secretary-email-dispatch:offline')
         self.context = self.enterContext(job_context(payload=self.payload))
         self.approval = dict(payload=deepcopy(PAYLOAD), payload_hash=sec.payload_hash(PAYLOAD),
