@@ -18,7 +18,7 @@ COPY setup_ui.py ./
 COPY task_reconciliation.py ./
 COPY owner_dialogue.py owner_commitments.py ./
 COPY policy.py capabilities.py knowledge.py secretary.py secretary_runtime.py ./
-COPY execution.py ./
+COPY execution.py quiet_hours.py privacy.py ./
 COPY connectors/ ./connectors/
 COPY web/ ./web/
 COPY docker/entrypoint.py ./docker/entrypoint.py
