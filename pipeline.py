@@ -346,13 +346,15 @@ def action(payload):
             row = conn.execute('SELECT event_id,event_data,sync_state,sync_key FROM appointments WHERE id=%s', (payload['id'],)).fetchone()
             origin = payload.get('authority_message_id')
             authorization = payload.get('authorization')
-        if not row or row[2] in ('proposal','cancelled'):
+        if not row or row[2] in ('proposal','synced','cancelled'):
             return
         if not row[0] or not re.fullmatch('[0-9a-f]{64}', row[0]):
             raise jobs.Deferred('Calendar requires a deterministic event ID')
         # cancel_pending=annulla; update SOLO se dichiarato dal job (un evento
-        # già synced che riceve un nuovo grant pending); altrimenti create.
-        # Il grant sigilla l'operazione esatta: mai dedotta dal solo sync_state.
+        # già synced che riceve un nuovo grant pending lo riporta a pending);
+        # altrimenti create. Il grant sigilla l'operazione esatta: mai dedotta
+        # dal solo sync_state. Un evento già synced non è più lavorabile: il
+        # retry dopo il successo resta un no-op silenzioso.
         if row[2] == 'cancel_pending':
             operation = 'cancel'
         elif payload.get('operation') == 'update' and row[2] == 'pending':

@@ -6,7 +6,6 @@ the database name MUST end in _test. Only this test's UUID schema is removed.
 import os
 import unittest
 import uuid
-from urllib.parse import urlsplit
 from unittest.mock import patch
 
 import jobs
@@ -14,11 +13,17 @@ import jobs
 URL = os.environ.get('PI_SECRETARY_TEST_DATABASE_URL','')
 
 
+def _database_name(url):
+    """Accetta sia URI postgresql:// che keyword conninfo (host=/sock dbname=...)."""
+    from psycopg.conninfo import conninfo_to_dict
+    return conninfo_to_dict(url).get('dbname', '')
+
+
 @unittest.skipUnless(URL, 'Dedicated PostgreSQL test URL not supplied')
 class PostgresJobsTests(unittest.TestCase):
     def setUp(self):
         import psycopg
-        if not urlsplit(URL).path.rstrip('/').endswith('_test'):
+        if not _database_name(URL).endswith('_test'):
             self.fail('Refusing database without _test suffix')
         self.schema = 'test_jobs_'+uuid.uuid4().hex
         self.conn = psycopg.connect(URL, autocommit=True, connect_timeout=5)

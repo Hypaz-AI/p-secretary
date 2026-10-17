@@ -47,6 +47,7 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U secretary_test -d secretary_test"
           --health-interval 5s --health-timeout 5s --health-retries 12
+          --volume /tmp/pg-test-sock:/var/run/postgresql
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -57,7 +58,8 @@ jobs:
         env:
           TEST_PORT: ${{ job.services.postgres.ports[5432] }}
         run: |
+          mkdir -p /tmp/pg-test-sock
           env -i PATH="$PATH" HOME="$RUNNER_TEMP" \
             PI_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
-            PI_SECRETARY_TEST_DATABASE_URL="postgresql://secretary_test:disposable-ci-only@127.0.0.1:$TEST_PORT/secretary_test" \
+            PI_SECRETARY_TEST_DATABASE_URL="host=/tmp/pg-test-sock dbname=secretary_test user=secretary_test password=disposable-ci-only" \
             python -m unittest discover -v

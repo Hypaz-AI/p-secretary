@@ -15,6 +15,7 @@ import uuid
 
 import admin_config
 import ai_budget
+import config
 import dashboard
 import execution
 import jobs
@@ -518,6 +519,9 @@ class SecretaryDashboardPostgresTests(unittest.TestCase):
         self.enterContext(patch('urllib.request.urlopen', side_effect=AssertionError('HTTP forbidden')))
         self.enterContext(patch('socket.create_connection', side_effect=AssertionError('Network forbidden')))
         self.enterContext(patch.object(jobs.Worker, 'start', side_effect=AssertionError('Workers forbidden')))
+        # Il dispatch email esplicito richiede la modalità active: il default
+        # observe blocca gli invii a terzi per costruzione.
+        self.enterContext(patch.object(config, 'SECRETARY_MODE', 'active'))
         dashboard.db.init()
         metadata = dict(account='bot:777', chat_id='101', author='101', direction='in',
                         chat_type='private', content_origin='direct_text', is_forwarded=False, message_id=1)
@@ -628,7 +632,9 @@ class SecretaryDashboardPostgresTests(unittest.TestCase):
         from connectors import email as connector
         import jobs
         from test_secretary_execution import job_context
-        with patch.object(connector, 'send', return_value=True) as send:
+        # execute_approved invia con allegati: send_with_attachments è il
+        # confine reale del connector; send() è solo un wrapper legacy.
+        with patch.object(connector, 'send_with_attachments', return_value=True) as send:
             email, data = self.email_proposal()
             identity = email['approval_id']
             self.assertEqual(self.post('/api/secretary/emails', data).json['email'], email)
@@ -653,23 +659,35 @@ class SecretaryDashboardPostgresTests(unittest.TestCase):
             job = jobs.claim(execution.KIND)
             with job_context(job[0], job[1], job[3]):
                 self.assertEqual(execution.execute_approved(job[1])['state'], 'accepted')
-            send.assert_called_once_with(ACCOUNT, PAYLOAD['recipient'], execution.SUBJECT, PAYLOAD['text'])
+            send.assert_called_once_with(ACCOUNT, PAYLOAD['recipient'], execution.SUBJECT, PAYLOAD['text'], [])
             result = self.client.get('/api/secretary/execution')
             self.assertEqual(result.json['proposals'][0]['dispatch_state'], 'accepted')
             self.assertFalse(result.json['proposals'][0]['delivered'])
             self.assertNotIn('PRIVATE', result.get_data(as_text=True))
             self.assertEqual(self.client.get('/api/secretary/budget').json['usage']['calls'], 0)
 
-    def test_real_email_documents_unsupported_and_revoked_never_queue(self):
+    def test_real_email_documents_dispatch_and_revoked_never_queue(self):
         import hashlib
+        from connectors import email as connector
+        from test_secretary_execution import job_context
         self.conn.execute("INSERT INTO attachments(id,message_id,channel,data) VALUES (9,1,'telegram',%s)", (b'document',))
         self.conn.execute('''INSERT INTO secretary_links(practice_id,document_id,evidence,origin_message)
             VALUES (%s,9,'Documento esplicito',1)''', (self.practice,))
         email, _ = self.email_proposal([dict(id=9, sha256=hashlib.sha256(b'document').hexdigest())])
         dispatch = self.approve_email(email)
         path = f"/api/secretary/emails/{email['approval_id']}/dispatch"
-        self.assertEqual(self.post(path, dispatch).status_code, 400)
-        self.assertEqual(self.conn.execute('SELECT count(*) FROM work_jobs').fetchone()[0], 0)
+        # Gli allegati verificati ora vengono inviati col connector reale.
+        with patch.object(connector, 'send_with_attachments', return_value=True) as send:
+            accepted = self.post(path, dispatch)
+            self.assertEqual(accepted.status_code, 200, accepted.json)
+            self.assertEqual(self.conn.execute('SELECT count(*) FROM work_jobs').fetchone()[0], 1)
+            import jobs
+            job = jobs.claim(execution.KIND)
+            with job_context(job[0], job[1], job[3]):
+                self.assertEqual(execution.execute_approved(job[1])['state'], 'accepted')
+            send.assert_called_once_with(ACCOUNT, PAYLOAD['recipient'], execution.SUBJECT,
+                                         PAYLOAD['text'], [dict(filename='allegato', data=b'document',
+                                                               content_type='application/octet-stream')])
         email, _ = self.email_proposal()
         dispatch = self.approve_email(email)
         response = self.post(f"/api/secretary/approvals/{email['approval_id']}",
@@ -677,7 +695,7 @@ class SecretaryDashboardPostgresTests(unittest.TestCase):
                  operation_key='secretary-approval:dashboard:revoke:' + uuid.uuid4().hex))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.post(f"/api/secretary/emails/{email['approval_id']}/dispatch", dispatch).status_code, 409)
-        self.assertEqual(self.conn.execute('SELECT count(*) FROM work_jobs').fetchone()[0], 0)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM work_jobs').fetchone()[0], 1)
 
 
 if __name__ == '__main__':

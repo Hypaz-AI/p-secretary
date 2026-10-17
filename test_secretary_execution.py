@@ -74,6 +74,9 @@ class PostgreSQLFixture(unittest.TestCase):
         self.enterContext(patch('urllib.request.urlopen', side_effect=AssertionError('HTTP forbidden')))
         self.enterContext(patch('socket.create_connection', side_effect=AssertionError('Network forbidden')))
         self.enterContext(patch.object(jobs.Worker, 'start', side_effect=AssertionError('Workers forbidden')))
+        # I test SQL del gateway email richiedono la modalità active: il default
+        # observe blocca gli invii a terzi per costruzione.
+        self.enterContext(patch.object(config, 'SECRETARY_MODE', 'active'))
         db.init()
         self.assertEqual(self.conn.execute('SELECT count(*) FROM data_policies').fetchone()[0], 0)
         # Explicit test consent is needed for prepare(), not for email dispatch.
@@ -373,7 +376,9 @@ class EmailPostgresTests(PostgreSQLFixture):
     def setUp(self):
         super().setUp()
         self.enterContext(patch.object(config, 'EMAIL_ACCOUNTS', [deepcopy(ACCOUNT)]))
-        self.send = self.enterContext(patch.object(email, 'send', return_value=True))
+        # execute_approved invia con allegati: il connector espone
+        # send_with_attachments; send() è solo un wrapper legacy.
+        self.send = self.enterContext(patch.object(email, 'send_with_attachments', return_value=True))
         self.enterContext(patch('smtplib.SMTP', side_effect=AssertionError('No real SMTP')))
         self.owner = sec.DashboardOwner('101', True, True)
 
@@ -508,7 +513,7 @@ class EmailPostgresTests(PostgreSQLFixture):
         identity, args, _, payload, kwargs, job = self.ready()
         pending = self.work_jobs()
 
-        def accepted(account, recipient, subject, body):
+        def accepted(account, recipient, subject, body, attachments):
             from psycopg.pq import TransactionStatus
             self.assertEqual(self.conn.info.transaction_status, TransactionStatus.IDLE)
             with self.fresh_connection() as check:
@@ -623,7 +628,7 @@ class EmailPostgresTests(PostgreSQLFixture):
                 gateway.execute_approved(dict(approval_id=identity + 1, dispatch_key='invented'))
         self.send.assert_not_called()
 
-    def test_documents_verified_but_connector_incapability_explicitly_blocks_dispatch(self):
+    def test_documents_verified_are_dispatched_with_the_email(self):
         identity, arguments, mid = self.propose()
         pending = self.work_jobs()
         data = b'approved document'
@@ -636,14 +641,20 @@ class EmailPostgresTests(PostgreSQLFixture):
                          operation_key='secretary-approval:document:' + uuid.uuid4().hex)
         identity = gateway.request_email(self.conn, **arguments)['approval_id']
         key = self.approve(identity, arguments)
-        with self.assertRaises(gateway.UnsupportedEmail):
-            self.dispatch(identity, arguments, key)
+        payload, kwargs = self.dispatch(identity, arguments, key)
+        job = jobs.claim(gateway.KIND)
+        sent = []
+        self.send.side_effect = lambda account, to, subject, body, attachments: (
+            sent.append(attachments) or True)
+        with job_context(job[0], payload, job[3]):
+            self.assertEqual(gateway.execute_approved(payload)['state'], 'accepted')
+        self.assertEqual(sent, [[dict(filename='estimate.pdf', data=data,
+                                      content_type='application/octet-stream')]])
         self.conn.execute('UPDATE attachments SET data=%s WHERE id=%s', (b'changed', aid))
         with self.assertRaises(sec.Conflict):
             self.dispatch(identity, arguments, key)
-        self.assertEqual(self.work_jobs(), pending)
-        self.assertEqual(self.email_job_count(), 0)
-        self.send.assert_not_called()
+        self.assertEqual(self.email_job_count(), 1)
+        self.chat.assert_not_called()
 
     def test_concurrent_attempts_send_once(self):
         _, _, _, payload, _, job = self.ready()
