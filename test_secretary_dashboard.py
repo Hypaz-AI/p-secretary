@@ -242,12 +242,16 @@ class SecretaryDashboardTests(unittest.TestCase):
         with patch.object(admin_config, '_review_runtime_supported', return_value=True):
             result = self.client.get('/api/secretary/support').json
         statuses = {item['id']: item['supported'] for item in result['features']}
-        self.assertEqual(statuses, dict(secretary_mode=False, quiet_hours=True,
+        self.assertEqual(statuses, dict(secretary_mode=True, quiet_hours=True,
                                       ai_daily_budget=True, output_token_budget=True))
-        for key in admin_config.PLANNED:
-            self.assertTrue(admin_config.readonly(key))
-            self.assertFalse(admin_config.field_metadata(key)['supported'])
+        # SECRETARY_MODE, QUIET_HOURS e AI_BUDGET_DAILY_COST hanno consumer
+        # runtime reali (quiet_hours, execution, ai_budget): modificabili.
+        for key in admin_config.SECRETARY_FIELDS:
+            self.assertFalse(admin_config.readonly(key))
+            self.assertTrue(admin_config.field_metadata(key)['supported'])
             self.assertIn(key, admin_config.schema())
+        self.assertIn('AI_BUDGET_DAILY_COST', admin_config.schema())
+        self.assertFalse(admin_config.readonly('AI_BUDGET_DAILY_COST'))
 
     def test_runtime_snapshot_projects_only_displayable_proposals(self):
         module = SimpleNamespace(snapshot=lambda limit: dict(reviews=[dict(practice_id=1,
@@ -294,6 +298,14 @@ class SecretaryDashboardTests(unittest.TestCase):
         self.assertIn('id="invoice-history"', page)
         self.assertIn("el('invoice-history').open = invoiceActive", script)
         self.assertIn("// secretary document IDs are attachments", script)
+        # Navigazione multi-pagina: pagine esclusive e pulsanti di navigazione.
+        for page_id in ('page-overview', 'page-following', 'page-knowledge', 'page-ai-permissions',
+                        'page-outcomes', 'page-integration-settings', 'page-archive'):
+            self.assertIn(f'id="{page_id}"', page)
+        self.assertIn('data-page="overview"', page)
+        self.assertIn("PAGES = ['overview'", script)
+        self.assertIn('function showPage(name)', script)
+        self.assertIn("location.hash.slice(1)||'overview'", script)
 
     def test_packaging_and_ci_contracts(self):
         root = Path(__file__).parent
@@ -454,10 +466,20 @@ class SecretaryDashboardTests(unittest.TestCase):
         self.assertNotIn('PRIVATE', response.get_data(as_text=True))
 
     def test_budget_config_fields_not_secrets_positive_and_restart_only(self):
-        self.assertEqual(set(admin_config.BUDGET_FIELDS), {key for key in admin_config.schema() if key.startswith('AI_BUDGET_')})
+        self.assertEqual(set(admin_config.BUDGET_FIELDS) | {'AI_BUDGET_DAILY_COST'},
+                         {key for key in admin_config.schema() if key.startswith('AI_BUDGET_')})
         for key in admin_config.BUDGET_FIELDS:
             self.assertFalse(admin_config.secret(key))
-            self.assertEqual(admin_config.field_metadata(key)['type'], 'number')
+            expected_type = 'text' if key == 'AI_BUDGET_DAILY_COST' else 'number'
+            self.assertEqual(admin_config.field_metadata(key)['type'], expected_type)
+            if key == 'AI_BUDGET_DAILY_COST':
+                # Tetto monetario: decimale >= 0, 0 = disattivato.
+                for value in ('-1', 'true', 'abc', 'NaN', 'inf'):
+                    with self.assertRaises(ValueError):
+                        admin_config.validate({key: value}, {})
+                admin_config.validate({key: '0'}, {})
+                admin_config.validate({key: '5.00'}, {})
+                continue
             for value in ('0', '-1', 'true', '1.5', '2147483648', '９'):
                 with self.assertRaises(ValueError):
                     admin_config.validate({key: value}, {})

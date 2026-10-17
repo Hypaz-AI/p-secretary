@@ -42,6 +42,7 @@ class Element {
     this.tagName = tag.toUpperCase();
     this.children = []; this.dataset = {}; this.attributes = {};
     this.hidden = false; this.disabled = false; this.value = ''; this._text = '';
+    this.classList = {toggle() {}, add() {}, remove() {}, contains() {return false;}};
   }
   get textContent() {return this._text + this.children.map(child => child.textContent).join('');}
   set textContent(value) {this._text = String(value); this.children = [];}
@@ -63,6 +64,9 @@ function element(id) {
   if (!elements.has(id)) elements.set(id, new Element());
   return elements.get(id);
 }
+// Minimal page navigation state: the real app uses hash-based pages.
+const navButtons = [];
+let hash = '';
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => {resolve = yes; reject = no;});
@@ -70,7 +74,17 @@ function deferred() {
 }
 const requests = [];
 const context = vm.createContext({
-  document: {getElementById: element, createElement: tag => new Element(tag)},
+  document: {
+    getElementById: element,
+    createElement: tag => new Element(tag),
+    querySelectorAll: selector => {
+      assert.equal(selector, '.nav-link', 'Unexpected document selector');
+      return navButtons;
+    }
+  },
+  location: {get hash() {return hash;}, set hash(value) {hash = String(value);}},
+  history: {replaceState() {}},
+  window: {addEventListener() {}, scrollTo() {}},
   URLSearchParams,
   fetch(path, init) {
     const request = {...deferred(), path, init};

@@ -3,6 +3,27 @@ let csrf = '';
 let sessionGeneration = 0;
 const el = id => document.getElementById(id);
 const node = (tag, text) => { const n = document.createElement(tag); n.textContent = text; return n; };
+// Navigazione multi-pagina: una sola pagina visibile alla volta.
+const PAGES = ['overview', 'following', 'knowledge', 'ai-permissions', 'outcomes', 'integration-settings', 'archive'];
+let currentPage = 'overview';
+function showPage(name) {
+  if (!PAGES.includes(name)) name = 'overview';
+  currentPage = name;
+  PAGES.forEach(page => {
+    const section = el('page-' + page);
+    if (section) section.hidden = page !== name;
+  });
+  document.querySelectorAll('.nav-link').forEach(button => {
+    button.classList.toggle('active', button.dataset.page === name);
+    button.setAttribute('aria-current', button.dataset.page === name ? 'page' : 'false');
+  });
+  if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+  window.scrollTo({top: 0});
+}
+document.querySelectorAll('.nav-link').forEach(button => {
+  button.onclick = () => showPage(button.dataset.page);
+});
+window.addEventListener('hashchange', () => showPage(location.hash.slice(1)));
 // getRandomValues also works on trusted-LAN HTTP; randomUUID requires HTTPS.
 const operationNonce = () => [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, '0')).join('');
 function terminalCommand(title, command) {
@@ -659,7 +680,7 @@ async function refresh() {
     el('zips').replaceChildren();d.zips.forEach(r=>row(el('zips'),`ZIP ${r[0]} · ${r[1]}`,r[2]?'inviato':'non inviato'));
   } catch(e) {el('status').textContent=e.message;}
 }
-el('login').onsubmit=async e=>{e.preventDefault();el('error').textContent='';try{const data=Object.fromEntries(new FormData(e.target));const result=await api('/api/login',data);csrf=result.csrf;e.target.reset();show(true);await refresh();await loadWorkspace();await browseFiles();}catch(err){el('error').textContent=err.message;}};
+el('login').onsubmit=async e=>{e.preventDefault();el('error').textContent='';try{const data=Object.fromEntries(new FormData(e.target));const result=await api('/api/login',data);csrf=result.csrf;e.target.reset();show(true);showPage(location.hash.slice(1)||'overview');await refresh();await loadWorkspace();await browseFiles();}catch(err){el('error').textContent=err.message;}};
 el('logout').onclick=async()=>{await api('/api/logout',{});csrf='';show(false);};
-api('/api/session').then(s=>{csrf=s.csrf;show(true);refresh();loadWorkspace();browseFiles();}).catch(()=>{});
+api('/api/session').then(s=>{csrf=s.csrf;show(true);showPage(location.hash.slice(1)||'overview');refresh();loadWorkspace();browseFiles();}).catch(()=>{});
 setInterval(()=>{if(!el('dashboard').hidden)refresh();},10000);

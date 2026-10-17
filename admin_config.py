@@ -53,12 +53,14 @@ INTERACTIVE = {
     'TELEGRAM_CHAT_ID': 'Autorizzazione proprietario: setup_telegram.py nel terminale; non modificabile dal web.',
 }
 
-# No consumer exists for these GLOBAL controls. Review-only settings below
-# have a separate, narrower runtime contract; do not imply global enforcement.
-PLANNED = {
-    'SECRETARY_MODE': 'Pianificato: observe/active non applicato dal runtime. Non è un interruttore di sicurezza.',
-    'SECRETARY_QUIET_HOURS': 'Pianificato: quiet hours non applicate. DIGEST_TIME e soglia notifiche sono separati.',
-    'SECRETARY_AI_DAILY_BUDGET': 'Pianificato: nessun tetto monetario giornaliero locale. Impostare limiti presso OpenRouter.',
+# SECRETARY_MODE, QUIET_HOURS_START/END and AI_BUDGET_DAILY_COST now have real
+# runtime consumers (quiet_hours.sends_allowed/notification_ready, execution
+# third-party send gate, ai_budget._limits monetary cap) and are therefore
+# editable: the container restart applies them atomically.
+SECRETARY_FIELDS = {
+    'SECRETARY_MODE': 'Modalità operativa: observe = solo proposte e bozze, nessun invio a terzi; active = consente gli invii esplicitamente approvati dal proprietario. Non è un interruttore di sicurezza: policy e approvazioni restano attive.',
+    'QUIET_HOURS_START': 'Ora locale 0–23 di inizio della fascia silenziosa globale; default 22. Le notifiche ordinarie non urgenti vengono rinviate, mai scartate. Inizio=fine disattiva la fascia.',
+    'QUIET_HOURS_END': 'Ora locale 0–23 di fine fascia silenziosa globale; default 8. Le emergenze (urgent o gravità alta) passano sempre subito.',
 }
 REVIEW_FIELDS = {
     'SECRETARY_REVIEW_QUIET_START': 'Ora locale 0–23 di inizio silenzio per le sole notifiche di revisione; default 22.',
@@ -71,6 +73,7 @@ BUDGET_FIELDS = {
     'AI_BUDGET_DAILY_TOKENS': 'Tetto prenotazioni conservative/consumi AI per giorno UTC nei Worker; default 500000. Nessun rimborso delle prenotazioni.',
     'AI_BUDGET_MAX_INFLIGHT': 'Massimo richieste AI simultanee nei Worker; default 2. Slot incerti richiedono riconciliazione operatore.',
     'AI_BUDGET_MAX_OUTPUT_TOKENS': 'Massimo token output per tentativo AI nei Worker (1–65536); default 65536. Non è un limite monetario.',
+    'AI_BUDGET_DAILY_COST': 'Tetto di spesa AI giornaliero opzionale, valuta del provider (es. 5.00); 0 o vuoto = nessun tetto monetario, restano i limiti chiamate/token. Il costo riportato è conservativo: la chiamata che sfora viene registrata, le successive bloccate.',
 }
 
 
@@ -86,13 +89,14 @@ def secretary_support():
     review_supported = _review_runtime_supported()
     budget_supported = _budget_supported()
     return {'features': [
-        dict(id='secretary_mode', supported=False, status='planned', description=PLANNED['SECRETARY_MODE']),
+        dict(id='secretary_mode', supported=True, status='supported',
+             description='SECRETARY_MODE observe/active applicato da execution e quiet_hours: observe mantiene solo proposte/bozze, active consente gli invii esplicitamente approvati.'),
         dict(id='quiet_hours', supported=review_supported,
              status='supported' if review_supported else 'planned',
-             description='Quiet hours solo notifiche di revisione: SECRETARY_REVIEW_QUIET_START/END (22–08). Richiede migrazione/worker runtime; non blocca digest o emergenze.'),
+             description='Quiet hours globali (QUIET_HOURS_START/END, 22–08) rinviano le notifiche ordinarie; revisioni con fascia separata SECRETARY_REVIEW_QUIET_START/END. Le emergenze passano sempre.'),
            dict(id='ai_daily_budget', supported=budget_supported,
                status='supported' if budget_supported else 'planned',
-               description='Tetti reali chiamate/token e concorrenza nei Worker via ai_budget; richiedono ledger/migrazione. Chiamate dirette legacy escluse. Nessun tetto monetario garantito.'),
+            description='Tetti reali chiamate/token e concorrenza nei Worker via ai_budget; tetto monetario opzionale AI_BUDGET_DAILY_COST. Chiamate dirette legacy escluse.'),
         dict(id='output_token_budget', supported=True, status='supported',
              description='Budget output per richiesta e un retry su troncamento; non un limite di spesa.'),
     ]}
@@ -138,11 +142,13 @@ def field_metadata(key):
         'WA_CHROMIUM_PATH': 'Percorso del Chromium di sistema usato dal ponte WhatsApp.',
     }
     result = {'type': 'password' if secret(key) else 'text',
-              'description': PLANNED.get(key, REVIEW_FIELDS.get(key, BUDGET_FIELDS.get(key, descriptions.get(key, ''))))}
-    if key in PLANNED:
-        result.update(supported=False, status='planned')
+              'description': SECRETARY_FIELDS.get(key, REVIEW_FIELDS.get(key, BUDGET_FIELDS.get(key, descriptions.get(key, ''))))}
+    if key in SECRETARY_FIELDS:
+        result.update(supported=True, status='supported')
     if key == 'SECRETARY_MODE':
         result.update(type='select', options=['observe', 'active'])
+    if key in ('QUIET_HOURS_START', 'QUIET_HOURS_END'):
+        result.update(type='number', min=0, max=23, step=1, supported=True)
     if key in REVIEW_FIELDS:
         result.update(type='number', min=0 if key.endswith(('_START', '_END')) else 5 if key.endswith('_MIN_MINUTES') else 1,
                       max=23 if key.endswith(('_START', '_END')) else 10080, step=1,
@@ -151,6 +157,8 @@ def field_metadata(key):
         result.update(type='number', min=1,
                       max=65536 if key == 'AI_BUDGET_MAX_OUTPUT_TOKENS' else 2147483647,
                       step=1, supported=_budget_supported())
+    if key == 'AI_BUDGET_DAILY_COST':
+        result.update(type='text', supported=_budget_supported())
     email = re.fullmatch(r'EMAIL\d+_(.+)', key)
     invoice = re.fullmatch(r'INVOICE_ENTITY\d+_(.+)', key)
     if email:
@@ -201,9 +209,10 @@ def schema():
             'TELEGRAM_USER_DIALOG_LIMIT', 'TELEGRAM_USER_MESSAGE_LIMIT', 'TELEGRAM_USER_RECOVERY_INTERVAL'],
         'Calendar': ['GCAL_ENABLED', 'GCAL_CALENDAR_ID', 'GCAL_EVENT_DURATION', 'GCAL_SERVICE_ACCOUNT_JSON'],
         'Preferenze': ['TIMEZONE', 'LANGUAGE', 'DIGEST_TIME', 'NOTIFY_PRIORITY_THRESHOLD', 'POLL_INTERVAL'],
-        'Segretario · funzionalità pianificate': list(PLANNED),
+        'Segretario · modalità e quiet hours': list(SECRETARY_FIELDS),
         'Segretario · notifiche di revisione': list(REVIEW_FIELDS),
-        'AI · limiti Worker (non monetari)': list(BUDGET_FIELDS),
+        'AI · limiti Worker (non monetari)': [key for key in BUDGET_FIELDS if key != 'AI_BUDGET_DAILY_COST'],
+        'AI · tetto di spesa giornaliero': ['AI_BUDGET_DAILY_COST'],
         'Deployment (sola lettura)': sorted(DEPLOYMENT),
     }
     for i in range(1, 51):
@@ -223,8 +232,6 @@ def secret(key):
 
 
 def readonly(key):
-    if key in PLANNED:
-        return PLANNED[key]
     if key in REVIEW_FIELDS and not _review_runtime_supported():
         return 'Modulo secretary_runtime non installato; impostazione non applicabile.'
     if key in BUDGET_FIELDS and not _budget_supported():
@@ -370,9 +377,21 @@ def verify_calendar(values, raw):
 def validate(changes, values):
     for key, value in changes.items():
         spec = field_metadata(key)
-        if key in BUDGET_FIELDS and (not value.isascii() or not value.isdecimal()
+        if key in BUDGET_FIELDS and key != 'AI_BUDGET_DAILY_COST' and (not value.isascii() or not value.isdecimal()
                                     or not 1 <= int(value) <= spec['max']):
             raise ValueError('Limite AI fuori intervallo')
+        if key == 'AI_BUDGET_DAILY_COST':
+            from decimal import Decimal, InvalidOperation
+            try:
+                daily_cost = Decimal(value)
+            except (InvalidOperation, ValueError):
+                raise ValueError('Tetto di spesa non valido: usare un importo decimale, ad esempio 5.00') from None
+            if not daily_cost.is_finite() or daily_cost < 0 or daily_cost > Decimal('1e9'):
+                raise ValueError('Tetto di spesa fuori intervallo (0 – 1e9); 0 disattiva il tetto monetario')
+        if key in ('QUIET_HOURS_START', 'QUIET_HOURS_END') and (not value.isdecimal() or not 0 <= int(value) <= 23):
+            raise ValueError('Ora quiet hours fuori intervallo 0–23')
+        if key == 'SECRETARY_MODE' and value not in ('observe', 'active'):
+            raise ValueError('Modalità segretario non valida')
         if (spec['type'] == 'select' and value not in spec['options']
             and not (re.fullmatch(r'EMAIL\d+_AUTH', key) and value == '')):
             raise ValueError('Scelta non valida: ' + key)
