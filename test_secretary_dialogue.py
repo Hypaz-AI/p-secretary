@@ -283,7 +283,7 @@ class RetrievalTests(Offline):
         self.search.assert_called_once_with('riparazione', limit=4)
         self.open.assert_called_once_with('entry', 13)
         self.assertEqual(len(result['rounds']), 2)
-        self.assertEqual(result['rounds'][1]['result']['text'], 'source evidence')
+        self.assertEqual(result['rounds'][1]['result']['source']['text'], 'source evidence')
         self.assertTrue(result['untrusted_sources'])
 
     def test_unknown_tool_path_sql_and_unknown_open_id_are_rejected(self):

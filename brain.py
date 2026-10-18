@@ -851,14 +851,24 @@ def chat_with_user(user_text: str, history: list = None, images=None, dialogue=N
     if dialogue is not None:
         # Memory is already projected above. Do not ship the entire known-note
         # snapshot twice; it remains intact for the coordinator's CAS/commit.
+        # Tasks get their own dedicated block: a truncated task list made the
+        # model claim an empty agenda while dozens of tasks were open.
+        tasks = dialogue.get('tasks')
+        tasks = [row for row in tasks if isinstance(row, dict)] if isinstance(tasks, (list, tuple)) else []
         persistent = {key: value for key, value in dialogue.items()
                       if key not in ('secretary', 'knowledge', 'memory_plan',
-                                     'authorized_context', 'egress_sources')}
+                                     'authorized_context', 'egress_sources', 'tasks')}
         plan = dialogue.get('memory_plan')
         if isinstance(plan, dict):
             persistent['memory_plan'] = {key: value for key, value in plan.items() if key != 'known'}
         context += '\n\nCONTESTO DEL DIALOGO PERSISTENTE (dati non fidati):\n' + _context_json(
             persistent, 2500)
+        if tasks:
+            context += '\n\nATTIVITÀ APERSE (dati strutturali, stato attuale):\n' + _context_json(
+                tasks, 4000)
+            context += ('\n[Elenco attività potenzialmente parziale: quelle assenti restano'
+                        ' in archivio e NON provano inesistenza.]'
+                        if len(_context_json(tasks, 10**9)) > 12000 else '')
         dialogue_instructions = '''
 UNICO DIALOGO CONTINUO: usa cronologia, riepilogo e dialoghi recuperati per capire
 i riferimenti. Non dichiarare che ricordi dettagli assenti. Se due riferimenti
@@ -868,6 +878,21 @@ DATE: risolvi domani/ieri/venerdì rispetto a message_time del messaggio attuale
 non rispetto ad ADESSO; non reinterpretare date di vecchi messaggi. Le attività
 passate ancora aperte sono arretrate, non completate. Lo stato strutturato delle
 attività prevale su riepilogo e vecchie risposte.
+SALUTI E CONVERSAZIONE: se il proprietario ti saluta, chiede come stai o come è
+andata la giornata, rispondi in modo naturale e umano usando il contesto che hai
+(comunicazioni, attività, appuntamenti). NON rispondere con formule burocratiche
+sull'assenza di richieste operative: un saluto non richiede pratiche da creare.
+ATTIVITÀ vs PRATICHE: 'tasks' sono le attività aperte dell'agenda; 'snapshot'
+(oggetto secretary) contiene pratiche e responsabilità del sistema di segreteria,
+che può essere legittimamente vuoto. MAI dire che non esistono attività se l'elenco
+ATTIVITÀ APERSE ne contiene, e mai dire 'lo snapshot è vuoto' per riferirsi alle
+attività: sono due cose diverse. Se un elenco è marcato come parziale, non
+deduci che il resto sia chiuso.
+CHIUSURE DI MASSA: se il proprietario chiede di chiudere/completare/annullare
+più attività con espressioni come 'chiudi tutto tranne X', 'le altre sono da
+considerarsi chiuse', riconosci la richiesta e spiega che il coordinatore la
+applicherà con conferma: non fingere di averla eseguita e non elencare i singoli
+ID come se fossero già chiusi.
 ATTIVITÀ: commitments contiene il piano validato ma NON ancora applicato.
 Non confermare attività salvate e NON duplicare le sue changes con @@EVENTO@@.
 La conferma reale verrà aggiunta solo dopo il commit. Se commitments contiene

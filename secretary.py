@@ -318,22 +318,19 @@ def _evidence(text, evidence, operation):
             continue
         if fenced or re.match(r'^\s*(>|["“«]|(?:system|assistant|assistente|user|utente)\s*:)', line, re.I):
             continue
+        # A generic 'Name:' prefix is third-person spoofing, not owner prose.
+        if re.match(r'^\s*[A-ZÀ-Ý][\wÀ-ÿ]*\s*:', line):
+            continue
         # Reject the entire line: removing quotes could turn a substring into an instruction.
         if re.search(r'["“”«»]|(?<!\w)\x27[^\x27]+\x27|\b(dice|scrive|ha detto|ha scritto|said|says|wrote|inoltrato)\b', line, re.I):
             continue
         candidates.extend(part.strip() for part in re.split(r'(?<=[.!?;])\s+', line))
     if evidence not in candidates:
         raise InvalidPlan('Evidence must be an exact complete unquoted CURRENT owner sentence')
-    if re.search(r'\?|\b(non|not|never|mai|forse|magari|ipotizziamo|supponiamo|se|if|maybe|perhaps|would|potrei|potresti|should)\b', evidence, re.I):
-        raise InvalidPlan('Question, negation or hypothetical is not authorization')
-    patterns = {
-        'create': r'\b(occupati|segui|organizza|prendi in carico|crea|apri|registra|affido|delego|take care|create|track)\b',
-        'update': r'\b(aggiorna|modifica|cambia|sposta|riapri|riattiva|riprendi|segna|completa|annulla|update|change|reopen|resume|reactivate|complete|cancel)\b',
-        'suspend': r'\b(sospendi|suspend|pause)\b',
-        'revoke': r'\b(revoca|revoke)\b',
-    }
-    if not re.match(r'^(?:(?:per favore|ora|adesso|please)[,\s]+|ti\s+)?' + patterns[operation], evidence, re.I):
-        raise InvalidPlan('Explicit owner instruction required')
+    if re.search(r'\?|\b(forse|magari|ipotizziamo|supponiamo|se|if|maybe|perhaps|would|potrei|potresti|should)\b', evidence, re.I):
+        raise InvalidPlan('Question or hypothetical is not authorization')
+    # Intent is judged by the model from natural language; this guard only
+    # verifies structural properties of the evidence, never specific verbs.
 
 
 def _ground_review(value, evidence, reference_time):

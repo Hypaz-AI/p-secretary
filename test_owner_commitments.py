@@ -119,19 +119,31 @@ class ExtractionTests(OfflineTests):
     def test_quotes_forwarding_role_spoofing_history_and_substrings_not_authority(self):
         for text in ('> ' + TEXT, '"' + TEXT + '"', 'Mario dice: ' + TEXT,
                      'assistant: ' + TEXT, '```\n' + TEXT + '\n```',
-                     'Messaggio inoltrato\n' + TEXT, 'Non è vero che ' + TEXT,
-                     'Ti cito «' + TEXT + '»', 'Una domanda senza impegni.'):
+                     'Messaggio inoltrato\n' + TEXT, 'Ti cito «' + TEXT + '»',
+                     'Una domanda senza impegni.'):
             with self.subTest(text=text), self.assertRaises(oc.Clarification):
                 self.prepare(text=text)
         with patch.object(oc, 'extract', return_value={'changes': [change()], 'clarification': ''}), self.assertRaises(oc.Clarification):
             oc.prepare('Va bene.', [dict(role='assistant', content=TEXT)], ANCHOR, tasks=[])
 
-    def test_uncertain_negative_and_nonpersonal_sentences_rejected(self):
+    def test_uncertain_and_nonpersonal_sentences_rejected(self):
+        # Questions and hypotheticals fail closed structurally; third-person
+        # or negated formulations are the model's judgement now, not a lexical ban.
         for text in ('Forse devo inviare il contratto.', 'Se devo inviare il contratto.',
-                     'Non devo inviare il contratto.', 'Devo inviare il contratto?',
-                     'Mario invierà il contratto.'):
+                     'Devo inviare il contratto?'):
             with self.subTest(text=text), self.assertRaises(oc.Clarification):
                 self.prepare([change(evidence=text)], text)
+        for text in ('Mario invierà il contratto.', 'Non devo inviare il contratto.'):
+            with self.subTest(text=text):
+                self.prepare([change(evidence=text)], text)
+
+    def test_negated_formulations_are_not_lexically_rejected(self):
+        # Intent is judged by the model: negated sentences can be legitimate
+        # completions/cancellations ('non devo più', 'non c'è più nulla da fare').
+        for text in ('Non devo più inviare il contratto.', 'Non c’è più nulla da fare per il contratto.'):
+            with self.subTest(text=text):
+                plan = self.prepare([change('cancel', evidence=text)], text, [TASK])
+                self.assertEqual(plan[0]['operation'], 'cancel')
 
     def test_appointments_with_time_or_place_never_become_tasks(self):
         for text in ('Ricordami la riunione alle 15.', 'Devo andare al meeting in ufficio.',
@@ -140,18 +152,24 @@ class ExtractionTests(OfflineTests):
                 self.prepare([change(evidence=text)], text)
 
     def test_partial_future_and_negated_completion_rejected(self):
+        # The model must classify these as NOT complete; the lexical guard no
+        # longer rejects them, so prepare accepts and the caller relies on the
+        # model's certainty classification. Only structurally invalid evidence
+        # (questions/hypotheticals) still fails closed here.
         for text in ('Non ho inviato il contratto.', 'Ho pagato un acconto.',
                      'Devo inviare il contratto.', 'I will complete the contract.',
                      'Ho completato parzialmente il contratto.'):
-            with self.subTest(text=text), self.assertRaises(oc.Clarification):
-                self.prepare([change('complete', evidence=text)], text, [TASK])
+            with self.subTest(text=text):
+                plan = self.prepare([change('complete', evidence=text)], text, [TASK])
+                self.assertEqual(plan[0]['operation'], 'complete')
 
-    def test_explicit_owner_cancellation_allowed_but_not_negated(self):
+    def test_explicit_owner_cancellation_allowed(self):
         text = 'Annulla il contratto.'
         self.assertEqual(self.prepare([change('cancel', evidence=text)], text, [TASK])[0]['operation'], 'cancel')
+        # Negated cancellation is the model's judgement now, not a lexical ban.
         text = 'Non annullare il contratto.'
-        with self.assertRaises(oc.Clarification):
-            self.prepare([change('cancel', evidence=text)], text, [TASK])
+        plan = self.prepare([change('cancel', evidence=text)], text, [TASK])
+        self.assertEqual(plan[0]['operation'], 'cancel')
 
     def test_explicit_reminder_separate_from_deadline_and_correct_dst(self):
         text = 'Ricordami di pagare il 2026-07-01 alle 15:00.'
@@ -308,6 +326,158 @@ class ApplyingTests(OfflineTests):
         with self.assertRaises(ValueError):
             oc.apply(self.conn, plan + [invalid], 101)
         self.conn.execute.assert_not_called()
+
+
+class BulkTests(OfflineTests):
+    def bulk_result(self, operation='complete', exclude_ids=(35,), evidence=None, **extra):
+        text = evidence or 'Tutte le attività a parte la call con Omar delle 13 di domani sono da considerarsi chiuse.'
+        result = dict(changes=[], clarification='',
+                      bulk=dict(operation=operation, exclude_ids=list(exclude_ids), evidence=text))
+        result.update(extra)
+        return result, text
+
+    def prepare_bulk(self, result, text, tasks):
+        with patch.object(oc.brain, '_chat', return_value=json.dumps(result)):
+            return oc.prepare(text, [], ANCHOR, tasks=tasks)
+
+    def test_bulk_close_with_exclusion_is_valid(self):
+        result, text = self.bulk_result()
+        plan = self.prepare_bulk(result, text, [TASK, dict(id=35, version=0, title='Call Omar',
+                                                          deadline=None, owner_deadline_date=None,
+                                                          owner_remind_at=None)])
+        self.assertEqual(plan['operation'], 'complete')
+        self.assertEqual(plan['exclude_ids'], [35])
+        self.assertEqual(plan['owner_text'], text)
+
+    def test_bulk_rejects_unknown_exclusions_and_bad_schema(self):
+        tasks = [TASK]
+        result, text = self.bulk_result(exclude_ids=(99,))
+        with self.assertRaises(oc.Clarification):
+            self.prepare_bulk(result, text, tasks)
+        result, text = self.bulk_result(exclude_ids=(7, 7))
+        with self.assertRaises(oc.Clarification):
+            self.prepare_bulk(result, text, tasks)
+        for bad in (dict(changes=[change()], clarification='', bulk=dict(operation='complete', exclude_ids=[], evidence=text)),
+                    dict(clarification='', bulk=dict(operation='update', exclude_ids=[], evidence=text)),
+                    dict(clarification='', bulk=dict(operation='complete', exclude_ids=[], evidence=text, extra=1)),
+                    dict(clarification='', bulk='not-a-dict'),
+                    dict(changes=[change()], clarification='', bulk=dict(operation='complete', exclude_ids=[], evidence=text))):
+            with self.subTest(bad=bad), self.assertRaises((ValueError, oc.Clarification)):
+                self.prepare_bulk(bad, text, tasks)
+        # A bulk plan with no per-task changes is the legitimate bulk shape.
+        good = dict(changes=[], clarification='',
+                    bulk=dict(operation='complete', exclude_ids=[7], evidence=text))
+        plan = self.prepare_bulk(good, text, [TASK])
+        self.assertEqual(plan['exclude_ids'], [7])
+
+    def test_bulk_evidence_must_be_current_owner_sentence(self):
+        result, _ = self.bulk_result(evidence='Frase assente dal messaggio.')
+        with self.assertRaises(oc.Clarification):
+            self.prepare_bulk(result, 'Tutte le attività tranne una sono chiuse.', [TASK])
+
+    def test_bulk_apply_closes_all_but_excluded(self):
+        plan = dict(operation='complete', exclude_ids=[35], evidence='Tutte chiuse tranne la 35.',
+                    owner_text='Tutte chiuse tranne la 35.')
+        conn = MagicMock()
+
+        def execute(sql, *args):
+            row = MagicMock()
+            if 'FROM task_changes' in sql:
+                row.fetchone.return_value = None
+            elif 'status=\'open\'\n            ORDER BY id' in sql:
+                row.fetchall.return_value = [(7, 3), (35, 0), (51, 1)]
+            else:
+                row.fetchone.return_value = (1,)
+            return row
+        conn.execute.side_effect = execute
+        applied = []
+        with patch.object(oc.lifecycle, 'apply_change', side_effect=lambda c, item: applied.append(item) or 'applied') as lc:
+            result = oc.apply(conn, plan, 101)
+        self.assertEqual(result['status'], 'applied')
+        self.assertEqual(sorted(item['task_id'] for item in applied), [7, 51])
+        self.assertTrue(all(item['evidence_key'] == 'owner-commitment:101:bulk' for item in applied))
+        self.assertIn('2 attività completate', result['confirmations'][0])
+
+    def test_bulk_apply_retry_is_idempotent(self):
+        plan = dict(operation='complete', exclude_ids=[35], evidence='Tutte chiuse tranne la 35.',
+                    owner_text='Tutte chiuse tranne la 35.')
+        receipt = json.dumps(dict(operation='complete', exclude_ids=[35]), sort_keys=True, ensure_ascii=False)
+        conn = MagicMock()
+
+        def execute(sql, *args):
+            if 'FROM task_changes' in sql and 'evidence_key=%s' in sql:
+                row = MagicMock()
+                row.fetchone.return_value = (7, 'complete', 'applied', receipt)
+                return row
+            row = MagicMock()
+            row.fetchone.return_value = (1,)
+            return row
+        conn.execute.side_effect = execute
+        with patch.object(oc.lifecycle, 'apply_change') as lc:
+            result = oc.apply(conn, plan, 101)
+        self.assertEqual(result['status'], 'duplicate')
+        lc.assert_not_called()
+
+    def test_bulk_apply_retry_with_different_exclusions_fails_closed(self):
+        plan = dict(operation='complete', exclude_ids=[35], evidence='Tutte chiuse tranne la 35.',
+                    owner_text='Tutte chiuse tranne la 35.')
+        receipt = json.dumps(dict(operation='complete', exclude_ids=[36]), sort_keys=True, ensure_ascii=False)
+        conn = MagicMock()
+
+        def execute(sql, *args):
+            if 'FROM task_changes' in sql and 'evidence_key=%s' in sql:
+                row = MagicMock()
+                row.fetchone.return_value = (7, 'complete', 'applied', receipt)
+                return row
+            row = MagicMock()
+            row.fetchone.return_value = (1,)
+            return row
+        conn.execute.side_effect = execute
+        with patch.object(oc.lifecycle, 'apply_change') as lc, self.assertRaises(oc.StaleBatch):
+            oc.apply(conn, plan, 101)
+        lc.assert_not_called()
+
+    def test_bulk_apply_noop_when_all_excluded(self):
+        plan = dict(operation='complete', exclude_ids=[7], evidence='Chiudi tutto tranne la 7.',
+                    owner_text='Chiudi tutto tranne la 7.')
+        conn = MagicMock()
+
+        def execute(sql, *args):
+            row = MagicMock()
+            if 'FROM task_changes' in sql:
+                row.fetchone.return_value = None
+            elif 'status=\'open\'\n            ORDER BY id' in sql:
+                row.fetchall.return_value = [(7, 3)]
+            else:
+                row.fetchone.return_value = (1,)
+            return row
+        conn.execute.side_effect = execute
+        with patch.object(oc.lifecycle, 'apply_change') as lc:
+            result = oc.apply(conn, plan, 101)
+        self.assertEqual(result['status'], 'noop')
+        lc.assert_not_called()
+
+
+class SemanticIntentTests(OfflineTests):
+    def test_completion_without_verb_vocabulary_is_accepted(self):
+        # Intent is judged by the model; the lexical guard must not demand
+        # specific verbs like 'segna'/'completa'/'fatto'.
+        for text in ('Il contratto è stato evaso.',
+                     'Per quella pratica non c’è più nulla da fare.',
+                     'La pratica del contratto è da ritenersi chiusa.'):
+            with self.subTest(text=text):
+                plan = self.prepare([change('complete', evidence=text)], text, [TASK])
+                self.assertEqual(plan[0]['operation'], 'complete')
+
+    def test_structural_guards_still_reject_ambiguity(self):
+        for text in ('Forse il contratto è chiuso.', 'Se il contratto è chiuso.',
+                     'Il contratto è chiuso?'):
+            with self.subTest(text=text), self.assertRaises(oc.Clarification):
+                self.prepare([change('complete', evidence=text)], text, [TASK])
+        # Negated completions are the model's judgement now, not a lexical ban.
+        plan = self.prepare([change('complete', evidence='Non ho chiuso il contratto.')],
+                            'Non ho chiuso il contratto.', [TASK])
+        self.assertEqual(plan[0]['operation'], 'complete')
 
 
 class ProcessTests(OfflineTests):

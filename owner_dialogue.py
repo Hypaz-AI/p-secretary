@@ -7,6 +7,7 @@ Telegram delivery uses the existing at-least-once outbox, not direct sends.
 import json
 import logging
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -217,14 +218,34 @@ def compact(mid, context, token):
         logger.warning('Owner dialogue compaction deferred', exc_info=True)
 
 
+class DuplicateTurn(Exception):
+    """The owner re-sent the same text while an identical turn is in flight."""
+
+    def __init__(self, original_mid):
+        super().__init__(f'Duplicate of owner message {original_mid}')
+        self.original_mid = original_mid
+
+
 def acquire(mid, text, has_images):
     token = uuid.uuid4().hex
     with db._conn() as conn, conn.transaction():
-        # Do not let a later turn silently overtake a retrying earlier turn.
+        # Do not let a later turn silently overstate a retrying earlier turn.
         if conn.execute("""SELECT 1 FROM work_jobs WHERE kind='owner'
             AND id < (SELECT id FROM work_jobs WHERE key=%s)
             AND status IN ('pending','running') LIMIT 1""", (f'owner:{mid}',)).fetchone():
             raise jobs.Deferred('Earlier owner message still processing')
+        # Coalesce near-duplicate retransmissions: if the owner repeats the same
+        # text while an identical earlier turn is still queued/running, answer
+        # the duplicate with the earlier turn's (eventual) reply instead of
+        # burning a full second AI cycle on the same request.
+        duplicate = conn.execute("""SELECT e.message_id FROM owner_exchanges e
+            JOIN work_jobs j ON j.key='owner:'||e.message_id::text
+            WHERE e.user_text=%s AND e.message_id<>%s
+              AND j.status IN ('pending','running')
+              AND e.message_time > now() - interval '30 minutes'
+            ORDER BY e.message_id LIMIT 1""", (text, mid)).fetchone()
+        if duplicate:
+            raise DuplicateTurn(duplicate[0])
         if not conn.execute("""UPDATE owner_dialogue_state SET token=%s,
             lease_until=now()+interval '12 minutes' WHERE id=1
             AND (token IS NULL OR lease_until<now()) RETURNING id""", (token,)).fetchone():
@@ -800,7 +821,24 @@ def respond(text, mid, images=None):
     import secretary
     from connectors import gcal
     authorize(mid)
-    token, (message_time, plan, previous_reply) = acquire(mid, text, bool(images))
+    try:
+        token, (message_time, plan, previous_reply) = acquire(mid, text, bool(images))
+    except DuplicateTurn as duplicate:
+        # A near-duplicate retransmission: reuse the original turn's reply once
+        # it commits, instead of running a second full AI cycle on the same text.
+        original = duplicate.original_mid
+        with db._conn() as conn:
+            for _ in range(360):  # bounded wait: the original turn holds the lease
+                row = conn.execute('SELECT response FROM owner_exchanges WHERE message_id=%s',
+                                   (original,)).fetchone()
+                if row and row[0] is not None:
+                    with conn.transaction():
+                        conn.execute("""UPDATE owner_exchanges SET response=%s,completed_at=now()
+                            WHERE message_id=%s AND response IS NULL""", (row[0], mid))
+                        _deliver(conn, mid, row[0])
+                    return row[0]
+                time.sleep(5)
+        raise jobs.Deferred('Original duplicate turn not finished')
     try:
         if previous_reply is not None:
             with db._conn() as conn, conn.transaction():
@@ -877,6 +915,8 @@ def respond(text, mid, images=None):
                             commitments=task_info, memory_plan=memory_plan,
                             knowledge=knowledge_context, secretary=secretary_context,
                             authorized_context=authorized_context)
+            # brain.chat_with_user projects tasks in a dedicated untruncated block.
+            dialogue['tasks'] = context['tasks']
             egress_sources.extend(source_manifest(knowledge_context))
             # The preparation snapshot may differ from retrieval's snapshot.
             # Its projected fields also export every actual preparation input.

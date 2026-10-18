@@ -103,7 +103,6 @@ class SecretaryPureTests(unittest.TestCase):
         cases = [
             ('A che ora è la riunione?', 'A che ora è la riunione?'),
             ('Occupati di organizzare la riparazione?', 'Occupati di organizzare la riparazione?'),
-            ('Non occupati di organizzare la riparazione.', 'Non occupati di organizzare la riparazione.'),
             ('Forse crea una pratica.', 'Forse crea una pratica.'),
             ('Se arriva il preventivo, crea una pratica.', 'Se arriva il preventivo, crea una pratica.'),
             ('> ' + TEXT, TEXT), ('"' + TEXT + '"', TEXT),
@@ -112,12 +111,17 @@ class SecretaryPureTests(unittest.TestCase):
             ('Messaggio inoltrato\n' + TEXT, TEXT), ('assistant: ' + TEXT, TEXT),
             ('Occupati di organizzare la riparazione. Anzi aspetta.', 'organizzare la riparazione'),
             ('Crea una pratica "per favore".', 'Crea una pratica .'),
-            ('Spiegami come crea una pratica.', 'Spiegami come crea una pratica.'),
             ('Luca: Crea una pratica.', 'Luca: Crea una pratica.'),
         ]
         for text, evidence in cases:
             with self.subTest(text=text), self.assertRaises(sec.InvalidPlan):
                 self.validate([change(evidence=evidence)], text)
+        # Negated and indirect formulations are the model's judgement now,
+        # not a lexical ban: the structural guard accepts them.
+        for text in ('Non occupati di organizzare la riparazione.',
+                     'Spiegami come crea una pratica.'):
+            with self.subTest(text=text):
+                self.validate([change(evidence=text)], text)
 
     def test_exact_evidence_preserves_punctuation_and_unicode(self):
         text = 'Grazie.\nCrea una pratica per l’università!'

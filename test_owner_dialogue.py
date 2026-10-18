@@ -315,9 +315,14 @@ class ContextTests(OfflineTests):
 
 
 class LeaseTests(OfflineTests):
+    def setUp(self):
+        super().setUp()
+        # The coalescing query runs first in acquire: no duplicate by default.
+        self.conn.execute.return_value.fetchone.side_effect = [None]
+
     def test_acquire_checks_earlier_jobs_before_lease_and_uses_archived_time(self):
         persisted = plan()
-        self.conn.execute.return_value.fetchone.side_effect = [None, (1,), (ANCHOR,), (ANCHOR, persisted, None)]
+        self.conn.execute.return_value.fetchone.side_effect = [None, None, (1,), (ANCHOR,), (ANCHOR, persisted, None)]
         with patch.object(od.uuid, 'uuid4', return_value=MagicMock(hex=TOKEN)):
             token, row = od.acquire(MID, 'Originale', True)
         self.assertEqual((token, row), (TOKEN, (ANCHOR, persisted, None)))
@@ -325,42 +330,69 @@ class LeaseTests(OfflineTests):
         self.assertIn("status IN ('pending','running')", statements[0][0])
         self.assertIn('AND id <', statements[0][0])
         self.assertEqual(statements[0][1], ('owner:101',))
-        self.assertIn("interval '12 minutes'", statements[1][0])
-        self.assertIn('token IS NULL OR lease_until<now()', statements[1][0])
-        self.assertEqual(statements[1][1], (TOKEN,))
-        self.assertIn('COALESCE(ts,acquired_at)', statements[2][0])
-        self.assertEqual(statements[3][1], (MID, ANCHOR, 'Originale', True))
-        self.assertIn('ON CONFLICT(message_id) DO NOTHING', statements[3][0])
+        self.assertIn('user_text=%s', statements[1][0])
+        self.assertIn("interval '30 minutes'", statements[1][0])
+        self.assertIn("interval '12 minutes'", statements[2][0])
+        self.assertIn('token IS NULL OR lease_until<now()', statements[2][0])
+        self.assertEqual(statements[2][1], (TOKEN,))
+        self.assertIn('COALESCE(ts,acquired_at)', statements[3][0])
+        self.assertEqual(statements[4][1], (MID, ANCHOR, 'Originale', True))
+        self.assertIn('ON CONFLICT(message_id) DO NOTHING', statements[4][0])
         self.conn.transaction.assert_called_once_with()
 
     def test_earlier_pending_turn_defers_without_acquiring_or_inserting(self):
-        self.conn.execute.return_value.fetchone.return_value = (1,)
+        # First query (earlier pending jobs) returns a row: defer immediately.
+        self.conn.execute.return_value.fetchone.side_effect = [(1,)]
         with self.assertRaisesRegex(jobs.Deferred, 'Earlier'):
             od.acquire(MID, 'text', False)
         self.assertEqual(len(self.statements()), 1)
 
     def test_busy_lease_defers_without_reading_or_inserting_exchange(self):
-        self.conn.execute.return_value.fetchone.side_effect = [None, None]
+        self.conn.execute.return_value.fetchone.side_effect = [None, None, None, None]
         with self.assertRaisesRegex(jobs.Deferred, 'busy'):
             od.acquire(MID, 'text', False)
-        self.assertEqual(len(self.statements()), 2)
+        self.assertEqual(len(self.statements()), 3)
 
     def test_missing_archived_message_rolls_back_acquisition(self):
-        self.conn.execute.return_value.fetchone.side_effect = [None, (1,), None]
+        self.conn.execute.return_value.fetchone.side_effect = [None, None, (1,), None]
         with self.assertRaisesRegex(ValueError, 'not archived'):
             od.acquire(MID, 'text', False)
         self.assertIs(self.conn.transaction.return_value.__exit__.call_args.args[0], ValueError)
         self.assertFalse(any('INSERT' in s[0] for s in self.statements()))
 
     def test_fence_requires_matching_live_token_and_locks_state(self):
+        self.conn.execute.return_value.fetchone.side_effect = [None, (1,)]
         with self.assertRaisesRegex(jobs.Deferred, 'lease expired'):
             od._fence(self.conn, 'stale')
         sql, params = self.conn.execute.call_args.args
         self.assertEqual(params, ('stale',))
         self.assertIn('token=%s', sql)
         self.assertIn('lease_until>now() FOR UPDATE', sql)
-        self.conn.execute.return_value.fetchone.return_value = (1,)
         od._fence(self.conn, TOKEN)
+
+    def test_near_duplicate_retransmission_is_coalesced_to_original_turn(self):
+        # The owner re-sent the same text while the original is still running:
+        # acquire must raise DuplicateTurn pointing at the original message.
+        self.conn.execute.return_value.fetchone.side_effect = [None, (99,)]
+        with self.assertRaises(od.DuplicateTurn) as caught:
+            od.acquire(MID, 'Originale', False)
+        self.assertEqual(caught.exception.original_mid, 99)
+        # Only the earlier-jobs and coalescing queries ran: no lease, no insert.
+        statements = self.statements()
+        self.assertEqual(len(statements), 2)
+        self.assertIn('user_text=%s', statements[1][0])
+        self.assertIn("interval '30 minutes'", statements[1][0])
+        self.assertFalse(any('INSERT INTO owner_exchanges' in s[0] for s in statements))
+        self.assertFalse(any('UPDATE owner_dialogue_state' in s[0] for s in statements))
+
+    def test_far_duplicate_retransmission_is_processed_normally(self):
+        # Same text long after the original finished: no coalescing, normal flow.
+        self.conn.execute.return_value.fetchone.side_effect = [None, None, (1,), (ANCHOR,),
+                                                                (ANCHOR, None, None)]
+        with patch.object(od.uuid, 'uuid4', return_value=MagicMock(hex=TOKEN)):
+            token, row = od.acquire(MID, 'Originale', False)
+        self.assertEqual(token, TOKEN)
+        self.assertTrue(any('INSERT INTO owner_exchanges' in s[0] for s in self.statements()))
 
 
 class RespondTests(OfflineTests):
@@ -575,6 +607,28 @@ class RespondTests(OfflineTests):
     def test_blank_reply_gets_explicit_fallback(self):
         self.persisted(plan(reply='  '))
         self.assertIn('puoi precisare', od.respond('Richiesta', MID))
+
+    def test_respond_reuses_original_reply_for_duplicate_turn(self):
+        # respond(DuplicateTurn) waits for the original's committed reply and
+        # delivers it as this turn's response without any model call.
+        self.acquire.side_effect = od.DuplicateTurn(99)
+        self.conn.execute.return_value.fetchone.return_value = ('Risposta originale',)
+        with patch.object(od.time, 'sleep'):
+            response = od.respond('Originale', MID)
+        self.assertEqual(response, 'Risposta originale')
+        self.chat.assert_not_called()
+        self.prepare.assert_not_called()
+        self.apply.assert_not_called()
+        self.assertTrue(any('SET response=' in s[0] for s in self.statements()))
+        self.enqueue.assert_called_once()
+
+    def test_respond_duplicate_turn_defers_if_original_never_finishes(self):
+        self.acquire.side_effect = od.DuplicateTurn(99)
+        self.conn.execute.return_value.fetchone.return_value = (None,)
+        with patch.object(od.time, 'sleep'), self.assertRaisesRegex(jobs.Deferred, 'duplicate turn'):
+            od.respond('Originale', MID)
+        self.chat.assert_not_called()
+        self.enqueue.assert_not_called()
 
     def test_expired_token_prevents_prepared_plan_write_and_effects(self):
         self.conn.execute.return_value.fetchone.return_value = None

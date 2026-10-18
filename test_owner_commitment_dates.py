@@ -148,9 +148,14 @@ class DateGroundingTests(unittest.TestCase):
         self.prepare(text, dict(owner_deadline_date='2026-01-03',
                                 owner_remind_at='2026-01-02T15:00:00+01:00'))
 
-    def test_existing_negation_guard_still_rejects_matching_dates(self):
+    def test_negated_sentence_is_not_lexically_rejected(self):
+        # Intent is the model's judgement now: a negated sentence passes the
+        # structural guard (it is still an exact current owner sentence) and
+        # the date grounding still validates the extracted date.
+        plan = self.prepare('Non devo inviare domani.', {'owner_deadline_date': '2026-01-02'})
+        self.assertEqual(plan[0]['changes']['owner_deadline_date'], '2026-01-02')
         with self.assertRaises(oc.Clarification):
-            self.prepare('Non devo inviare domani.', {'owner_deadline_date': '2026-01-02'})
+            self.prepare('Non devo inviare domani.', {'owner_deadline_date': '2099-01-01'})
 
 
 if __name__ == '__main__':
