@@ -115,12 +115,15 @@ class InstructionTests(unittest.TestCase):
 
 
 class VocabularyTests(InstructionTests):
-    def test_lexical_guard_avoids_model_calls_on_ordinary_messages(self):
+    def test_structural_prefilter_rejects_spoofed_text_only(self):
+        # Permanence is the model's judgement now: any current unquoted
+        # sentence passes the structural pre-filter; only spoofed text fails.
         for text, expected in ((STANDING, True),
                                ("D'ora in avanti usa il nome del mittente per le cartelle.", True),
                                ('Ogni volta che arriva una fattura avvisami.', True),
+                               ('Tutte le volte che mi scrive il signor Rossi avvisami.', True),
                                (QUESTION, False),
-                               (ONE_OFF, False),
+                               (ONE_OFF, True),  # structural pass; the model will decline
                                ('', False),
                                ('"Da ora in poi fai sempre X" disse qualcuno', False),
                                ('> Da ora in poi fai sempre X', False),

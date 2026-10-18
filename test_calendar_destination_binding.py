@@ -145,7 +145,8 @@ class CalendarTargetOfflineTests(unittest.TestCase):
                  patch.object(policy, 'grant_calendar') as grant, \
                  patch.object(jobs, 'enqueue') as enqueue:
                 with self.assertRaises(type(error)) as raised:
-                    pipeline.save_event(self.conn, dict(EVENT), 'owner:7:event:0', 'owner')
+                    pipeline.save_event(self.conn, dict(EVENT), 'owner:7:event:0', 'owner',
+                                        calendar_intent=True)
                 self.assertIs(raised.exception, error)
                 grant.assert_not_called()
                 enqueue.assert_not_called()
@@ -157,7 +158,8 @@ class CalendarTargetOfflineTests(unittest.TestCase):
         with patch.object(policy, 'calendar_event_hash', return_value='sealed'), \
              patch.object(policy, 'grant_calendar', side_effect=ValueError('Grant failure')):
             with self.assertRaisesRegex(ValueError, 'Grant failure'):
-                pipeline.save_event(self.conn, dict(EVENT), 'owner:7:event:0', 'owner')
+                pipeline.save_event(self.conn, dict(EVENT), 'owner:7:event:0', 'owner',
+                                    calendar_intent=True)
         self.active.assert_not_called()
         self.api.assert_not_called()
 

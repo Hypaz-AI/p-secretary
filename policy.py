@@ -318,12 +318,18 @@ def _owner_text(conn, mid):
     return row[0]
 
 
-def grant_calendar(conn, appointment_id, expected_event_hash, owner_message_id, *, operation='create'):
+def grant_calendar(conn, appointment_id, expected_event_hash, owner_message_id, *, operation='create',
+                      calendar_intent=None):
     """Seal one current native intent; no caller/model boolean grants authority.
 
     Replaying the same command returns its original token, NEVER renews expiry.
     Cancellation is a separate /annulla ID grant, including task derivatives.
     Denial returns None without promoting the local proposal or queuing I/O.
+    calendar_intent: for natural-language approvals the caller passes the
+    intent flag classified at PREPARATION time (persisted in the dialogue
+    plan, under AI consent). This function NEVER calls a model: no inference
+    inside write transactions or replays. None means explicit /conferma or
+    /annulla, which needs no classification.
     """
     import jobs
     with conn.transaction():
@@ -348,10 +354,11 @@ def grant_calendar(conn, appointment_id, expected_event_hash, owner_message_id, 
         explicit = bool(re.fullmatch(re.escape(command) + r'\s+' + str(appointment_id), text.strip(), re.I))
         if not explicit:
             # Natural intent cannot be borrowed to approve an unrelated proposal.
-            from owner_dialogue import current_intent
+            # The flag comes from the persisted plan (classified in prepare),
+            # never from a model call inside this transaction.
             if (operation not in ('create', 'update') or not re.fullmatch(
                     rf'owner:{owner_message_id}:event:\d+', row[3] or '')
-                    or not current_intent(text, 'calendar')):
+                    or calendar_intent is not True):
                 return None
         expected_state = 'cancel_pending' if operation == 'cancel' else 'pending'
         states = ('proposal', 'local', 'pending')

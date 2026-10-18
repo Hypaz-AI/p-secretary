@@ -129,9 +129,16 @@ class OfflineRuntimeTests(unittest.TestCase):
             pipeline.save_event(self.conn, event, 'message:7:0', 'owner label', False)
             enqueue.assert_not_called()
             grant.assert_not_called()
-            pipeline.save_event(self.conn, event, 'owner:9:event:0', 'dialogo utente')
+            # Natural-language approval passes the persisted intent flag; the
+            # grant itself never calls a model.
+            pipeline.save_event(self.conn, event, 'owner:9:event:0', 'dialogo utente',
+                                calendar_intent=True)
             digest.assert_called_once_with(self.conn, 4)
-            grant.assert_called_once_with(self.conn, 4, 'sealed', 9)
+            grant.assert_called_once_with(self.conn, 4, 'sealed', 9, calendar_intent=True)
+            # Without the classified flag the natural path stays a local proposal.
+            grant.reset_mock()
+            pipeline.save_event(self.conn, event, 'owner:9:event:0', 'dialogo utente')
+            grant.assert_not_called()
 
     def test_attempt_committed_before_http_and_uncertain_not_resent(self):
         trace = []

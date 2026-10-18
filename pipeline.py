@@ -167,11 +167,13 @@ def _event_origin(conn, key):
     return None
 
 
-def save_event(conn, event, key, source, approved=True):
+def save_event(conn, event, key, source, approved=True, calendar_intent=None):
     """Local proposal first; only a payload-bound CURRENT owner grant queues I/O.
 
-    Natural owner adapter: pass approved=True ONLY for its current event plan.
-    /conferma and /annulla must call policy.grant_calendar on the existing row.
+    Natural owner adapter: pass approved=True ONLY for its current event plan,
+    with calendar_intent = the intent flag classified at preparation time and
+    persisted in the dialogue plan. /conferma and /annulla must call
+    policy.grant_calendar on the existing row (explicit commands need no flag).
     Task/calendar origin alone (including a previously approved task) is never
     sufficient to authorize a replacement or cancellation.
     An invalid or unconfigured seal snapshot leaves the proposal local.
@@ -182,12 +184,13 @@ def save_event(conn, event, key, source, approved=True):
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(sync_key) DO UPDATE SET sync_key=excluded.sync_key RETURNING id''',
         (event['title'], event['dt'], event.get('location',''), event.get('notes',''), source,
          key, jobs.event_id(key), 'proposal', json.dumps(event))).fetchone()
-    if approved and origin and re.fullmatch(rf'owner:{origin}:event:\d+', key):
+    if (approved and origin and calendar_intent is True
+            and re.fullmatch(rf'owner:{origin}:event:\d+', key)):
         try:
             expected = policy.calendar_event_hash(conn, row[0])
         except ValueError:
             return row[0]
-        policy.grant_calendar(conn, row[0], expected, origin)
+        policy.grant_calendar(conn, row[0], expected, origin, calendar_intent=calendar_intent)
     return row[0]
 
 

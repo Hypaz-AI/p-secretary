@@ -44,7 +44,8 @@ def context():
 
 def plan(text=TEXT):
     return dict(reply='Risposta informativa', events=[dict(EVENT)], commitments=[],
-                task_error='', current_text=text)
+                task_error='', current_text=text,
+                intent=dict(memory=False, calendar=True, standing_instruction=False))
 
 
 class CalendarAdapterTests(unittest.TestCase):
@@ -72,6 +73,9 @@ class CalendarAdapterTests(unittest.TestCase):
         self.saved = plan()
         self.acquire = self.enterContext(patch.object(od, 'acquire',
             side_effect=lambda *args: ('owner-lease', (ANCHOR, self.saved, None))))
+        # Semantic intent: offline tests script the classifier, never the model.
+        self.classify = self.enterContext(patch.object(brain, 'classify_intent', return_value=dict(
+            memory=False, calendar=True, standing_instruction=False)))
         self.enterContext(patch.object(od, 'load_context', side_effect=lambda *args: context()))
         self.enterContext(patch.object(od, 'compact'))
         self.apply = self.enterContext(patch.object(owner_commitments, 'apply',
@@ -105,7 +109,8 @@ class CalendarAdapterTests(unittest.TestCase):
                 self.save.reset_mock()
                 response = od.respond(TEXT, self.mid)
                 self.save.assert_called_once_with(self.conn, EVENT,
-                    f'owner:{self.mid}:event:0', 'dialogo utente', approved=True)
+                    f'owner:{self.mid}:event:0', 'dialogo utente', approved=True,
+                    calendar_intent=True)
                 self.assertIn(receipt, response)
                 self.assertNotIn(self.saved['reply'], response)
         self.assertFalse(any(c.args[2] == 'calendar_write' for c in self.gate.call_args_list))
@@ -153,15 +158,33 @@ class CalendarAdapterTests(unittest.TestCase):
         self.grant.assert_not_called()
 
     def test_saved_calendar_plan_still_requires_current_unquoted_intent(self):
-        for text in ('Grazie', 'Non creare un appuntamento in agenda.',
-                     'Forse crea un appuntamento in agenda.',
-                     '> Crea un appuntamento in agenda.',
-                     'Assistente: Crea un appuntamento in agenda.',
-                     '```\nCrea un appuntamento in agenda.\n```',
-                     'Messaggio inoltrato\nCrea un appuntamento in agenda.'):
-            with self.subTest(text=text):
-                self.text, self.saved = text, plan(text)
-                self.assertEqual(od.respond(text, self.mid), self.saved['reply'])
+        # NEW semantics: intent is classified ONCE in prepare and persisted in
+        # the plan; a replay never re-classifies. A plan whose persisted intent
+        # flag is false (or absent) never applies its events, whatever the
+        # retry text says. The classifier is not even called on replay.
+        self.classify.side_effect = AssertionError('Replay must not classify')
+        for intent in (dict(memory=False, calendar=False, standing_instruction=False), None):
+            with self.subTest(intent=intent):
+                self.saved = plan()
+                if intent is None:
+                    self.saved.pop('intent')
+                else:
+                    self.saved['intent'] = intent
+                self.assertEqual(od.respond('Any retry text', self.mid), self.saved['reply'])
+                self.save.assert_not_called()
+        # A plan persisted with a genuine calendar intent applies on replay:
+        # the persisted flag IS the proof; no model call happens.
+        self.saved = plan()
+        response = od.respond('Any retry text', self.mid)
+        self.save.assert_called_once()
+        self.assertIn('salvato', response)
+
+    def test_saved_plan_without_intent_flags_never_applies_events(self):
+        # Legacy plans persisted before the semantic intent migration carry no
+        # 'intent' flags: they must never authorize calendar effects on replay.
+        self.text, self.saved = TEXT, dict(plan(), intent=None)
+        self.saved.pop('intent')
+        self.assertEqual(od.respond(TEXT, self.mid), self.saved['reply'])
         self.save.assert_not_called()
 
     def test_saved_plan_native_text_or_provenance_mismatch_blocks_calendar(self):

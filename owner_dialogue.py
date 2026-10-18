@@ -853,6 +853,13 @@ def respond(text, mid, images=None):
             authorize(mid, ai=True, media=has_media)
             with db._conn() as conn:
                 trusted_text = _current_text(conn, mid, text)
+            # ONE semantic classification per message, under explicit AI consent.
+            # The flags are persisted in the plan: the effects transaction and
+            # every replay read them without any further model call.
+            intent = dict(memory=False, calendar=False, standing_instruction=False)
+            if trusted_text:
+                authorize(mid, ai=True)
+                intent = classify_owner_intent(text)
             knowledge_context, secretary_context = retrieve(text, mid, context['history'])
             secretary_plan, secretary_error = None, ''
             if trusted_text:
@@ -885,7 +892,7 @@ def respond(text, mid, images=None):
             authorized_context, egress_sources = authorized_chat_context()
             memory_plan = dict(changes=[], known=authorized_context['memories'])
             memory_error = ''
-            if trusted_text and current_intent(text, 'memory'):
+            if trusted_text and intent['memory']:
                 authorize(mid, ai=True)
                 assert_egress_sources(egress_sources)
                 try:
@@ -897,11 +904,11 @@ def respond(text, mid, images=None):
             secretary_context = dict(snapshot=secretary_context, plan=secretary_plan,
                                      error=secretary_error, receipts=[])
             # Permanent owner instructions: the boss can teach a new standing
-            # behaviour in natural language. Only the closed vocabulary is
-            # accepted; anything else is ignored, never executed.
+            # behaviour in natural language. The model classifies permanence
+            # semantically; only the closed action vocabulary is enforced.
             import owner_instructions
             instruction_plan, instruction_error = None, ''
-            if trusted_text and owner_instructions.looks_like_instruction(text):
+            if trusted_text and intent['standing_instruction']:
                 authorize(mid, ai=True)
                 try:
                     instruction_plan = owner_instructions.prepare(text, mid)
@@ -940,13 +947,13 @@ def respond(text, mid, images=None):
             problem = secretary_clarification or secretary_error or clarification
             if problem:
                 reply, events = problem, []
-            if (not trusted_text or not current_intent(text, 'calendar')
+            if (not trusted_text or not intent['calendar']
                     or changes or (secretary_plan or {}).get('changes')):
                 events = []
             plan = dict(reply=reply, events=events, commitments=changes, task_error=failure,
                         memory_plan=memory_plan, memory_error=memory_error,
                         secretary_plan=secretary_plan, instruction_plan=instruction_plan,
-                        instruction_error=instruction_error, current_text=text)
+                        instruction_error=instruction_error, intent=intent, current_text=text)
             with db._conn() as conn, conn.transaction():
                 _fence(conn, token)
                 authorize(mid, ai=True, media=has_media, conn=conn)
@@ -1004,7 +1011,7 @@ def respond(text, mid, images=None):
                 response_suffix = plan['instruction_error']
                 confirmations.append(response_suffix)
             memory_plan = plan.get('memory_plan')
-            if (trusted_text and current_intent(source_text, 'memory')
+            if (trusted_text and plan.get('intent', {}).get('memory')
                     and memory_plan and memory_plan.get('changes')):
                 if not policy.can_operate(conn, mid, 'memory_write', owner_required=True):
                     raise PermissionError('Owner memory permission required')
@@ -1017,7 +1024,8 @@ def respond(text, mid, images=None):
                 except ValueError:
                     confirmations.append('La memoria è cambiata nel frattempo: puoi confermare nuovamente la nota?')
             import pipeline
-            events = plan['events'] if trusted_text and current_intent(source_text, 'calendar') else []
+            events = plan['events'] if (trusted_text
+                    and plan.get('intent', {}).get('calendar')) else []
             for index, event in enumerate(events):
                 try:
                     event = gcal.validate_event(event)
@@ -1026,8 +1034,11 @@ def respond(text, mid, images=None):
                     continue
                 # The adapter requests one sealed grant, never blanket Calendar authority.
                 # save_event retains the local proposal when native policy denies it.
+                # The intent flag was classified in prepare and persisted: no
+                # model call happens inside this effects transaction.
                 identity = pipeline.save_event(conn, event, f'owner:{mid}:event:{index}',
-                                               'dialogo utente', approved=True)
+                                               'dialogo utente', approved=True,
+                                               calendar_intent=True)
                 row = conn.execute('SELECT sync_state FROM appointments WHERE id=%s',
                                    (identity,)).fetchone()
                 status = {
@@ -1060,27 +1071,71 @@ def respond(text, mid, images=None):
             conn.execute('UPDATE owner_dialogue_state SET token=NULL,lease_until=NULL WHERE id=1 AND token=%s', (token,))
 
 
-def current_intent(text, kind):
-    """Only an unquoted CURRENT imperative can request memory/calendar writes."""
-    patterns = dict(memory=r'\b(ricorda|ricordati|memorizza|dimentica|aggiorna la (?:nota|memoria)|salva (?:questa |la )?nota)\b',
-                    calendar=r'\b(fissa|prenota|aggiungi|crea|metti|mettimi|segna|segnami|organizza)\b')
+def _spoof_free_sentences(text):
+    """Structural anti-spoofing only: no verb or keyword patterns.
+
+    Yields current, unquoted, unreported owner sentences. Quoted, fenced,
+    forwarded or role-prefixed text is never authority; questions and
+    hypotheticals are never authorizations. Intent itself is judged by the
+    model (brain.classify_intent), not by this function.
+    """
     fenced = False
-    for line in text.splitlines():
+    for line in (text or '').splitlines():
         if re.match(r'^\s*(```|~~~)', line):
             fenced = not fenced
             continue
         if re.search(r'forwarded message|messaggio inoltrato|messaggio originale', line, re.I):
             break
-        if fenced or re.match(r'^\s*(>|["“«]|(?:system|assistant|user|utente|assistente)\s*:)', line, re.I):
+        if fenced or re.match(r'^\s*(>|["“«]|(?:system|assistant|assistente|user|utente)\s*:)', line, re.I):
             continue
-        if re.search(r'["“”«»]|(?<!\w)\x27[^\x27]+\x27|\b(dice|scrive|detto|scritto|inoltrato)\b', line, re.I):
+        # Reported speech is never authority, but first-person uses like
+        # "mi scrive Rossi" are the owner's own direct sentence: keep them.
+        if re.search(r'["“”«»]|(?<!\w)\x27[^\x27]+\x27', line, re.I):
+            continue
+        if re.search(r'\b(?:dice|detto|scritto|inoltrato)\b|\bscrive\s*:|\bmi\s+scrive\b', line, re.I) and \
+                not re.search(r'\bmi\s+scrive\b', line, re.I):
             continue
         for sentence in re.split(r'(?<=[.!?;])\s+', line):
-            if (not re.search(r'\?|\b(non|not|mai|forse|se|ipotizziamo|potrei|potresti)\b', sentence, re.I)
-                    and re.search(patterns[kind], sentence, re.I)):
-                if kind != 'calendar' or re.search(r'\b(appuntamento|evento|agenda|calendario|riunione|incontro|visita|cena|dentista)\b', sentence, re.I):
-                    return True
-    return False
+            if not re.search(r'\?|\b(forse|magari|se|ipotizziamo|supponiamo|potrei|potresti|dovrei|should|maybe|perhaps|would)\b', sentence, re.I):
+                yield sentence.strip()
+
+
+_INTENT_CACHE = {}
+
+
+def classify_owner_intent(text):
+    """One semantic classification per message, cached in-process.
+
+    Structural anti-spoofing first: quoted/forwarded/role-prefixed text and
+    questions/hypotheticals never reach the model. The model then judges
+    intent from natural language; failures fail closed (no intent, no effect).
+    """
+    import brain
+    if not any(True for _ in _spoof_free_sentences(text)):
+        return dict(memory=False, calendar=False, standing_instruction=False)
+    key = text[:2000]
+    if key not in _INTENT_CACHE:
+        try:
+            _INTENT_CACHE[key] = brain.classify_intent(text)
+        except Exception:
+            logger.warning('Semantic intent classification failed', exc_info=True)
+            _INTENT_CACHE[key] = dict(memory=False, calendar=False, standing_instruction=False)
+        # Bounded cache: a long conversation must not grow it indefinitely.
+        if len(_INTENT_CACHE) > 128:
+            _INTENT_CACHE.clear()
+    return dict(_INTENT_CACHE[key])
+
+
+def current_intent(text, kind):
+    """Semantic intent gate for callers outside the dialogue plan flow.
+
+    The dialogue coordinator persists intent flags in the plan at preparation
+    time and never calls this during the effects transaction or replays.
+    This wrapper remains for adapters (e.g. policy.grant_calendar) that must
+    classify a CURRENT native text; it is still model-backed and must only be
+    called outside write transactions, under explicit AI consent.
+    """
+    return bool(classify_owner_intent(text).get(kind, False))
 
 
 COMMANDS = frozenset(('/start', '/stop', '/appuntamenti', '/note', '/regole', '/fatture',
