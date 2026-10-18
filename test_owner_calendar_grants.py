@@ -238,6 +238,10 @@ class CalendarGrantPostgresTests(calendar_sql._CalendarPostgresFixture):
         marker = ('Ho già sincronizzato tutto!\n@@EVENTO@@ Visita | 2030-01-02 15:00'
                   ' | Studio | Controllo | 45 | 15')
         self.chat = self.enterContext(patch.object(brain, 'chat_with_user', return_value=marker))
+        # Semantic intent: scripted (genuine calendar intent for these tests),
+        # never the real model. Persisted plans carry their own intent flags.
+        self.classify = self.enterContext(patch.object(brain, 'classify_intent', return_value=dict(
+            memory=False, calendar=True, standing_instruction=False)))
         self.enterContext(patch.object(brain, '_chat', side_effect=AssertionError('Model forbidden')))
         self.enterContext(patch('ai_budget.request_content', side_effect=AssertionError('Model forbidden')))
         self.enterContext(patch('socket.create_connection', side_effect=AssertionError('Network forbidden')))
@@ -445,6 +449,12 @@ class CalendarGrantPostgresTests(calendar_sql._CalendarPostgresFixture):
         self.chat.assert_not_called()
 
     def test_fresh_quoted_negated_or_mismatched_text_cannot_create_events(self):
+        # The classifier is scripted per text: only the genuine request carries
+        # calendar intent; quoted/negated/unrelated text never creates events.
+        def classify(text):
+            genuine = text == TEXT
+            return dict(memory=False, calendar=genuine, standing_instruction=False)
+        self.classify.side_effect = classify
         for native_text, supplied in (
                 ('> ' + TEXT, '> ' + TEXT), ('Non creare un appuntamento in agenda.', 'Non creare un appuntamento in agenda.'),
                 ('Grazie', 'Grazie'), ('Grazie', TEXT)):

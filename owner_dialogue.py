@@ -1100,30 +1100,23 @@ def _spoof_free_sentences(text):
                 yield sentence.strip()
 
 
-_INTENT_CACHE = {}
-
-
 def classify_owner_intent(text):
-    """One semantic classification per message, cached in-process.
+    """One semantic classification per message, called once in preparation.
 
     Structural anti-spoofing first: quoted/forwarded/role-prefixed text and
     questions/hypotheticals never reach the model. The model then judges
     intent from natural language; failures fail closed (no intent, no effect).
+    No caching: the dialogue coordinator calls this exactly once per message
+    and persists the flags in the plan; replays never re-classify.
     """
     import brain
     if not any(True for _ in _spoof_free_sentences(text)):
         return dict(memory=False, calendar=False, standing_instruction=False)
-    key = text[:2000]
-    if key not in _INTENT_CACHE:
-        try:
-            _INTENT_CACHE[key] = brain.classify_intent(text)
-        except Exception:
-            logger.warning('Semantic intent classification failed', exc_info=True)
-            _INTENT_CACHE[key] = dict(memory=False, calendar=False, standing_instruction=False)
-        # Bounded cache: a long conversation must not grow it indefinitely.
-        if len(_INTENT_CACHE) > 128:
-            _INTENT_CACHE.clear()
-    return dict(_INTENT_CACHE[key])
+    try:
+        return dict(brain.classify_intent(text))
+    except Exception:
+        logger.warning('Semantic intent classification failed', exc_info=True)
+        return dict(memory=False, calendar=False, standing_instruction=False)
 
 
 def current_intent(text, kind):
@@ -1131,9 +1124,8 @@ def current_intent(text, kind):
 
     The dialogue coordinator persists intent flags in the plan at preparation
     time and never calls this during the effects transaction or replays.
-    This wrapper remains for adapters (e.g. policy.grant_calendar) that must
-    classify a CURRENT native text; it is still model-backed and must only be
-    called outside write transactions, under explicit AI consent.
+    This wrapper remains for adapters that must classify a CURRENT native
+    text outside write transactions, under explicit AI consent.
     """
     return bool(classify_owner_intent(text).get(kind, False))
 

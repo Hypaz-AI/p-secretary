@@ -378,9 +378,13 @@ class HistoryContextDialoguePostgresTests(unittest.TestCase):
         self.assertEqual(prepared['changes'], [])
         self.assertNotIn(CANARY, prepare_model.call_args.args[1])
         requests = iter([dict(tool='search', query='tetto'),
-                         dict(tool='open', source_type='entry', source_id=source['entry_id'])])
+                         dict(tool='open', source_type='entry', source_id=source['entry_id']),
+                         dict(tool='done')])
 
         def infer(system, user, **kwargs):
+            if system == brain.INTENT_PROMPT:
+                # An informational question carries no memory/calendar/standing intent.
+                return '{"memory": false, "calendar": false, "standing_instruction": false}'
             if system == dialogue.RETRIEVAL_PROMPT:
                 return json.dumps(next(requests))
             self.assertIn(system, (secretary.PROMPT, owner_commitments.PROMPT))
@@ -396,7 +400,9 @@ class HistoryContextDialoguePostgresTests(unittest.TestCase):
              patch.object(dialogue, 'compact'):
             dialogue.respond(QUESTION, mid)
         retrieval_calls = [c for c in model.call_args_list if c.args[0] == dialogue.RETRIEVAL_PROMPT]
-        self.assertEqual(len(retrieval_calls), 2)
+        # With consent: search + open + done (3 rounds). Without consent the
+        # open is not in the server allowlist and the loop stops after search.
+        self.assertEqual(len(retrieval_calls), 3 if expected else 2)
         self.assertEqual(CANARY in json.dumps(retrieval_calls, default=str), expected)
         self.assertTrue(any(c.args == ('tetto',) and c.kwargs == {'limit': 4}
                             for c in search.call_args_list))

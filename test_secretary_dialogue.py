@@ -400,6 +400,10 @@ class DialogueTests(Offline):
         self.memories = self.mock('db.personal_memories', return_value=[])
         self.memory_prepare = self.mock('brain.prepare_user_memories', return_value=dict(changes=[], known=[]))
         self.memory_apply = self.mock('db.apply_personal_memories', return_value=1)
+        # Semantic intent classifier: scripted, all false by default; single
+        # tests flip the flag they exercise.
+        self.classify = self.mock('brain.classify_intent', return_value=dict(
+            memory=False, calendar=False, standing_instruction=False))
         self.chat = self.mock('brain.chat_with_user', return_value='Risposta informativa')
         self.enqueue = self.mock('jobs.enqueue')
 
@@ -511,11 +515,20 @@ class DialogueTests(Offline):
         event.assert_not_called()
 
     def test_current_explicit_memory_intent_required_and_policy_checked(self):
+        self.classify.return_value = dict(memory=True, calendar=False, standing_instruction=False)
         self.memory_prepare.return_value = dict(known=[], changes=[dict(operation='add', id=None, text='Nota')])
         od.respond('Ricorda la nota.', MID)
         self.memory_prepare.assert_called_once()
         self.memory_apply.assert_called_once()
         self.assertTrue(any(c.args[2] == 'memory_write' for c in self.gate.call_args_list))
+
+    def test_memory_intent_false_skips_memory_preparation(self):
+        # The classifier says no memory intent: no preparation, no write.
+        self.classify.return_value = dict(memory=False, calendar=False, standing_instruction=False)
+        self.memory_prepare.return_value = dict(known=[], changes=[dict(operation='add', id=None, text='Nota')])
+        od.respond('Ricorda la nota.', MID)
+        self.memory_prepare.assert_not_called()
+        self.memory_apply.assert_not_called()
 
     def test_denied_owner_or_ai_stops_before_preparation(self):
         for denied, error in (('owner_command', PermissionError), ('ai_text', jobs.Deferred)):
@@ -619,6 +632,8 @@ class SQLTests(unittest.TestCase):
             db.init()
         self.model = self.enterContext(patch.object(brain, '_chat', side_effect=AssertionError('Unexpected inference')))
         self.chat = self.enterContext(patch.object(brain, 'chat_with_user', return_value='Risposta informativa'))
+        self.classify = self.enterContext(patch.object(brain, 'classify_intent', return_value=dict(
+            memory=False, calendar=False, standing_instruction=False)))
         self.enterContext(patch.object(od, 'compact'))
         self.retrieve = self.enterContext(patch.object(od, 'retrieve', return_value=(dict(snippets=[]), dict(practices=[]))))
         self.legacy = self.enterContext(patch.object(owner_commitments, 'prepare', return_value=[]))

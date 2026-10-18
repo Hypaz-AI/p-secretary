@@ -140,11 +140,12 @@ def _limits():
     except (InvalidOperation, ValueError, OverflowError):
         raise BudgetUnavailable('Invalid AI daily cost configuration') from None
     values['DAILY_COST'] = daily_cost
-    # Optional per-scope daily call caps; absent/invalid = no scope cap.
+    # Optional per-scope daily call caps; absent/empty = no scope cap, while
+    # malformed values fail closed (a typo must never silently disable a cap).
     for scope, name in SCOPE_CALLS.items():
         try:
             raw = config.get(name, '0')
-            value = int(raw)
+            value = int(raw) if raw else 0
             if not 0 <= value <= 9223372036854775807:
                 raise ValueError
         except (TypeError, ValueError, OverflowError):

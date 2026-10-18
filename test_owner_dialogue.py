@@ -734,7 +734,6 @@ class SemanticIntentTests(OfflineTests):
     def setUp(self):
         super().setUp()
         self.classify = self.mock('brain.classify_intent')
-        od._INTENT_CACHE.clear()
 
     def test_intent_comes_from_the_model_not_verbs(self):
         # Any wording the model classifies as intent passes: no verb lists.
@@ -748,13 +747,14 @@ class SemanticIntentTests(OfflineTests):
         # A kind the model did not flag stays closed.
         self.assertFalse(od.current_intent('Domani call con Omar alle 13.', 'memory'))
 
-    def test_classification_is_cached_per_message(self):
+    def test_classification_is_direct_not_cached(self):
+        # No process-level cache: the coordinator classifies once per message
+        # and persists the flags; every direct call reaches the classifier.
         self.classify.return_value = dict(memory=False, calendar=True, standing_instruction=False)
         text = 'Metti la cena con Marco venerdì.'
         self.assertTrue(od.current_intent(text, 'calendar'))
         self.assertTrue(od.current_intent(text, 'calendar'))
-        self.assertTrue(od.current_intent(text, 'calendar'))
-        self.assertEqual(self.classify.call_count, 1)
+        self.assertEqual(self.classify.call_count, 2)
 
     def test_spoofed_text_never_reaches_the_model(self):
         for text in ('> Crea un appuntamento in agenda.',

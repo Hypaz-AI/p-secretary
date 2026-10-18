@@ -79,6 +79,9 @@ class OwnerDialoguePostgresTests(unittest.TestCase):
         self.prepare = self.enterContext(patch.object(owner_commitments, 'prepare', return_value=[]))
         self.memory_prepare = self.enterContext(patch.object(brain, 'prepare_user_memories', return_value=dict(
             changes=[], known=[], status='nessuna modifica necessaria')))
+        # Semantic intent classifier: scripted per test, never the real model.
+        self.classify = self.enterContext(patch.object(brain, 'classify_intent', return_value=dict(
+            memory=False, calendar=False, standing_instruction=False)))
         self.compact = self.enterContext(patch.object(od, 'compact'))
         self.enterContext(patch.object(brain, '_chat', side_effect=AssertionError('Unexpected model call')))
         self.enterContext(patch('ai_budget.request_content', side_effect=AssertionError('Real model forbidden')))
@@ -308,6 +311,7 @@ class OwnerDialoguePostgresTests(unittest.TestCase):
     def test_note_and_reply_commit_together_and_replay_does_not_duplicate(self):
         text = 'Ricorda la nota: per le fatture usa la cartella mensile.'
         mid = self.archive(text)
+        self.classify.return_value = dict(memory=True, calendar=False, standing_instruction=False)
         self.memory_prepare.return_value = dict(known=[], status='piano preparato', changes=[
             dict(operation='add', id=None, text='Archiviare le fatture nella cartella mensile.')])
         self.fail_outbox('owner-reply:')
@@ -338,7 +342,8 @@ class OwnerDialoguePostgresTests(unittest.TestCase):
         token, _ = od.acquire(mid, text, False)
         self.conn.execute('UPDATE owner_exchanges SET plan=%s WHERE message_id=%s', (
             json.dumps(dict(reply='Piano salvato', commitments=commitments, events=[event],
-                            task_error='', current_text=text)), mid))
+                            task_error='', current_text=text,
+                            intent=dict(memory=False, calendar=True, standing_instruction=False))), mid))
         self.conn.execute('UPDATE owner_dialogue_state SET token=NULL,lease_until=NULL WHERE token=%s', (token,))
         self.fail_outbox('owner-reply:')
         before = self.snapshot()
