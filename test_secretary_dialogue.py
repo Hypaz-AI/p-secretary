@@ -276,9 +276,10 @@ class RetrievalTests(Offline):
 
     def test_two_rounds_typed_search_then_open_no_arbitrary_tools(self):
         self.model.side_effect = [json.dumps(dict(tool='search', query='riparazione')),
-                                 json.dumps(dict(tool='open', source_type='entry', source_id=13))]
+                                 json.dumps(dict(tool='open', source_type='entry', source_id=13)),
+                                 json.dumps(dict(tool='done'))]
         result, _ = od.retrieve(TEXT, MID, [])
-        self.assertEqual(self.model.call_count, 2)
+        self.assertEqual(self.model.call_count, 3)
         self.search.assert_called_once_with('riparazione', limit=4)
         self.open.assert_called_once_with('entry', 13)
         self.assertEqual(len(result['rounds']), 2)

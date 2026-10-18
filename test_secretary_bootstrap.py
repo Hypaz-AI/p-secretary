@@ -25,7 +25,9 @@ import jobs
 import knowledge
 import message_store
 import owner_dialogue
+import owner_instructions
 import policy
+import research
 import secretary
 import secretary_runtime
 import task_reconciliation
@@ -214,7 +216,8 @@ class BootstrapPostgresTests(unittest.TestCase):
         expected = {message_store.VERSION, jobs.VERSION, jobs.RUNTIME_VERSION,
                     media_archive.VERSION, owner_dialogue.VERSION, capabilities.VERSION, policy.VERSION,
                     secretary.VERSION, knowledge.VERSION, secretary_runtime.VERSION,
-                    db.NOTES_VERSION, execution.VERSION, ai_budget.VERSION}
+                    db.NOTES_VERSION, db.TYPED_NOTES_VERSION, research.VERSION,
+                    owner_instructions.VERSION, execution.VERSION, ai_budget.VERSION}
         self.assertEqual(set(row[0] for row in self.conn.execute('SELECT version FROM schema_migrations')), expected)
         self.assertIsNotNone(self.scalar("SELECT to_regclass('knowledge_secretary_practices_fts')"))
         receipts = self.conn.execute('SELECT * FROM schema_migrations ORDER BY version').fetchall()
@@ -282,7 +285,8 @@ class BootstrapPostgresTests(unittest.TestCase):
         job = jobs.claim('analysis')
         context = jobs.ExecutionContext(job[0], job[3], 'analysis', job[1], float('inf'))
         with patch.object(jobs._local, 'execution', context, create=True):
-            identity = ai_budget._reserve(context, ai_budget._limits(), 100)
+            identity = ai_budget._reserve(context, ai_budget._limits(), 100,
+                                          dict(model='m', max_tokens=1, messages=[]))
             ai_budget._settle(identity, context, dict(usage=dict(total_tokens=120)))
         self.assertEqual(self.conn.execute('SELECT state,charged_tokens FROM secretary_ai_usage WHERE id=%s',
                                           (identity,)).fetchone(), ('completed', 120))
@@ -472,7 +476,7 @@ class BootstrapPostgresTests(unittest.TestCase):
         identity = db.add_note('Preferisce il tè', kind='preference', source_message=mid, source_revision='r1')
         self.assertEqual(db.personal_memories(), [dict(id=identity, text='Preferisce il tè')])
         self.assertEqual(db.personal_memories(provenance=True)[0], dict(id=identity, text='Preferisce il tè',
-            kind='preference', source_message=mid, source_revision='r1', version=1))
+            kind='preference', source_message=mid, source_revision='r1', version=1, topic=None))
         changed = db.apply_personal_memories([dict(operation='update', id=identity, text='Preferisce il caffè')],
             {identity}, expected={identity: 'Preferisce il tè'}, source_message=mid, source_revision='r2')
         self.assertEqual(changed, 1)

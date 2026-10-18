@@ -133,7 +133,8 @@ class HistoryContextDialogueTests(unittest.TestCase):
 
     def retrieve_and_export(self, expected, requests=None, reply='Solo dati storici.'):
         requests = requests or [dict(tool='search', query='tetto'),
-                               dict(tool='open', source_type='entry', source_id=11)]
+                               dict(tool='open', source_type='entry', source_id=11),
+                               dict(tool='done')]
         with patch.object(knowledge, 'context', return_value=self.context()), \
              patch.object(knowledge, 'search', return_value=[self.source]) as search, \
              patch.object(knowledge, 'open_source', return_value=self.source) as opened, \

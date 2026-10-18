@@ -25,8 +25,10 @@ import knowledge
 import message_store
 import owner_commitments
 import owner_dialogue as od
+import owner_instructions
 import pipeline
 import policy
+import research
 import secretary
 import secretary_runtime
 from connectors import media_archive
@@ -196,6 +198,7 @@ class OwnerDialoguePostgresTests(unittest.TestCase):
             message_store.VERSION, jobs.VERSION, jobs.RUNTIME_VERSION, media_archive.VERSION,
             od.VERSION, capabilities.VERSION, policy.VERSION, secretary.VERSION,
             knowledge.VERSION, secretary_runtime.VERSION, db.NOTES_VERSION,
+            db.TYPED_NOTES_VERSION, research.VERSION, owner_instructions.VERSION,
             execution.VERSION, ai_budget.VERSION})
         self.assertEqual(self.conn.execute("SELECT count(*) FROM pg_indexes WHERE schemaname=%s AND indexname='owner_exchange_search'",
                                           (self.schema,)).fetchone()[0], 1)
