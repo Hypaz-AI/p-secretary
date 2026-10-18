@@ -202,7 +202,7 @@ class OwnerDialoguePostgresTests(unittest.TestCase):
             od.VERSION, capabilities.VERSION, policy.VERSION, secretary.VERSION,
             knowledge.VERSION, secretary_runtime.VERSION, db.NOTES_VERSION,
             db.TYPED_NOTES_VERSION, research.VERSION, owner_instructions.VERSION,
-            execution.VERSION, ai_budget.VERSION})
+            execution.VERSION, ai_budget.VERSION, ai_budget.RUNTIME_VERSION})
         self.assertEqual(self.conn.execute("SELECT count(*) FROM pg_indexes WHERE schemaname=%s AND indexname='owner_exchange_search'",
                                           (self.schema,)).fetchone()[0], 1)
         self.released()

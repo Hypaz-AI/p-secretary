@@ -217,9 +217,15 @@ class BootstrapPostgresTests(unittest.TestCase):
                     media_archive.VERSION, owner_dialogue.VERSION, capabilities.VERSION, policy.VERSION,
                     secretary.VERSION, knowledge.VERSION, secretary_runtime.VERSION,
                     db.NOTES_VERSION, db.TYPED_NOTES_VERSION, research.VERSION,
-                    owner_instructions.VERSION, execution.VERSION, ai_budget.VERSION}
+                    owner_instructions.VERSION, execution.VERSION, ai_budget.VERSION,
+                    ai_budget.RUNTIME_VERSION}
         self.assertEqual(set(row[0] for row in self.conn.execute('SELECT version FROM schema_migrations')), expected)
         self.assertIsNotNone(self.scalar("SELECT to_regclass('knowledge_secretary_practices_fts')"))
+        # Un ledger creato prima di v1 non ha 'scope': CREATE TABLE IF NOT EXISTS
+        # non la aggiunge, quindi la migrazione runtime deve garantirla sempre.
+        self.assertEqual(self.scalar("""SELECT count(*) FROM information_schema.columns
+            WHERE table_schema=current_schema() AND table_name='secretary_ai_usage'
+              AND column_name='scope'"""), 1)
         receipts = self.conn.execute('SELECT * FROM schema_migrations ORDER BY version').fetchall()
         profile = self.conn.execute('SELECT * FROM secretary_profile').fetchall()
         db.init()
