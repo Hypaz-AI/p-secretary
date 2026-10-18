@@ -21,8 +21,8 @@ dell'I/O; "accepted ≠ delivered"; gli effetti "uncertain" non vengono mai
 rinviati alla cieca.
 
 ## Mappa dei moduli
-- `main.py` — entrypoint: db.init() prima dei worker; 8 worker (analysis, media,
-  reconcile, action, owner, knowledge, secretary_review, secretary_email_execution);
+- `main.py` — entrypoint: db.init() prima dei worker; 9 worker (analysis, media,
+  reconcile, action, owner, knowledge, research, secretary_review, secretary_email_execution);
   `check_telegram` archivia+checkpointer il cursore nella stessa transazione.
 - `jobs.py` — coda durevole `work_jobs`: SKIP LOCKED, lease 15 min, heartbeat 30s,
   deadline 1h, backoff 15s→1h, max 8 tentativi; `Deferred` non consuma tentativi;
@@ -56,11 +56,15 @@ rinviati alla cieca.
   precedenti). `owner_dialogue.retrieve` orchestre due round via registry.
 - `owner_instructions.py` — istruzioni permanenti dell'owner: il capo insegna
   un nuovo comportamento stabile in linguaggio naturale ('da ora in poi…').
-  Vocabolario CHIUSO server-declared (dominio invoice_folder: azioni
-  route_by_sender_vat/route_by_sender_name); guardia lessicale prima del
-  modello; evidenza = frase esatta con marker di permanenza; apply idempotente
-  con ricevuta; revoca via /ferma_istruzione o dashboard; consultate da
-  invoices.save_invoice. Email/inoltrati/storico NON possono crearle.
+  **Condizione = parole dell'owner, valutate SEMANTICAMENTE dal modello per
+  ogni messaggio** (notify_on/notify_owner: 'quando mi scrive il signor De
+  Angelis', 'quando una fattura supera i 1000€'…); **azione = vocabolario
+  CHIUSO server-declared** (il modello giudica QUANDO, il server decide COSA).
+  Guardia lessicale prima del modello; evidenza = frase esatta con marker di
+  permanenza; apply idempotente con ricevuta; revoca via /ferma_istruzione;
+  evaluate_notify chiamata da pipeline.analyze (budget scope 'analysis').
+  Email/inoltrati/storico NON possono crearle; il contenuto dei messaggi
+  non può creare/modificare/revocare condizioni.
 - `research.py` — worker `research` per lavoro lungo fuori dal lease dialogo:
   decomposizione → sub-job (lease proprio ciascuno, tool read-only via
   registry, citazioni reali allowlistate) → sintesi. Findings persistiti con
@@ -115,9 +119,10 @@ worker research (test_research), memoria tipizzata (test_typed_memory),
 istruzioni permanenti owner (test_owner_instructions).
 
 ## Roadmap aperta (da IMPLEMENTATION.md)
-Workflow arbitrari (parzialmente: worker research); conflitti memoria tipizzata
-(risolta: replace-on-conflict per topic); drift Calendar; email threaded;
-erase nei backup retention.
+Workflow arbitrari (parzialmente: worker research); drift Calendar; email threaded;
+erase nei backup retention. Risolte in questa sessione: conflitti memoria tipizzata
+(replace-on-conflict per topic), budget per-scope, retrieval multi-round con
+scratchpad, sub-agent research, istruzioni permanenti owner (semantiche).
 
 ## Vocabolario del progetto
 Pratiche, responsabilità, ricevute, consensi, revisioni, evidenze, manifest

@@ -2,8 +2,9 @@
 
 Il servizio attuale integra un **segretario di revisione limitato**, non un motore
 di workflow arbitrari. `db.init()` applica anche le migrazioni execution/ai_budget
-prima dei flussi; `main()` avvia otto worker persistenti: analysis, media,
-reconcile, action, owner, knowledge, secretary_review e secretary_email_execution.
+prima dei flussi; `main()` avvia nove worker persistenti: analysis, media,
+reconcile, action, owner, knowledge, research, secretary_review e
+secretary_email_execution.
 Indicizzazione, osservazioni, revisioni dovute e backlog sono collegati al runtime.
 La dashboard non migra schemi e non avvia worker alla richiesta. Le sezioni sotto
 conservano le procedure di setup e i dettagli dei percorsi preesistenti, con i

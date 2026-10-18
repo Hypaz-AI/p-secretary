@@ -165,10 +165,16 @@ global quiet hours.
 `AI_BUDGET_DAILY_TOKENS=500000`, `AI_BUDGET_MAX_INFLIGHT=2` and
 `AI_BUDGET_MAX_OUTPUT_TOKENS=65536` inside jobs execution contexts. Every HTTP
 attempt/retry consumes one call and serialized-input-byte + maximum-output +
-overhead token reservation, without refunds, on a UTC day. Higher provider usage
+overhead token reservation, without refunds, on a UTC day. Each ledger row also
+carries a server-derived `scope` (global / dialogue / review / research /
+analysis, from the system prompt); optional per-scope caps
+(`AI_BUDGET_DIALOGUE_DAILY_CALLS`, `AI_BUDGET_REVIEW_DAILY_CALLS`,
+`AI_BUDGET_RESEARCH_DAILY_CALLS`, `AI_BUDGET_ANALYSIS_DAILY_CALLS`) can only
+**narrow**, never exceed, the global cap; 0 or absent disables that scope cap;
+invalid values fail closed. Higher provider usage
 is charged too; this cannot predict exact multimodal tokenization or prices.
 Direct/local legacy calls and periodic digest generation outside a Worker are
-explicitly outside persistent enforcement. Eight job workers do not mean eight
+explicitly outside persistent enforcement. Nine job workers do not mean nine
 simultaneous accounted AI calls: the default shared in-flight cap is two.
 Workers fail closed if DB/ledger/fence is unavailable. Crash-reserved slots are
 not automatically released: reconcile only after establishing no request is live.
@@ -300,10 +306,11 @@ mark-as-read exists only in the private legacy synchronous classifier, not
 ## Remaining operational scope
 
 The integrated boundaries above do not finish the architecture roadmap. Remaining:
-arbitrary workflows/dependency execution; typed-memory conflict handling and full
-legacy task/memory model-input provenance; general existing-evidence practice
-linking from retrieval; executable stop-condition rules; Calendar update,
-availability and remote drift handling; email attachments/threaded sends;
+arbitrary workflows/dependency execution (the read-only research worker is
+partial coverage); full legacy task/memory model-input provenance (typed-memory
+topic conflicts are resolved via replace-on-conflict); general existing-evidence
+practice linking from retrieval; executable stop-condition rules; Calendar
+update, availability and remote drift handling; email attachments/threaded sends;
 global monetary cap/mode/global quiet hours; coordinated privacy erase/export;
 and a full restored-backup production drill plus semantic/quality evaluation.
 Bounded link acceptance, CAS, origin/applied-evidence checks and sealed effects

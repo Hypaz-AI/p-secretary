@@ -34,6 +34,7 @@ class InstructionTests(unittest.TestCase):
     def setUp(self):
         self.instructions = {}
         self.next_id = [1]
+        self.current_body = STANDING
         self.conn = MagicMock(name='connection')
         self.conn.execute.side_effect = self.execute
         self.enterContext(patch.object(db, '_conn')).return_value.__enter__.return_value = self.conn
@@ -61,22 +62,21 @@ class InstructionTests(unittest.TestCase):
             meta = dict(content_origin='direct_text', is_forwarded=False, chat_type='private',
                         account='bot:123', chat_id='7', author='7', direction='in',
                         message_id=42)
-            row = ('telegram', STANDING, 'bot:123', '7', '7', 'in',
+            row = ('telegram', self.current_body, 'bot:123', '7', '7', 'in',
                    json.dumps(['bot', '123', '7', 42]), meta, '2026-10-18T10:00:00+00:00')
             return SimpleNamespace(fetchone=lambda: row)
         if sql.startswith('SELECT id FROM owner_instructions'):
             for note in self.instructions.values():
                 if (note['origin_message'] == params[0] and note['domain'] == params[1]
-                        and note['action'] == params[2]
-                        and json.loads(params[3]) == note['params']):
+                        and note['action'] == params[2] and note['condition'] == params[3]):
                     return SimpleNamespace(fetchone=lambda: (note['id'],))
             return SimpleNamespace(fetchone=lambda: None)
         if sql.startswith('INSERT INTO owner_instructions'):
             identity = self.next_id[0]
             self.next_id[0] += 1
             self.instructions[identity] = dict(id=identity, domain=params[0], action=params[1],
-                                               params=json.loads(params[2]),
-                                               origin_message=params[3], evidence=params[4],
+                                               condition=params[2], params=json.loads(params[3]),
+                                               origin_message=params[4], evidence=params[5],
                                                state='active', version=1)
             return SimpleNamespace(fetchone=lambda: (identity,))
         if sql.startswith('UPDATE owner_instructions'):
@@ -85,23 +85,33 @@ class InstructionTests(unittest.TestCase):
                 note['state'], note['version'] = 'suspended', note['version'] + 1
                 return SimpleNamespace(fetchone=lambda: (note['id'], note['version']))
             return SimpleNamespace(fetchone=lambda: None)
-        if sql.startswith('SELECT id,domain,action,params,state,version,evidence,created_at'):
-            rows = [(n['id'], n['domain'], n['action'], json.dumps(n['params']), n['state'],
-                     n['version'], n['evidence'], '2026-10-18')
+        if sql.startswith('SELECT id,domain,action,condition,params,state,version,evidence,created_at'):
+            rows = [(n['id'], n['domain'], n['action'], n['condition'], json.dumps(n['params']),
+                     n['state'], n['version'], n['evidence'], '2026-10-18')
                     for n in self.instructions.values()]
             return SimpleNamespace(fetchall=lambda: rows)
         if sql.startswith('SELECT action,params FROM owner_instructions'):
             rows = [(n['action'], n['params'])
                     for n in self.instructions.values() if n['state'] == 'active']
             return SimpleNamespace(fetchall=lambda: rows)
+        if sql.startswith('SELECT id,condition FROM owner_instructions'):
+            rows = [(n['id'], n['condition'])
+                    for n in self.instructions.values()
+                    if n['state'] == 'active' and n['domain'] == 'notify_on']
+            return SimpleNamespace(fetchall=lambda: rows)
         raise AssertionError('Unexpected SQL: ' + sql)
 
     def chat(self, *responses):
         return patch.object(brain, '_chat', side_effect=list(responses))
 
-    def model_yes(self, action='route_by_sender_vat', evidence=STANDING):
+    def prepare_with_body(self, text, raw):
+        self.current_body = text
+        with self.chat(raw):
+            return owner_instructions.prepare(text, 42)
+
+    def model_yes(self, action='route_by_sender_vat', evidence=STANDING, condition=''):
         return json.dumps(dict(instruction=dict(domain='invoice_folder', action=action,
-                                                params={}), evidence=evidence))
+                                                condition=condition), evidence=evidence))
 
 
 class VocabularyTests(InstructionTests):
@@ -119,9 +129,12 @@ class VocabularyTests(InstructionTests):
                 self.assertEqual(owner_instructions.looks_like_instruction(text), expected)
 
     def test_only_closed_vocabulary_domains_and_actions(self):
-        self.assertEqual(set(owner_instructions.DOMAINS), {'invoice_folder'})
+        self.assertEqual(set(owner_instructions.DOMAINS),
+                         {'invoice_folder', 'notify_on'})
         self.assertEqual(owner_instructions.DOMAINS['invoice_folder']['actions'],
                          ('route_by_sender_vat', 'route_by_sender_name'))
+        self.assertEqual(owner_instructions.DOMAINS['notify_on']['actions'],
+                         ('notify_owner',))
 
     def test_unknown_domain_action_or_params_rejected_before_sql(self):
         for instruction in (dict(domain='email_send', action='send_all'),
@@ -144,6 +157,11 @@ class VocabularyTests(InstructionTests):
                     owner_instructions.InvalidInstruction):
                 owner_instructions._validate('invoice_folder', 'route_by_sender_vat',
                                              dict(sender_override=bad))
+
+    def test_notify_on_takes_no_structured_params(self):
+        owner_instructions._validate('notify_on', 'notify_owner', {})
+        with self.assertRaises(owner_instructions.InvalidInstruction):
+            owner_instructions._validate('notify_on', 'notify_owner', dict(sender='X'))
 
 
 class PrepareTests(InstructionTests):
@@ -185,8 +203,8 @@ class PrepareTests(InstructionTests):
 
 class ApplyTests(InstructionTests):
     def plan(self, **overrides):
-        result = dict(domain='invoice_folder', action='route_by_sender_vat', params={},
-                      evidence=STANDING, origin_message=42)
+        result = dict(domain='invoice_folder', action='route_by_sender_vat', condition='',
+                      params={}, evidence=STANDING, origin_message=42)
         result.update(overrides)
         return result
 
@@ -252,5 +270,76 @@ class RoutingTests(InstructionTests):
         self.assertIsNone(owner_instructions.invoice_folder('Chiunque'))
 
 
-if __name__ == '__main__':
-    unittest.main()
+class NotifyOnTests(InstructionTests):
+    CONDITION = 'quando mi scrive il signor De Angelis'
+
+    def prepare_notify(self, condition=CONDITION):
+        evidence = (f"Da ora in poi ogni volta che {condition} "
+                    "devi avvisarmi immediatamente.")
+        raw = json.dumps(dict(instruction=dict(domain='notify_on',
+                                               action='notify_owner',
+                                               condition=condition),
+                               evidence=evidence))
+        return self.prepare_with_body(evidence, raw)
+
+    def add_notify(self, identity=1, condition=CONDITION, state='active'):
+        self.instructions[identity] = dict(id=identity, domain='notify_on',
+                                           action='notify_owner', condition=condition,
+                                           params={}, state=state, version=1)
+
+    def test_prepare_classifies_notify_on_with_free_form_condition(self):
+        plan = self.prepare_notify()
+        self.assertEqual(plan['domain'], 'notify_on')
+        self.assertEqual(plan['action'], 'notify_owner')
+        self.assertEqual(plan['condition'], self.CONDITION)
+        self.assertEqual(plan['params'], {})
+
+    def test_prepare_rejects_notify_on_without_condition(self):
+        evidence = "Da ora in poi avvisami sempre immediatamente."
+        raw = json.dumps(dict(instruction=dict(domain='notify_on',
+                                              action='notify_owner', condition=''),
+                               evidence=evidence))
+        with self.assertRaises(owner_instructions.InvalidInstruction):
+            self.prepare_with_body(evidence, raw)
+
+    def test_apply_persists_notify_on_instruction(self):
+        plan = self.prepare_notify()
+        result = owner_instructions.apply(self.conn, plan, 42)
+        self.assertFalse(result['replay'])
+        self.assertEqual(self.instructions[1]['domain'], 'notify_on')
+        self.assertEqual(self.instructions[1]['condition'], self.CONDITION)
+
+    def test_evaluate_uses_semantic_model_judgement(self):
+        self.add_notify()
+        raw = json.dumps(dict(matches=[dict(id=1, reason='il mittente è De Angelis')]))
+        with self.chat(raw) as model:
+            matched = owner_instructions.evaluate_notify('Sig. De Angelis', 'Oggetto',
+                                                         'Testo del messaggio', 'email')
+        self.assertEqual(matched, [1])
+        prompt = json.loads(model.call_args.args[1])
+        self.assertEqual(prompt['conditions'][0]['condition'], self.CONDITION)
+        self.assertEqual(prompt['message']['sender'], 'Sig. De Angelis')
+
+    def test_evaluate_drops_forged_and_unknown_ids(self):
+        self.add_notify()
+        raw = json.dumps(dict(matches=[dict(id=999, reason='x'), dict(id=1, reason='ok'),
+                                       dict(id=1, reason='dup')]))
+        with self.chat(raw):
+            matched = owner_instructions.evaluate_notify('X', 'Y', 'Z', 'email')
+        self.assertEqual(matched, [1])
+
+    def test_evaluate_returns_empty_on_malformed_model_output(self):
+        self.add_notify()
+        for raw in ('no json', '{"matches":"x"}', '{"matches":[5]}', '{"other":1}',
+                    '{"matches":[dict]}'):
+            with self.subTest(raw=raw[:20]), self.chat(raw):
+                self.assertEqual(owner_instructions.evaluate_notify('X', 'Y', 'Z', 'email'), [])
+
+    def test_evaluate_skips_model_when_no_active_instructions(self):
+        with patch.object(brain, '_chat', side_effect=AssertionError('No model call')):
+            self.assertEqual(owner_instructions.evaluate_notify('X', 'Y', 'Z', 'email'), [])
+
+    def test_suspended_notify_on_is_not_evaluated(self):
+        self.add_notify(state='suspended')
+        with patch.object(brain, '_chat', side_effect=AssertionError('No model call')):
+            self.assertEqual(owner_instructions.evaluate_notify('Sig. De Angelis', 'O', 'B', 'email'), [])

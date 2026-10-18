@@ -139,6 +139,7 @@ flowchart TD
     GATE{"can_read_context?<br/>consenso ai_text / ai_media"}
     AL["Advisory lock per message_id<br/>(un'analisi alla volta)"]
     VER["brain.analyze<br/>→ verdetto JSON (severity, urgent)"]
+    INSTR["evaluate_notify (§7-ter):<br/>istruzioni permanenti attive?<br/>giudizio semantico —<br/>match ⇒ urgent=True<br/>(fail-closed: errore ⇒ skip)"]
     D1{"needs_action?"}
     D2{"appuntamento?"}
     D3{"fattura?"}
@@ -152,7 +153,7 @@ flowchart TD
 
     CLAIM --> GATE
     GATE -->|"negato"| SKIP["Salta (audit context_denied)"]
-    GATE -->|"ok"| AL --> VER --> D1
+    GATE -->|"ok"| AL --> VER --> INSTR --> D1
     D1 -->|"sì"| TQ
     D1 -->|"no"| D2
     D2 -->|"sì"| AQ
@@ -170,9 +171,9 @@ flowchart TD
 | | |
 |---|---|
 | **Input** | Job `analysis` con message_id |
-| **Output** | Verdetto persistito; job task/appuntamento/fattura; notifiche; osservazioni runtime |
-| **Guardie** | `can_read_context` (default-deny); advisory lock per mid; budget AI |
-| **Invarianti** | Contenuto **indiretto** dell'owner non genera mai `needs_action`/appuntamenti; ogni I/O preceduto da attempt committato |
+| **Output** | Verdetto persistito; job task/appuntamento/fattura; notifiche (incl. urgent da istruzioni permanenti); osservazioni runtime |
+| **Guardie** | `can_read_context` (default-deny); advisory lock per mid; budget AI; `evaluate_notify` fail-closed (un errore non rompe mai l'analisi) |
+| **Invarianti** | Contenuto **indiretto** dell'owner non genera mai `needs_action`/appuntamenti; il contenuto del messaggio è untrusted data per il valutatore di istruzioni (non può crearle/modificarle); ogni I/O preceduto da attempt committato |
 
 ---
 
@@ -202,7 +203,7 @@ sequenceDiagram
     Note over S,DB: §6 — manifest server-side + assert_egress_sources PRIMA dell'inferenza
     S-->>D: piano v2 validato (changes, clarification)
     D->>S: owner_commitments.prepare (task owner, grammatica date)
-    D->>B: prepare_user_memories (piano memoria)
+    D->>B: prepare_user_memories (piano memoria,<br/>topic opzionale: replace-on-conflict)
     D->>K: retrieve via agent_tools registry
     Note over K: search · open · tasks · appointments · practices
     Note over K: gate di consenso PER CHIAMATA, risultati filtrati DENTRO il tool
@@ -369,34 +370,45 @@ flowchart TD
 
 ## 7-ter. Istruzioni permanenti dell'owner — il capo insegna comportamenti nuovi
 
-Quando l'owner dice "da ora in poi…", il segretario impara una procedura stabile: non una regola eseguita come testo, ma un record strutturato, versionato e revocabile, applicato nei punti pipeline esistenti.
+Quando l'owner dice "da ora in poi…", il segretario impara una procedura stabile. Il design separa **condizione** e **azione**: la condizione è il linguaggio libero dell'owner, giudicato **semanticamente dal modello** a ogni messaggio in arrivo; l'azione è un vocabolario chiuso agganciato ai gateway di effetto esistenti. Il modello giudica QUANDO; il server decide COSA.
 
 ```mermaid
 flowchart TD
-    CMD["Owner (testo diretto bot):<br/>'da ora in poi salva le fatture<br/>in cartelle P.IVA del mittente'"]
+    CMD["Owner (testo diretto bot):<br/>'da ora in poi, ogni volta che mi<br/>scrive il signor De Angelis,<br/>avvisami immediatamente'"]
     GUARD{"looks_like_instruction?<br/>guardia lessicale:<br/>marker di permanenza in frase<br/>non quotata, non inoltrata"}
-    PREP["prepare: classificazione nel<br/>vocabolario CHIUSO (dominio+azione)<br/>+ evidenza = frase esatta"]
+    PREP["prepare: classificazione nel<br/>vocabolario CHIUSO (dominio+azione)<br/>+ condition = parole dell'owner<br/>+ evidenza = frase esatta"]
     PERSIST["Piano nel owner_exchanges.plan<br/>(PRIMA degli effetti)"]
     APPLY["apply nella transazione effetti:<br/>idempotente su replay · ricevuta ·<br/>conferma all'owner"]
-    ACTIVE["Istruzione attiva<br/>(version, provenance,
-    revocabile)"]
-    ARR["Arriva fattura da fornitore X"]
-    ROUTE["invoices.save_invoice:<br/>cartella = P.IVA del mittente<br/>(slug difensivo, fallback legacy)"]
+    ACTIVE["Istruzione attiva<br/>(condition in linguaggio naturale,<br/>version, provenance, revocabile)"]
+    ARR["Arriva un messaggio qualunque<br/>(email, WhatsApp, Telegram)"]
+    EVAL["evaluate_notify (pipeline.analyze):<br/>il modello giudica SEMANTICAMENTE<br/>se la condizione scatta"]
+    MATCH{"match?"}
+    NOTIFY["Notifica urgente all'owner<br/>(gateway notify esistente:<br/>ricevute, quiet hours bypass)"]
+    SKIP["Nessuna azione<br/>(fail-closed sul dubbio)"]
     REV["Owner: '/ferma_istruzione N'<br/>→ sospesa (version bump)"]
 
     CMD --> GUARD
-    GUARD -->|"no"| CHAT["Dialogo normale, nessun modello extra"]
+    GUARD -->|"no"| CHAT["Dialogo normale"]
     GUARD -->|"sì"| PREP --> PERSIST --> APPLY --> ACTIVE
-    ACTIVE -.->|"consultata"| ARR --> ROUTE
+    ARR --> EVAL --> MATCH
+    MATCH -->|"sì"| NOTIFY
+    MATCH -->|"no / incerto"| SKIP
     REV -.-> ACTIVE
 ```
+
+**I due domini del vocabolario chiuso**:
+
+| Dominio | Azioni | Come scatta |
+|---|---|---|
+| `notify_on` | `notify_owner` | **Semantica per messaggio**: `evaluate_notify` in `pipeline.analyze` giudica la condizione (parole dell'owner) su ogni messaggio in arrivo; match ⇒ notifica urgente |
+| `invoice_folder` | `route_by_sender_vat`, `route_by_sender_name` | **Deterministica all'archiviazione**: `invoices.save_invoice` consulta `invoice_folder(sender)` (P.IVA o nome del mittente, slug difensivo, fallback legacy) |
 
 | | |
 |---|---|
 | **Input** | Testo diretto owner con marker di permanenza ('da ora in poi', 'sempre', 'ogni volta'…) |
-| **Output** | Istruzione attiva (dominio allowlistato, params validati, provenance, ricevuta); conferma all'owner; routing applicato alle fatture successive |
-| **Guardie** | Vocabolario CHIUSO server-declared (il modello può solo scegliere, mai inventare domini/azioni/parametri); evidenza = frase esatta non quotata; testo nativo verificato; apply idempotente |
-| **Invarianti** | Solo testo owner vivo/diretto/non inoltrato può creare istruzioni — email/WhatsApp/inoltrati/storico MAI; il testo dell'istruzione non si esegue mai (solo dati strutturati); ogni applicazione mantiene i propri receipt/attempt-before-I/O; revocabile con ricevuta |
+| **Output** | Istruzione attiva (condizione = parole dell'owner, azione allowlistata, provenance, ricevuta); conferma all'owner; per ogni messaggio in arrivo: valutazione semantica → notifica urgente se la condizione scatta |
+| **Guardie** | Azione = vocabolario CHIUSO server-declared (il modello può solo scegliere, mai inventare); condizione = stringa bounded, DATA mai autorità; evidenza = frase esatta non quotata; testo nativo verificato; apply idempotente; ID forged droppati dalla valutazione |
+| **Invarianti** | Solo testo owner vivo/diretto/non inoltrato può creare istruzioni; il contenuto dei messaggi in arrivo non può mai creare/modificare/revocare condizioni (è untrusted data per il valutatore); il dubbio non matcha (fail-closed); la notifica passa dal gateway esistente con ricevute e quiet hours; revocabile con ricevuta |
 
 ---
 
@@ -615,4 +627,4 @@ sequenceDiagram
 
 ---
 
-*Documento generato il 2026-10-18 dopo un giro completo di sorgenti e test (~73 file). Le fonti di verità restano i sorgenti: aggiornare questo file quando l'architettura cambia.*
+*Documento generato il 2026-10-18 dopo un giro completo di sorgenti e test (~78 file). Le fonti di verità restano i sorgenti: aggiornare questo file quando l'architettura cambia.*

@@ -30,8 +30,8 @@ accessibile; i flussi esistenti sono gli unici interruttori persistenti.
 **Stato di integrazione:** il servizio è un **segretario di revisione limitato**,
 già collegato al bootstrap/runtime, non un esecutore di workflow arbitrari.
 `db.init()` applica le migrazioni additive, incluse execution e ai_budget, prima
-dei flussi; `main()` avvia otto worker persistenti: analysis, media, reconcile,
-action, owner, knowledge, secretary_review e secretary_email_execution.
+dei flussi; `main()` avvia nove worker persistenti: analysis, media, reconcile,
+action, owner, knowledge, research, secretary_review e secretary_email_execution.
 Indicizzazione, osservazioni, revisioni dovute e backlog sono integrati. Ogni
 worker tratta un job alla volta; le attività periodiche hanno un solo thread vivo
 per nome. Lease di 15 minuti, heartbeat di 30 secondi, limite esecuzione di un'ora
@@ -105,13 +105,15 @@ classificatore privato legacy, non dell'ingest attuale.
 
 ## Roadmap ancora aperta
 
-Restano: workflow/dipendenze arbitrari; memoria tipizzata, conflitti e provenienza
-completa degli input dei vecchi piani attività/memoria; collegamento generale di
-evidenze esistenti alle pratiche dal retrieval; condizioni di stop eseguibili
-(il testo salvato non è un motore di regole); Calendar update/disponibilità/drift;
-allegati e invii email in thread; tetto monetario/modalità e quiet hours globali;
-erase/export privacy coordinati; prova completa di backup ripristinato,
-validazione in produzione e valutazione semantica/qualitativa.
+Restano: workflow/dipendenze arbitrari (parzialmente coperti dal worker research,
+read-only); provenienza completa degli input dei vecchi piani attività/memoria;
+collegamento generale di evidenze esistenti alle pratiche dal retrieval;
+condizioni di stop eseguibili (il testo salvato non è un motore di regole);
+Calendar update/disponibilità/drift; allegati e invii email in thread;
+tetto monetario/modalità e quiet hours globali; erase/export privacy coordinati;
+prova completa di backup ripristinato, validazione in produzione e valutazione
+semantica/qualitativa. La memoria tipizzata (replace-on-conflict per topic) è
+integrata.
 L'integrazione limitata non dichiara il piano completato. Risultati correnti della
 suite completa saranno aggiunti dal run principale: questa modifica documentale
 non esegue test o terminale e non legge dati utente.

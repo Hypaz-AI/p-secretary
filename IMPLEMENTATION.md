@@ -114,10 +114,13 @@ Implemented in this iteration (previously listed as remaining):
 
 Still remaining:
 
-- [ ] Arbitrary workflow and dependency execution beyond bounded review/proposals.
-- [ ] Full typed-memory conflict handling and complete model-input provenance for
-	legacy task/memory write plans; existing origin/CAS/applied-evidence checks are
-	partial coverage, not the finished memory/provenance model.
+- [ ] Arbitrary workflow and dependency execution beyond bounded review/proposals
+	(the read-only `research` worker with sub-jobs is partial coverage, not
+	arbitrary effects).
+- [ ] Complete model-input provenance for legacy task/memory write plans;
+	existing origin/CAS/applied-evidence checks are partial coverage, not the
+	finished provenance model. Typed-memory topic conflicts are resolved
+	(replace-on-conflict, one live note per topic).
 - [ ] Calendar availability planning and ongoing remote drift detection/
 	reconciliation; sealed create/update/cancel is narrower.
 - [ ] Email threaded replies/send-thread metadata and verified delivery.
@@ -126,6 +129,28 @@ Still remaining:
 - [ ] Replace trusted dashboard SQL fallbacks with public policy/secretary APIs.
 - [ ] Full restored-backup drill, production validation and semantic/quality
 	evaluation; reproducible dependency locking and a hard PDF sandbox also remain.
+
+Completed in the 2026-10-18 agent-session (additive, receipted, tested):
+
+- [x] Read-only tool registry for the dialogue retrieval planner
+	(`agent_tools.py`: search/open/tasks/appointments/practices; consent gates
+	inside each tool, `open` limited to server-surfaced IDs).
+- [x] Multi-round retrieval planner with bounded scratchpad
+	(`RETRIEVAL_MAX_ROUNDS`, default 4, ceiling 8; notes ≤200 chars, last 8).
+- [x] Per-scope AI budget caps (server-derived scope; `AI_BUDGET_*_DAILY_CALLS`
+	narrow, never exceed, the global cap; fail-closed on invalid values).
+- [x] `research` worker: decompose → sub-jobs (own lease, read-only tools,
+	real citations only) → synthesis; no external effects; budget scope
+	'research'.
+- [x] Typed personal memory: optional `topic` per note, replace-on-conflict
+	(one live note per topic, version bump, partial unique index).
+- [x] Permanent owner instructions (`owner_instructions.py`): condition = the
+	owner's own words judged **semantically** per incoming message
+	(`evaluate_notify` in `pipeline.analyze`); action = closed server-declared
+	vocabulary (`notify_on/notify_owner`, `invoice_folder/route_by_sender_vat`,
+	`route_by_sender_name`); message content is untrusted data and can never
+	create/modify/revoke conditions; fail-closed on doubt; revocable via
+	`/ferma_istruzione`.
 
 ## Validation status
 

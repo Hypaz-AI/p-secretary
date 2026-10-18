@@ -89,6 +89,19 @@ def analyze(payload):
         raise RuntimeError('Analysis unavailable')
     from main import format_verdict
     notify = verdict['urgent'] or verdict['severity'] == 'alta' or config.priority_at_least(verdict['priority'], config.NOTIFY_PRIORITY_THRESHOLD)
+    # A permanent owner instruction ("avvisami sempre quando scrive X") makes
+    # this message urgent for the owner, bypassing quiet hours via the
+    # existing emergency semantics. The condition is the owner's own words,
+    # judged semantically by the model; the message content is untrusted data
+    # and can never create or modify conditions.
+    try:
+        import owner_instructions
+        matched = owner_instructions.evaluate_notify(sender, subject, body, channel)
+        if matched:
+            notify = True
+            verdict = dict(verdict, urgent=True)
+    except Exception:
+        pass  # Missing table/migration must never break analysis.
     with db._conn() as conn, conn.transaction():
         # Serializes analysis commit, including concurrent lease recovery.
         conn.execute('SELECT pg_advisory_xact_lock(%s)', (mid,))

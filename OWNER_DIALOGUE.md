@@ -141,6 +141,29 @@ terms, not assistant/image data. Recall excludes incomplete, current/later and
 selected recent exchanges, preserves absolute dates and stops at its estimated
 budget. Synonyms and ambiguous follow-ups can be missed.
 
+## Retrieval planner: read-only tool registry
+
+Beyond lexical recall, `owner_dialogue.retrieve` runs a bounded multi-round
+planner over a **read-only tool registry** (`agent_tools.py`). The model can
+only *name* a server-declared tool with typed arguments; the server validates
+strictly, rechecks the dialogue lease and consent gates **per call**, and
+filters results **inside** the tool. No write/send tool exists.
+
+| Component | Current limit |
+| --- | --- |
+| Planner rounds (`RETRIEVAL_MAX_ROUNDS`, default 4; hard ceiling 8) | 4 |
+| Scratchpad notes | ≤ 200 chars each, last 8 kept |
+| Tool calls per round (`MAX_TOOL_ROUNDS`) | 2 |
+| Tool result size (`MAX_TOOL_RESULT_CHARS`) | 6,000 chars |
+| Planner context / reply | 4,500 tokens in; 2,000 chars out |
+
+Registry tools: `search` (knowledge), `open` (only IDs already surfaced by the
+server — citations, current sources, earlier rounds), `tasks`, `appointments`,
+`practices`. The scratchpad note is extracted **before** tool dispatch and is
+inert model data, never authority; tool results are row-filtered through the
+native consent gates before reaching the model. `{'tool': 'done'}` ends the
+loop; malformed requests break it.
+
 The summary is advisory; structured tasks, agenda and notes remain authoritative.
 Checkpoint advancement covers only included exchanges and requires a live token.
 Failed/invalid compaction leaves originals available; the initial batch-read error
