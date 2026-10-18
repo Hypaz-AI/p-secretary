@@ -119,6 +119,21 @@ class BudgetPostgresTests(PostgreSQLFixture):
                 raise RuntimeError('rollback')
         self.assertEqual(budget.usage(self.conn)['calls'], 0)
 
+    def test_legacy_ledger_without_scope_column_is_backfilled(self):
+        # Un ledger v1 esistente non ha 'scope': VERSION invariata non basta,
+        # serve la migrazione runtime o ogni chiamata AI fallisce su quel DB.
+        self.conn.execute('DELETE FROM schema_migrations WHERE version=%s', (budget.RUNTIME_VERSION,))
+        self.conn.execute('ALTER TABLE secretary_ai_usage DROP COLUMN scope')
+        with self.assertRaises(Exception):
+            self.conn.execute('SELECT scope FROM secretary_ai_usage')
+        budget.migrate(self.conn)
+        self.assertEqual(self.conn.execute("""SELECT count(*) FROM information_schema.columns
+            WHERE table_name='secretary_ai_usage' AND column_name='scope'""").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM schema_migrations WHERE version=%s',
+                                          (budget.RUNTIME_VERSION,)).fetchone()[0], 1)
+        self.assertEqual(self.request(), 'ok')
+        budget.migrate(self.conn)  # idempotente: la colonna esiste già
+
     def test_call_limit_survives_fresh_connection_and_module_local_counter_reset(self):
         with patch.dict('os.environ', AI_BUDGET_DAILY_CALLS='1'):
             self.assertEqual(self.request(), 'ok')

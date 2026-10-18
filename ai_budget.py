@@ -38,6 +38,10 @@ DIGEST_TOKENS = 8192
 CHAT_TOKENS = 16384
 MAX_RETRY_TOKENS = 65536
 VERSION = 'secretary_ai_budget_v1'
+# Migrazioni additive successive a VERSION: un ledger già creato non viene
+# ricreato (CREATE TABLE IF NOT EXISTS), quindi le colonne aggiunte dopo vanno
+# applicate con ALTER sotto un versione separata.
+RUNTIME_VERSION = 'secretary_ai_budget_runtime_v2'
 WRITE_LOCK = 73190447
 _lock = threading.Lock()
 _inflight = 0
@@ -109,10 +113,18 @@ def migrate(conn):
         conn.execute('''CREATE TABLE IF NOT EXISTS schema_migrations (
             version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
             reset_rows BIGINT NOT NULL)''')
-        if conn.execute('SELECT 1 FROM schema_migrations WHERE version=%s', (VERSION,)).fetchone():
-            return
-        conn.execute(SCHEMA)
-        conn.execute('INSERT INTO schema_migrations(version,reset_rows) VALUES (%s,0)', (VERSION,))
+        if not conn.execute('SELECT 1 FROM schema_migrations WHERE version=%s', (VERSION,)).fetchone():
+            conn.execute(SCHEMA)
+            conn.execute('INSERT INTO schema_migrations(version,reset_rows) VALUES (%s,0)', (VERSION,))
+        # Un ledger creato prima di 'scope' (v1) esiste già: CREATE TABLE IF NOT
+        # EXISTS non aggiunge la colonna, quindi serve un ALTER additivo. Senza,
+        # _reserve fallisce su un DB esistente e nessuna chiamata AI va a buon fine.
+        if not conn.execute('SELECT 1 FROM schema_migrations WHERE version=%s', (RUNTIME_VERSION,)).fetchone():
+            conn.execute("""ALTER TABLE secretary_ai_usage
+                ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'global';
+                CREATE INDEX IF NOT EXISTS secretary_ai_usage_scope
+                    ON secretary_ai_usage(usage_day,scope)""")
+            conn.execute('INSERT INTO schema_migrations(version,reset_rows) VALUES (%s,0)', (RUNTIME_VERSION,))
 
 
 def _limits():
