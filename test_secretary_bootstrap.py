@@ -63,12 +63,18 @@ class BootstrapOfflineTests(unittest.TestCase):
                         return 17 if module is message_store else None
                     stack.enter_context(patch.object(module, 'migrate', side_effect=migrate))
                 stack.enter_context(patch.object(db, 'migrate_notes', side_effect=lambda c: trace.append('notes')))
+                stack.enter_context(patch.object(db, 'migrate_typed_notes', side_effect=lambda c: trace.append('typed_notes')))
+                import research
+                stack.enter_context(patch.object(research, 'migrate', side_effect=lambda c: trace.append('research')))
+                import owner_instructions
+                stack.enter_context(patch.object(owner_instructions, 'migrate', side_effect=lambda c: trace.append('owner_instructions')))
                 for module in (execution, ai_budget):
                     stack.enter_context(patch.object(module, 'migrate',
                         side_effect=lambda c, module=module: trace.append(module.__name__)))
                 self.assertEqual(db.init(), 17)
                 self.assertEqual(trace, ['legacy'] + [m.__name__ for m in modules]
-                                 + ['notes', 'execution', 'ai_budget'])
+                                 + ['notes', 'typed_notes', 'research', 'owner_instructions',
+                                    'execution', 'ai_budget'])
                 conn.transaction.assert_called_once_with()
 
     def test_derived_boundary_never_swallows_schema_or_import_errors(self):

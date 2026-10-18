@@ -45,15 +45,37 @@ rinviati alla cieca.
 - `owner_dialogue.py` — lease 12 min; piano persistito PRIMA degli effetti;
   replay idempotente sulle riprove; DAG sorgenti con cycle detection;
   `resolve_source_manifest`/`assert_egress_sources`/`filter_history`/
-  `filtered_knowledge`/`filtered_practices`.
+  `filtered_knowledge`/`filtered_practices`. Retrieval planner con round
+  configurabili (RETRIEVAL_MAX_ROUNDS, default 4, hard ceiling 8) e
+  scratchpad bounded (note ≤200 char, max 8, inert data mai autorità).
 - `agent_tools.py` — registry di tool read-only per il planner di retrieval
   (search, open, tasks, appointments, practices): argomenti validati
   strettamente, lease ricontrollato per chiamata, risultati filtrati DENTRO
   il tool con i gate di consenso nativi; nessun tool di scrittura/invio;
   `open` limitato agli ID già emersi dal server (citations/current/roundi
   precedenti). `owner_dialogue.retrieve` orchestre due round via registry.
+- `owner_instructions.py` — istruzioni permanenti dell'owner: il capo insegna
+  un nuovo comportamento stabile in linguaggio naturale ('da ora in poi…').
+  Vocabolario CHIUSO server-declared (dominio invoice_folder: azioni
+  route_by_sender_vat/route_by_sender_name); guardia lessicale prima del
+  modello; evidenza = frase esatta con marker di permanenza; apply idempotente
+  con ricevuta; revoca via /ferma_istruzione o dashboard; consultate da
+  invoices.save_invoice. Email/inoltrati/storico NON possono crearle.
+- `research.py` — worker `research` per lavoro lungo fuori dal lease dialogo:
+  decomposizione → sub-job (lease proprio ciascuno, tool read-only via
+  registry, citazioni reali allowlistate) → sintesi. Findings persistiti con
+  provenance; nessun effetto esterno; budget scope 'research'.
+- `ai_budget.py` — ledger `secretary_ai_usage` con colonna `scope`
+  (global/dialogue/review/research/analysis derivata server-side dal system
+  prompt); tetti per-scope opzionali (AI_BUDGET_*_DAILY_CALLS) che
+  restringono mai superano il tetto globale; `usage()` espone conteggi per
+  scope.
 - `brain.py` + `ai_budget.py` — ledger `secretary_ai_usage`; DAILY_CALLS 200,
   DAILY_TOKENS 500k, MAX_INFLIGHT 2; `_reserve` advisory-lock fail-closed.
+  Memoria tipizzata: prompt produce `topic` opzionale per nota;
+  `db.apply_personal_memories` con replace-on-conflict (una nota viva per
+  topic, indice unico parziale SQL, version bump); note senza topic restano
+  additive come prima.
 - `execution.py` — gateway email in 3 gesti: request_email (proposta sigillata)
   → approvazione owner (ricevuta) → dispatch_email esplicito (secondo gesto)
   → worker execute_approved (grant recheck + hash allegati) → SMTP.
@@ -81,18 +103,21 @@ rinviati alla cieca.
 4. Attempt-before-I/O per ogni effetto esterno; uncertain mai rinviato.
 5. Notifiche: ordinamento owner-reply (owner_reply_mid) + quiet hours.
 
-## Convenzioni dei test (~74 file)
+## Convenzioni dei test (~78 file)
 Offline-first: rete e DB vietati via patch; SQL opt-in via
 PI_SECRETARY_TEST_DATABASE_URL (dbname che finisce in _test, socket Unix,
 no service). Coprono: provenance, egress canary, CAS/ricevute, quiet hours,
 stop conditions, gateway email, guardie dashboard, web session via Node VM
 harness, media consent recovery, dialogue durability/replay, runtime review
 lifecycle, link proposal lifecycle, calendar destination binding, privacy
-erase, budget ledger, tool registry read-only (test_agent_tools).
+erase, budget ledger (con scope), tool registry read-only (test_agent_tools),
+worker research (test_research), memoria tipizzata (test_typed_memory),
+istruzioni permanenti owner (test_owner_instructions).
 
 ## Roadmap aperta (da IMPLEMENTATION.md)
-Workflow arbitrari; conflitti memoria tipizzata; drift Calendar; email
-threaded; erase nei backup retention.
+Workflow arbitrari (parzialmente: worker research); conflitti memoria tipizzata
+(risolta: replace-on-conflict per topic); drift Calendar; email threaded;
+erase nei backup retention.
 
 ## Vocabolario del progetto
 Pratiche, responsabilità, ricevute, consensi, revisioni, evidenze, manifest

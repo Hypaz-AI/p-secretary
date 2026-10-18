@@ -135,6 +135,11 @@ def init(approved_reset: bool = False) -> int:
             import secretary_runtime
             secretary_runtime.migrate(conn)
             migrate_notes(conn)
+            migrate_typed_notes(conn)
+            import research
+            research.migrate(conn)
+            import owner_instructions
+            owner_instructions.migrate(conn)
             import execution
             execution.migrate(conn)
             import ai_budget
@@ -305,7 +310,9 @@ def upcoming_appointments(days: int = 7) -> list:
 
 # ------------------------------------------------------------------- note ----
 NOTES_VERSION = 'personal_memory_provenance_v1'
+TYPED_NOTES_VERSION = 'personal_memory_typed_v1'
 NOTE_TYPES = frozenset(('personal', 'preference', 'fact', 'instruction', 'context'))
+MAX_TOPIC_CHARS = 120
 
 
 def migrate_notes(conn):
@@ -321,6 +328,39 @@ def migrate_notes(conn):
             ALTER TABLE notes ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 1''')
         conn.execute('INSERT INTO schema_migrations(version,reset_rows) VALUES (%s,0)',
                      (NOTES_VERSION,))
+
+
+def migrate_typed_notes(conn):
+    """Typed memory topics: one live note per topic, replaced on conflict.
+
+    Additive column only; existing notes keep topic NULL and behave exactly as
+    before (additive, deduplicated by text). A topic is a short normalized label
+    (e.g. 'caffe', 'fatturazione') chosen by the model but VALIDATED server-side:
+    lowercase, no control chars, bounded length. The topic never grants
+    authority; it only keys the replace-on-conflict behaviour.
+    """
+    with conn.transaction():
+        conn.execute('SELECT pg_advisory_xact_lock(73190421)')
+        if conn.execute('SELECT 1 FROM schema_migrations WHERE version=%s',
+                        (TYPED_NOTES_VERSION,)).fetchone():
+            return
+        conn.execute("ALTER TABLE notes ADD COLUMN IF NOT EXISTS topic TEXT")
+        conn.execute('''CREATE UNIQUE INDEX IF NOT EXISTS notes_live_topic
+            ON notes(lower(topic)) WHERE topic IS NOT NULL''')
+        conn.execute('INSERT INTO schema_migrations(version,reset_rows) VALUES (%s,0)',
+                     (TYPED_NOTES_VERSION,))
+
+
+def normalize_topic(value):
+    """Server-side topic normalization; None/invalid means untyped note."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError('Invalid memory topic')
+    topic = ' '.join(value.lower().split())
+    if not topic or len(topic) > MAX_TOPIC_CHARS:
+        raise ValueError('Invalid memory topic')
+    return topic
 
 
 def _note_provenance(kind, source_message, source_revision):
@@ -354,7 +394,7 @@ def recent_notes(limit: int = 5) -> list:
 def personal_memories(*, provenance=False) -> list:
     """All notes; the default id/text return contract remains unchanged."""
     with _conn() as conn:
-        fields = ('id', 'text', 'kind', 'source_message', 'source_revision', 'version') if provenance else ('id', 'text')
+        fields = ('id', 'text', 'kind', 'source_message', 'source_revision', 'version', 'topic') if provenance else ('id', 'text')
         rows = conn.execute(f"SELECT {', '.join(fields)} FROM notes ORDER BY id").fetchall()
         return [dict(zip(fields, row)) for row in rows]
 
@@ -370,6 +410,11 @@ def apply_personal_memories(changes: list, known_ids: set, conn=None, expected=N
 
     # Provenance is caller-supplied, never a model boolean authorizing a write.
     _note_provenance(kind, source_message, source_revision)
+    topics = {}
+    for change in changes:
+        topic = normalize_topic(change.get('topic')) if isinstance(change, dict) else None
+        if topic is not None:
+            topics[id(change)] = topic
     changed = 0
     with ExitStack() as stack:
         if conn is None:
@@ -392,7 +437,30 @@ def apply_personal_memories(changes: list, known_ids: set, conn=None, expected=N
             operation = change['operation']
             identity = change.get('id')
             text = change.get('text', '').strip()
+            topic = topics.get(id(change))
             if operation == 'add':
+                if topic is not None:
+                    # Typed memory: one live note per topic. A new note on an
+                    # existing topic REPLACES it (version bump, provenance
+                    # updated) instead of accumulating duplicates. The unique
+                    # partial index enforces the invariant at SQL level.
+                    row = conn.execute('''UPDATE notes SET text=%s,version=version+1,
+                        kind=%s,source_message=%s,source_revision=%s
+                        WHERE id=(SELECT id FROM notes WHERE lower(topic)=%s
+                                  AND topic IS NOT NULL FOR UPDATE LIMIT 1)
+                          AND text<>%s RETURNING id''',
+                        (text, kind, source_message, source_revision, topic, text)).fetchone()
+                    if row:
+                        changed += 1
+                        continue
+                    row = conn.execute(
+                        '''INSERT INTO notes(text,kind,source_message,source_revision,topic)
+                           SELECT %s,%s,%s,%s,%s WHERE NOT EXISTS
+                           (SELECT 1 FROM notes WHERE lower(trim(text))=lower(trim(%s)))
+                           RETURNING id''',
+                        (text, kind, source_message, source_revision, topic, text)).fetchone()
+                    changed += bool(row)
+                    continue
                 row = conn.execute(
                     '''INSERT INTO notes(text,kind,source_message,source_revision)
                        SELECT %s,%s,%s,%s WHERE NOT EXISTS

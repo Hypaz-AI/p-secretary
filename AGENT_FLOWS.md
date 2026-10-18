@@ -14,6 +14,8 @@
 5. Autorizzazione di un'azione
 6. Il piano del segretario: prepare → apply
 7. Revisioni runtime (bounded review)
+7-bis. Worker research — lavoro lungo con sub-job
+7-ter. Istruzioni permanenti dell'owner — il capo insegna comportamenti nuovi
 8. Gateway email — i tre gesti dell'owner
 9. La macchina a stati delle ricevute
 10. Riconciliazione task
@@ -47,6 +49,7 @@ flowchart TB
         OW["owner"]
         KW["knowledge"]
         SR["secretary_review"]
+        RS["research"]
         EE["secretary_email_execution"]
     end
 
@@ -69,6 +72,7 @@ flowchart TB
     KW --> KN
     OW --> OD --> SEC
     SR --> RT --> SEC
+    RS --> KN
     SEC --> POL
     AC --> POL
     EE --> ML
@@ -76,7 +80,7 @@ flowchart TB
     POL -.->|consensi ai_text / ai_media / ai_history| B
 ```
 
-**I 8 worker e i loro confini:**
+**I 9 worker e i loro confini:**
 
 | Worker | Consuma | Input | Output principale |
 |---|---|---|---|
@@ -87,6 +91,7 @@ flowchart TB
 | `owner` | job `owner` | messaggio owner nativo diretto | risposta + piani applicati + task + memoria |
 | `knowledge` | job `knowledge` | message_id | estrazioni indicizzate nel catalogo (sha256, revisioni) |
 | `secretary_review` | wakeup | revisione dovuta / osservazione | pratiche aggiornate (CAS) + notifiche coalesced |
+| `research` | job `research` (decompose/subtask/synthesize) | domanda dell'owner | findings con citazioni + report persistito (nessun effetto esterno) |
 | `secretary_email_execution` | job `execute_approved` | dispatch approvato | invio SMTP con ricevta attempt-before-I/O |
 
 **Lanciatori periodici** (un thread vivo ciascuno): fetch email, digest, schedule (revisioni dovute, promemoria), secretary_reviews, whatsapp.
@@ -173,7 +178,7 @@ flowchart TD
 
 ## 4. Dialogo owner — il loop agentico principale
 
-Il cuore agentico: quando l'owner scrive direttamente al bot, `owner_dialogue.respond` orchestra inferenza, piano, effetti e risposta in un'unica transazione logica con lease e replay idempotente. Il retrieval è guidato da un **registry di tool read-only** (`agent_tools.py`): il modello può solo *nominare* un tool dichiarato e fornire argomenti tipati; il server valida, ricontrolla lease e consensi **per chiamata**, e filtra i risultati dentro il tool stesso.
+Il cuore agentico: quando l'owner scrive direttamente al bot, `owner_dialogue.respond` orchestra inferenza, piano, effetti e risposta in un'unica transazione logica con lease e replay idempotente. Il retrieval è guidato da un **registry di tool read-only** (`agent_tools.py`): il modello può solo *nominare* un tool dichiarato e fornire argomenti tipati; il server valida, ricontrolla lease e consensi **per chiamata**, e filtra i risultati dentro il tool stesso. Il planner ha **round configurabili** (`RETRIEVAL_MAX_ROUNDS`, default 4, ceiling 8) e uno **scratchpad bounded** (note ≤200 char, max 8, inert data).
 
 ```mermaid
 sequenceDiagram
@@ -336,6 +341,65 @@ flowchart TD
 
 ---
 
+## 7-bis. Worker research — lavoro lungo con sub-job
+
+Il lease del dialogo (12 min) non può ospitare lavoro lungo. Il worker `research` (`research.py`) lo sposta su sub-job durevoli, ciascuno con lease proprio, e sintetizza i risultati. Tutto read-only verso il mondo esterno.
+
+```mermaid
+flowchart TD
+    REQ["research.request<br/>(da coordinatore fidato:<br/>autorità owner già verificata)"]
+    DEC["Job decompose:<br/>domanda → 1-6 sub-task<br/>(JSON rigoroso, validato)"]
+    SUB["Job subtask ×N:<br/>lease proprio ciascuno ·<br/>tool read-only via registry ·<br/>max 3 round · open allowlistato"]
+    FIND["Finding persistito:<br/>testo + citazioni REALI<br/>(forged citations droppate)"]
+    SYN["Job synthesize:<br/>solo quando tutti i findings<br/>sono arrivati"]
+    REP["Report persistito<br/>(≤8000 char, status done)"]
+
+    REQ --> DEC --> SUB --> FIND --> SYN --> REP
+    SUB -.->|"scope 'research'<br/>nel budget AI"| BUD["Ledger con scope"]
+```
+
+| | |
+|---|---|
+| **Input** | Domanda dell'owner + origin_message (autorità già verificata dal chiamante) |
+| **Output** | Findings con citazioni reali; report finale persistito; nessun effetto esterno |
+| **Guardie** | Decomposizione validata (1-6 sub-task, JSON rigoroso); tool solo dal registry read-only; `open` limitato agli ID emersi; citazioni forged droppate; budget scope 'research' |
+| **Invarianti** | Ogni sub-job ha lease proprio e ricontrolla lo stato della request; la sintesi parte solo a findings completi; il testo del modello è DATA mai autorità; il report non viene mai inviato — il chiamante lo legge come contesto non fidato |
+
+---
+
+## 7-ter. Istruzioni permanenti dell'owner — il capo insegna comportamenti nuovi
+
+Quando l'owner dice "da ora in poi…", il segretario impara una procedura stabile: non una regola eseguita come testo, ma un record strutturato, versionato e revocabile, applicato nei punti pipeline esistenti.
+
+```mermaid
+flowchart TD
+    CMD["Owner (testo diretto bot):<br/>'da ora in poi salva le fatture<br/>in cartelle P.IVA del mittente'"]
+    GUARD{"looks_like_instruction?<br/>guardia lessicale:<br/>marker di permanenza in frase<br/>non quotata, non inoltrata"}
+    PREP["prepare: classificazione nel<br/>vocabolario CHIUSO (dominio+azione)<br/>+ evidenza = frase esatta"]
+    PERSIST["Piano nel owner_exchanges.plan<br/>(PRIMA degli effetti)"]
+    APPLY["apply nella transazione effetti:<br/>idempotente su replay · ricevuta ·<br/>conferma all'owner"]
+    ACTIVE["Istruzione attiva<br/>(version, provenance,
+    revocabile)"]
+    ARR["Arriva fattura da fornitore X"]
+    ROUTE["invoices.save_invoice:<br/>cartella = P.IVA del mittente<br/>(slug difensivo, fallback legacy)"]
+    REV["Owner: '/ferma_istruzione N'<br/>→ sospesa (version bump)"]
+
+    CMD --> GUARD
+    GUARD -->|"no"| CHAT["Dialogo normale, nessun modello extra"]
+    GUARD -->|"sì"| PREP --> PERSIST --> APPLY --> ACTIVE
+    ACTIVE -.->|"consultata"| ARR --> ROUTE
+    REV -.-> ACTIVE
+```
+
+| | |
+|---|---|
+| **Input** | Testo diretto owner con marker di permanenza ('da ora in poi', 'sempre', 'ogni volta'…) |
+| **Output** | Istruzione attiva (dominio allowlistato, params validati, provenance, ricevuta); conferma all'owner; routing applicato alle fatture successive |
+| **Guardie** | Vocabolario CHIUSO server-declared (il modello può solo scegliere, mai inventare domini/azioni/parametri); evidenza = frase esatta non quotata; testo nativo verificato; apply idempotente |
+| **Invarianti** | Solo testo owner vivo/diretto/non inoltrato può creare istruzioni — email/WhatsApp/inoltrati/storico MAI; il testo dell'istruzione non si esegue mai (solo dati strutturati); ogni applicazione mantiene i propri receipt/attempt-before-I/O; revocabile con ricevuta |
+
+---
+
 ## 8. Gateway email — i tre gesti dell'owner
 
 L'invio email è l'effetto più pericoloso: richiede **tre gesti distinti dell'owner**, con la proposta sigillata e il dispatch esplicito separati nel tempo.
@@ -470,25 +534,29 @@ flowchart TD
 
 ## 12. Guardie trasversali: budget AI, quiet hours, modalità
 
-### Budget AI (`ai_budget.py`) — fail-closed
+### Budget AI (`ai_budget.py`) — fail-closed, con scope
 
 ```mermaid
 flowchart TD
     REQ["Richiesta modello<br/>(brain → ai_budget.request_content)"]
-    LIM{"_reserve (advisory lock):<br/>chiamate < 200/gg · token < 500k/gg ·<br/>in-flight < 2"}
+    SCOPE{"scope derivato server-side<br/>dal system prompt:<br/>global / dialogue / review /<br/>research / analysis"}
+    LIM{"_reserve (advisory lock):<br/>globali: chiamate < 200/gg · token < 500k/gg ·<br/>in-flight < 2<br/>+ tetto per-scope opzionale<br/>(AI_BUDGET_*_DAILY_CALLS)"}
     CALL["Chiamata provider"]
     TRUNC{"Risposta troncata?"}
     RETRY["Retry 1× con budget raddoppiato"]
-    SETTLE["_settle: usage + costo nel ledger<br/>(secretary_ai_usage)"]
+    SETTLE["_settle: usage + costo + scope<br/>nel ledger (secretary_ai_usage)"]
 
-    REQ --> LIM
-    LIM -->|"superato"| FC["Rifiuta — nessun fallback, nessun bypass"]
+    REQ --> SCOPE --> LIM
+    LIM -->|"superato"| FC["Rifiuta — fail-closed, nessun bypass"]
     LIM -->|"ok"| CALL --> TRUNC
     TRUNC -->|"sì"| RETRY
-    RETRY -->|"ancora troncata"| TC["TruncatedCompletion (visibile, non silenzioso)"]
+    RETRY -->|"ancora troncata"| TC["TruncatedCompletion (visibile)"]
     TRUNC -->|"no"| SETTLE
     RETRY -->|"ok"| SETTLE
 ```
+
+Il tetto per-scope **restringe mai supera** quello globale: un cap `dialogue=50`
+limita le chiamate del dialogo ma non libera spazio sul tetto globale.
 
 ### Quiet hours + modalità (`quiet_hours.py`)
 

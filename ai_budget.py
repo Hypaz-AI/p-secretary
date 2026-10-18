@@ -51,10 +51,47 @@ CREATE TABLE secretary_ai_usage (
  state TEXT NOT NULL CHECK(state IN ('reserved','completed','uncertain')),
  prompt_tokens BIGINT, completion_tokens BIGINT, total_tokens BIGINT,
  provider_cost NUMERIC CHECK(provider_cost>=0),
+ scope TEXT NOT NULL DEFAULT 'global',
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ);
 CREATE INDEX secretary_ai_usage_day ON secretary_ai_usage(usage_day);
 CREATE INDEX secretary_ai_usage_inflight ON secretary_ai_usage(state) WHERE state='reserved';
+CREATE INDEX secretary_ai_usage_scope ON secretary_ai_usage(usage_day,scope);
 """
+
+# Scoped budgets: optional per-scope daily caps. The global cap always applies
+# on top; a scope cap can only further restrict, never raise, the global one.
+# Scope names are server-declared (never model/user input): 'global' (default),
+# 'dialogue' (owner chat turns), 'review' (runtime practice reviews),
+# 'research' (long-running research workers), 'analysis' (message analysis).
+SCOPE_CALLS = {'dialogue': 'AI_BUDGET_DIALOGUE_DAILY_CALLS',
+               'review': 'AI_BUDGET_REVIEW_DAILY_CALLS',
+               'research': 'AI_BUDGET_RESEARCH_DAILY_CALLS',
+               'analysis': 'AI_BUDGET_ANALYSIS_DAILY_CALLS'}
+
+
+def scope_of(payload):
+    """Derive the accounting scope from the system prompt, server-side only.
+
+    The scope is a coarse routing label for budgeting, never an authorization:
+    it grants nothing and is not sent to the provider. Unknown prompts stay in
+    the conservative 'global' scope.
+    """
+    messages = payload.get('messages') if isinstance(payload, dict) else None
+    system = next((m.get('content') for m in messages
+                   if isinstance(m, dict) and m.get('role') == 'system'), '') \
+        if isinstance(messages, list) else ''
+    if not isinstance(system, str):
+        return 'global'
+    for marker, scope in (('Read-only retrieval planner', 'dialogue'),
+                          ('Aggiorna il riepilogo', 'dialogue'),
+                          ('Prepare a local secretary review', 'review'),
+                          ('Confronta la comunicazione corrente', 'analysis'),
+                          ('Riepiloga la giornata', 'analysis'),
+                          ('Estrai la memoria personale', 'dialogue'),
+                          ('Research sub-task', 'research')):
+        if marker in system:
+            return scope
+    return 'global'
 
 
 class BudgetExceeded(RuntimeError):
@@ -103,6 +140,16 @@ def _limits():
     except (InvalidOperation, ValueError, OverflowError):
         raise BudgetUnavailable('Invalid AI daily cost configuration') from None
     values['DAILY_COST'] = daily_cost
+    # Optional per-scope daily call caps; absent/invalid = no scope cap.
+    for scope, name in SCOPE_CALLS.items():
+        try:
+            raw = config.get(name, '0')
+            value = int(raw)
+            if not 0 <= value <= 9223372036854775807:
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            raise BudgetUnavailable('Invalid AI scope budget configuration') from None
+        values['SCOPE_' + scope] = value
     return values
 
 
@@ -127,7 +174,7 @@ def _reported(response):
     return prompt, output, total, cost
 
 
-def _reserve(context, limits, count):
+def _reserve(context, limits, count, payload):
     # Lazy imports are essential: brain -> ai_budget -> jobs/db -> brain can
     # otherwise cycle during startup. No DB connection is held over HTTP.
     import db
@@ -146,15 +193,22 @@ def _reserve(context, limits, count):
             if (calls >= limits['DAILY_CALLS'] or tokens + count > limits['DAILY_TOKENS']
                     or active >= limits['MAX_INFLIGHT']):
                 raise BudgetExceeded('AI daily or in-flight budget exhausted')
+            scope = scope_of(payload)
+            cap = limits.get('SCOPE_' + scope, 0)
+            if cap > 0:
+                scoped = conn.execute('''SELECT count(*) FROM secretary_ai_usage
+                    WHERE usage_day=%s AND scope=%s''', (day, scope)).fetchone()[0]
+                if scoped >= cap:
+                    raise BudgetExceeded(f'AI {scope} daily budget exhausted')
             if limits['DAILY_COST'] > 0:
                 spent = conn.execute('''SELECT coalesce(sum(provider_cost),0) FROM secretary_ai_usage
                     WHERE usage_day=%s AND provider_cost IS NOT NULL''', (day,)).fetchone()[0]
                 if Decimal(spent) >= limits['DAILY_COST']:
                     raise BudgetExceeded('AI daily monetary budget exhausted')
             conn.execute('''INSERT INTO secretary_ai_usage
-                (id,usage_day,job_id,job_token,reserved_tokens,charged_tokens,state)
-                VALUES (%s,%s,%s,%s,%s,%s,'reserved')''',
-                (identity, day, context.job_id, context.token, count, count))
+                (id,usage_day,job_id,job_token,reserved_tokens,charged_tokens,state,scope)
+                VALUES (%s,%s,%s,%s,%s,%s,'reserved',%s)''',
+                (identity, day, context.job_id, context.token, count, count, scope))
     except BudgetExceeded:
         raise
     except Exception as exc:
@@ -204,7 +258,7 @@ def _attempt(payload):
             raise BudgetExceeded('AI process in-flight budget exhausted')
         _inflight += 1
     try:
-        identity = _reserve(context, limits, count)
+        identity = _reserve(context, limits, count, payload)
         outcome = {'response': None, 'output_ceiling': limits['MAX_OUTPUT_TOKENS']}
         try:
             jobs.assert_current()
@@ -224,8 +278,12 @@ def usage(conn, day=None):
         count(*) FILTER (WHERE provider_cost IS NULL)
         FROM secretary_ai_usage WHERE usage_day=coalesce(%s::date,
             (clock_timestamp() AT TIME ZONE 'UTC')::date)''', (day,)).fetchone()
+    scopes = {name: count for name, count in conn.execute('''SELECT scope,count(*)
+        FROM secretary_ai_usage WHERE usage_day=coalesce(%s::date,
+            (clock_timestamp() AT TIME ZONE 'UTC')::date) GROUP BY scope''', (day,)).fetchall()}
     return dict(zip(('calls', 'reserved_tokens', 'charged_tokens', 'reported_tokens',
                      'reported_cost', 'cost_unreported_calls'), row),
+                scopes=scopes,
                 inflight=conn.execute("SELECT count(*) FROM secretary_ai_usage WHERE state='reserved'").fetchone()[0])
 
 

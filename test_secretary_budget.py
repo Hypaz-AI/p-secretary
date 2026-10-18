@@ -60,7 +60,9 @@ class BudgetPureTests(unittest.TestCase):
         with patch.object(config, 'get', side_effect=lambda key, default: default):
             self.assertEqual(budget._limits(), dict(DAILY_CALLS=200, DAILY_TOKENS=500000,
                                                    MAX_INFLIGHT=2, MAX_OUTPUT_TOKENS=65536,
-                                                   DAILY_COST=Decimal(0)))
+                                                   DAILY_COST=Decimal(0),
+                                                   SCOPE_dialogue=0, SCOPE_review=0,
+                                                   SCOPE_research=0, SCOPE_analysis=0))
 
     def test_thread_cap_fails_before_reserve_and_releases_after_settlement_error(self):
         with patch.object(budget, '_inflight', 2), job_context():
@@ -218,7 +220,7 @@ class BudgetPostgresTests(PostgreSQLFixture):
     def test_day_rollover_does_not_release_crashed_global_slot(self):
         job = self.running()
         with job_context(job[0], {}, job[3]) as context:
-            reservation = budget._reserve(context, budget._limits(), 100)
+            reservation = budget._reserve(context, budget._limits(), 100, PAYLOAD)
         self.conn.execute("UPDATE secretary_ai_usage SET usage_day=usage_day-1 WHERE id=%s", (reservation,))
         self.assertEqual(budget.usage(self.conn)['calls'], 0)
         with patch.dict('os.environ', AI_BUDGET_MAX_INFLIGHT='1'):
@@ -240,7 +242,7 @@ class BudgetPostgresTests(PostgreSQLFixture):
     def test_global_db_slot_denies_independent_process_counter(self):
         job = self.running()
         with job_context(job[0], {}, job[3]) as context:
-            reservation = budget._reserve(context, budget._limits(), 100)
+            reservation = budget._reserve(context, budget._limits(), 100, PAYLOAD)
         with patch.object(budget, '_inflight', 0), patch.dict('os.environ', AI_BUDGET_MAX_INFLIGHT='1'):
             with self.assertRaises(budget.BudgetExceeded):
                 self.request()
@@ -248,6 +250,50 @@ class BudgetPostgresTests(PostgreSQLFixture):
         with job_context(job[0], {}, job[3]) as context:
             budget._settle(reservation, context, {})
         self.assertEqual(self.request(), 'ok')
+
+    def test_scope_derived_server_side_from_system_prompt(self):
+        for system, scope in (('Read-only retrieval planner. Return ONLY', 'dialogue'),
+                              ('Aggiorna il riepilogo di UN UNICO dialogo', 'dialogue'),
+                              ('Prepare a local secretary review as strict JSON', 'review'),
+                              ('Confronta la comunicazione corrente con le attività', 'analysis'),
+                              ('Riepiloga la giornata del proprietario', 'analysis'),
+                              ('Estrai la memoria personale del proprietario', 'dialogue'),
+                              ('Research sub-task: collect evidence', 'research'),
+                              ('Un prompt qualsiasi', 'global')):
+            with self.subTest(system=system):
+                payload = dict(PAYLOAD, messages=[dict(role='system', content=system),
+                                                  dict(role='user', content='x')])
+                self.assertEqual(budget.scope_of(payload), scope)
+        # No system message / malformed payload: conservative global scope.
+        self.assertEqual(budget.scope_of(dict(PAYLOAD, messages=[])), 'global')
+        self.assertEqual(budget.scope_of({}), 'global')
+        self.assertEqual(budget.scope_of(None), 'global')
+
+    def test_scope_cap_restricts_but_never_raises_global_limit(self):
+        dialogue = dict(PAYLOAD, messages=[dict(role='system', content='Read-only retrieval planner'),
+                                           dict(role='user', content='x')])
+        with patch.dict('os.environ', AI_BUDGET_DIALOGUE_DAILY_CALLS='1'):
+            self.assertEqual(self.request(payload=dialogue), 'ok')
+            with self.assertRaisesRegex(budget.BudgetExceeded, 'dialogue'):
+                self.request(payload=dialogue)
+        # The scope cap does not consume the global budget for other scopes.
+        self.assertEqual(self.request(), 'ok')
+        self.assertEqual(budget.usage(self.conn)['scopes'],
+                         dict(dialogue=1, **{'global': 1}))
+
+    def test_scope_cap_zero_or_absent_means_disabled(self):
+        dialogue = dict(PAYLOAD, messages=[dict(role='system', content='Read-only retrieval planner'),
+                                           dict(role='user', content='x')])
+        for value in ('0', ''):
+            with patch.dict('os.environ', AI_BUDGET_DIALOGUE_DAILY_CALLS=value):
+                self.assertEqual(self.request(payload=dialogue), 'ok')
+        self.assertEqual(budget.usage(self.conn)['calls'], 2)
+
+    def test_invalid_scope_cap_fails_closed(self):
+        for value in ('-1', 'abc', '1.5'):
+            with patch.dict('os.environ', AI_BUDGET_DIALOGUE_DAILY_CALLS=value), job_context():
+                with self.assertRaises(budget.BudgetUnavailable):
+                    budget.request_content(PAYLOAD)
 
     def test_concurrent_last_daily_call_reserved_only_once(self):
         jobs_to_run = [self.running(), self.running()]

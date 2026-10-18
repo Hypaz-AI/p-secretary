@@ -98,7 +98,8 @@ class MonetaryBudgetTests(unittest.TestCase):
                           side_effect=lambda key, default:
                           '2.50' if key == 'AI_BUDGET_DAILY_COST' else default):
             with self.assertRaises(budget.BudgetExceeded):
-                budget._reserve(context, budget._limits(), 100)
+                budget._reserve(context, budget._limits(), 100,
+                                dict(model='m', max_tokens=1, messages=[]))
 
 
 class StopConditionTests(unittest.TestCase):

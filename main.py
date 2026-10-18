@@ -716,6 +716,7 @@ def main():
     state = actions.load_state()
     import jobs
     import knowledge
+    import research
     import secretary
     import pipeline
     import execution
@@ -735,7 +736,8 @@ def main():
                jobs.Worker('owner', _owner_job).start(),
                jobs.Worker('knowledge', knowledge.index_message).start(),
                jobs.Worker('secretary_review', _secretary_review_job).start(),
-               jobs.Worker(execution.KIND, execution.execute_approved).start()]
+               jobs.Worker(execution.KIND, execution.execute_approved).start(),
+               jobs.Worker(research.KIND, research.execute).start()]
     periodic = {}
     def launch(name, callback):
         old = periodic.get(name)

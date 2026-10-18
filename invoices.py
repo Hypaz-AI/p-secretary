@@ -37,13 +37,25 @@ def _slug(text: str) -> str:
     return text.strip("_")[:80]
 
 
-def _entity_dir(entity: str) -> Path:
+def _entity_dir(entity: str, sender: str = "") -> Path:
     name = (entity or "sconosciuto").lower()
     # accetta anche varianti: 'hypaz srl' -> 'hypaz'
     for known in config.INVOICE_ENTITIES:
         if name.startswith(known) or known.startswith(name.split()[0]):
             name = known
             break
+    # A permanent owner instruction (owner_instructions, active only) can
+    # override the folder for this sender (e.g. P.IVA-based routing). The
+    # instruction was created from live owner text and is revocable; the
+    # folder name is slugified defensively below either way.
+    try:
+        import owner_instructions
+        folder = owner_instructions.invoice_folder(sender)
+        if folder:
+            return config.INVOICE_DIR / (_slug(folder) or 'sconosciuto')
+    except Exception:
+        # Missing table/migration must never break invoice archiving.
+        pass
     return config.INVOICE_DIR / (_slug(name) or 'sconosciuto')
 
 
@@ -95,7 +107,7 @@ def save_invoice(entity: str, filename: str, data: bytes, sender: str = "",
         parts.append(_slug(number))
     name = "_".join(parts) + ext
 
-    folder = _entity_dir(entity) / month
+    folder = _entity_dir(entity, sender) / month
     folder.mkdir(parents=True, exist_ok=True)
 
     dest = folder / (Path(name).stem+'_'+digest[:16]+ext)

@@ -212,6 +212,42 @@ class PlannerIntegrationTests(AgentToolTests):
         self.assertEqual(retrieved['rounds'], [])
         self.search.assert_not_called()
 
+    def test_scratchpad_notes_flow_to_later_rounds_and_stay_bounded(self):
+        requests = [dict(tool='search', query='tetto', note='cerco preventivi'),
+                    dict(tool='search', query='costi', note='x' * 500),
+                    dict(tool='done', note='trovato')]
+        (retrieved, _), model = self.retrieve(requests)
+        self.assertEqual(len(retrieved['rounds']), 2)
+        # The second planner call sees the first (bounded) note.
+        second = json.loads(model.call_args_list[1].args[1])
+        self.assertEqual(second['notes'], ['cerco preventivi'])
+        # Oversized notes are truncated to the cap, never propagated whole.
+        third = json.loads(model.call_args_list[2].args[1])
+        self.assertEqual(len(third['notes'][1]), dialogue.MAX_SCRATCHPAD_CHARS)
+
+    def test_note_key_never_reaches_tool_dispatch(self):
+        with patch.object(agent_tools, 'run', wraps=agent_tools.run) as run:
+            self.retrieve([dict(tool='search', query='tetto', note='nota'),
+                           dict(tool='done')])
+        for call in run.call_args_list:
+            self.assertNotIn('note', call.args[0])
+
+    def test_rounds_are_configurable_with_a_hard_ceiling(self):
+        with patch.object(dialogue.config, 'get', return_value='6'):
+            self.assertEqual(dialogue._retrieval_rounds(), 6)
+        with patch.object(dialogue.config, 'get', return_value='8'):
+            self.assertEqual(dialogue._retrieval_rounds(), 8)
+        # Out-of-range or invalid values fall back to the conservative default.
+        for bad in ('0', '-3', '9', '99', 'abc', None):
+            with patch.object(dialogue.config, 'get', return_value=bad):
+                self.assertEqual(dialogue._retrieval_rounds(), dialogue.MAX_RETRIEVAL_ROUNDS)
+
+    def test_more_rounds_execute_when_configured(self):
+        requests = [dict(tool='search', query=f'q{i}') for i in range(5)] + [dict(tool='done')]
+        with patch.object(dialogue.config, 'get', return_value='6'):
+            (retrieved, _), _ = self.retrieve(requests)
+        self.assertEqual(len(retrieved['rounds']), 5)
+
 
 if __name__ == '__main__':
     unittest.main()
