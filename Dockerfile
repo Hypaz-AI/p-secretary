@@ -16,6 +16,7 @@ COPY actions.py admin_config.py brain.py config.py dashboard.py db.py digest.py 
 COPY ai_budget.py platform_health.py historical_import.py setup_gcal.py setup_ms_auth.py setup_telegram.py setup_telegram_account.py setup_whatsapp.py ./
 COPY setup_ui.py ./
 COPY task_reconciliation.py ./
+COPY agent_tools.py research.py owner_instructions.py ./
 COPY owner_dialogue.py owner_commitments.py ./
 COPY policy.py capabilities.py knowledge.py secretary.py secretary_runtime.py ./
 COPY execution.py quiet_hours.py privacy.py ./
