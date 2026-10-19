@@ -5,6 +5,7 @@ No deployment credentials, provider calls, workers or production migrations.
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import json
 import os
 from pathlib import Path
@@ -465,6 +466,25 @@ class SecretaryDashboardTests(unittest.TestCase):
         self.assertFalse(response.json['money_cap_enforced'])
         self.assertNotIn('PRIVATE', response.get_data(as_text=True))
 
+    def test_budget_snapshot_exposes_optional_caps_for_saturation_flags(self):
+        raw = dict(calls=2, reserved_tokens=16000, charged_tokens=17000, reported_tokens=12000,
+                   reported_cost='3.50', cost_unreported_calls=0, inflight=1,
+                   scopes={'dialogue': 4, 'review': 0, 'PRIVATE': 9})
+        limits = dict(DAILY_CALLS=200, DAILY_TOKENS=500000, MAX_INFLIGHT=2,
+                      MAX_OUTPUT_TOKENS=65536, DAILY_COST=Decimal('5.00'),
+                      SCOPE_dialogue=10, SCOPE_review=0, SCOPE_research=0,
+                      SCOPE_analysis=0, password='PRIVATE')
+        with patch.object(ai_budget, 'usage', return_value=raw), \
+             patch.object(ai_budget, '_limits', return_value=limits):
+            response = self.client.get('/api/secretary/budget')
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json['money_cap_enforced'])
+        self.assertEqual(response.json['daily_cost'], '5.00')
+        # Solo scope server-dichiarati con tetto attivo, mai nomi arbitrari.
+        self.assertEqual(response.json['scope_caps'], {'dialogue': 10})
+        self.assertEqual(response.json['scope_usage'], {'dialogue': 4})
+        self.assertNotIn('PRIVATE', response.get_data(as_text=True))
+
     def test_budget_config_fields_not_secrets_positive_and_restart_only(self):
         self.assertEqual(set(admin_config.BUDGET_FIELDS) | {'AI_BUDGET_DAILY_COST'},
                          {key for key in admin_config.schema() if key.startswith('AI_BUDGET_')})
@@ -508,6 +528,32 @@ class SecretaryDashboardTests(unittest.TestCase):
         self.assertIn('Documenti/allegati NON supportati', page)
         self.assertIn('crypto.getRandomValues(new Uint8Array(16))', script)
         self.assertNotIn('crypto.randomUUID()', script)
+
+    def test_budget_frontend_saturation_bars_and_thresholds(self):
+        root = Path(__file__).parent
+        script = (root / 'web/app.js').read_text()
+        page = (root / 'web/index.html').read_text()
+        style = (root / 'web/style.css').read_text()
+        # Soglie richieste: verde <60%, gialla 60–80%, arancione 80–100%, rossa >=100%.
+        for text in ("if (ratio < 0.6) return 'ok'", "if (ratio < 0.8) return 'warn'",
+                     "if (ratio < 1) return 'high'", "return 'full'",
+                     'function budgetMeter(parent, label, used, limit)',
+                     "fill.className = `budget-fill ${level}`",
+                     "fill.style.width = `${Number.isFinite(ratio) ? Math.min(100, Math.max(0, ratio * 100)) : 100}%`",
+                     "fill.setAttribute('role', 'progressbar')",
+                     "fill.setAttribute('aria-valuenow', String(used))",
+                     "const flag = node('span', 'SATURATO')",
+                     "budgetMeter(el('ai-budget'), 'Tentativi HTTP oggi (UTC)', usage.calls, limits.DAILY_CALLS)",
+                     "budgetMeter(el('ai-budget'), 'Token addebitati conservativamente', usage.charged_tokens, limits.DAILY_TOKENS)",
+                     "budgetMeter(el('ai-budget'), 'Slot prenotati / massimo simultanei', usage.inflight, limits.MAX_INFLIGHT)",
+                     'result.money_cap_enforced', 'result.scope_caps', 'result.scope_usage'):
+            self.assertIn(text, script)
+        for text in ('.budget-fill.ok{background:#3ecf8e}', '.budget-fill.warn{background:#e6c34a}',
+                     '.budget-fill.high{background:#e6913a}', '.budget-fill.full{background:#e5484d}',
+                     '.budget-track{', '.budget-flag{'):
+            self.assertIn(text, style)
+        self.assertIn('Barre di saturazione', page)
+        self.assertIn('SATURATO', page)
 
 
 class SecretaryDashboardPostgresTests(unittest.TestCase):

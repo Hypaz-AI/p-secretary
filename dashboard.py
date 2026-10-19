@@ -166,11 +166,20 @@ def budget_view():
     result = {key: raw.get(key) for key in counters}
     cost = raw.get('reported_cost')
     result['reported_cost'] = str(cost) if cost is not None else None
+    # Optional enforceable caps are surfaced so the FE can flag saturation.
+    # Only server-declared scope names and numeric limits leave this view.
+    daily_cost = limits.get('DAILY_COST', 0)
+    scopes = raw.get('scopes') or {}
+    scope_caps = {name: limits['SCOPE_' + name] for name in budget.SCOPE_CALLS
+                  if limits.get('SCOPE_' + name, 0) > 0}
     return dict(available=True, usage=result,
                 limits={key: limits[key] for key in ('DAILY_CALLS', 'DAILY_TOKENS',
                         'MAX_INFLIGHT', 'MAX_OUTPUT_TOKENS')},
+                daily_cost=str(daily_cost), money_cap_enforced=daily_cost > 0,
+                scope_caps=scope_caps,
+                scope_usage={name: scopes.get(name, 0) for name in scope_caps},
                 day_timezone='UTC', scope='jobs execution context only',
-                money_cap_enforced=False, reservations_refunded=False)
+                reservations_refunded=False)
 
 
 def _json_object(keys):

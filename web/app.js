@@ -449,16 +449,52 @@ el('email-compose').onsubmit = async event => {
   } catch (error) {el('email-status').textContent = `${error.message}. Nessun invio richiesto.`;}
   finally {el('email-prepare').disabled = false;}
 };
+const BUDGET_LEVEL_NAMES = {ok: 'verde', warn: 'giallo', high: 'arancione', full: 'rosso'};
+const BUDGET_SCOPE_NAMES = {dialogue: 'dialogo', review: 'revisione', research: 'ricerca', analysis: 'analisi'};
+// Soglie richieste: verde <60%, gialla 60–80%, arancione 80–100% (100 escluso), rossa >=100%.
+function budgetLevel(ratio) {
+  if (!Number.isFinite(ratio)) return 'full';
+  if (ratio < 0.6) return 'ok';
+  if (ratio < 0.8) return 'warn';
+  if (ratio < 1) return 'high';
+  return 'full';
+}
+function budgetMeter(parent, label, used, limit) {
+  const ratio = limit > 0 ? used / limit : Infinity;
+  const level = budgetLevel(ratio);
+  const percent = Number.isFinite(ratio) ? Math.round(ratio * 100) : '∞';
+  const detail = `${used} / ${limit} · ${percent}%`;
+  const meter = node('div', ''); meter.className = 'budget-meter';
+  const head = node('div', ''); head.className = 'budget-head';
+  head.append(node('span', label), node('small', detail));
+  if (level === 'full') {const flag = node('span', 'SATURATO'); flag.className = 'budget-flag'; head.append(flag);}
+  const track = node('div', ''); track.className = 'budget-track';
+  const fill = node('div', ''); fill.className = `budget-fill ${level}`;
+  fill.style.width = `${Number.isFinite(ratio) ? Math.min(100, Math.max(0, ratio * 100)) : 100}%`;
+  fill.setAttribute('role', 'progressbar');
+  fill.setAttribute('aria-valuemin', '0');
+  fill.setAttribute('aria-valuemax', String(limit));
+  fill.setAttribute('aria-valuenow', String(used));
+  fill.setAttribute('aria-label', `${label}: ${detail} · livello ${BUDGET_LEVEL_NAMES[level]}`);
+  track.append(fill); meter.append(head, track); parent.append(meter);
+  return meter;
+}
 async function loadBudget() {
   el('ai-budget').replaceChildren();
   try {
-    const result = await api('/api/secretary/budget'); const usage = result.usage;
-    row(el('ai-budget'), 'Tentativi HTTP oggi (UTC)', `${usage.calls} / ${result.limits.DAILY_CALLS}`);
-    row(el('ai-budget'), 'Token addebitati conservativamente', `${usage.charged_tokens} / ${result.limits.DAILY_TOKENS}`);
+    const result = await api('/api/secretary/budget'); const usage = result.usage; const limits = result.limits;
+    budgetMeter(el('ai-budget'), 'Tentativi HTTP oggi (UTC)', usage.calls, limits.DAILY_CALLS);
+    budgetMeter(el('ai-budget'), 'Token addebitati conservativamente', usage.charged_tokens, limits.DAILY_TOKENS);
+    budgetMeter(el('ai-budget'), 'Slot prenotati / massimo simultanei', usage.inflight, limits.MAX_INFLIGHT);
+    if (result.money_cap_enforced && Number(result.daily_cost) > 0) {
+      budgetMeter(el('ai-budget'), 'Costo comunicato / tetto di spesa', Number(usage.reported_cost || 0), Number(result.daily_cost));
+    }
+    Object.keys(result.scope_caps || {}).forEach(scope => {
+      budgetMeter(el('ai-budget'), `Budget ${BUDGET_SCOPE_NAMES[scope] || scope}`, (result.scope_usage || {})[scope] || 0, result.scope_caps[scope]);
+    });
     row(el('ai-budget'), 'Prenotati / comunicati dal provider', `${usage.reserved_tokens} / ${usage.reported_tokens ?? 'non comunicati'}`);
-    row(el('ai-budget'), 'Slot prenotati / massimo simultanei', `${usage.inflight} / ${result.limits.MAX_INFLIGHT}`);
-    row(el('ai-budget'), 'Massimo output per tentativo', String(result.limits.MAX_OUTPUT_TOKENS));
-    row(el('ai-budget'), 'Costo comunicato (non tetto di spesa)', `${usage.reported_cost ?? 'non comunicato'} · ${usage.cost_unreported_calls} tentativi con costo non comunicato`);
+    row(el('ai-budget'), 'Massimo output per tentativo', String(limits.MAX_OUTPUT_TOKENS));
+    if (!result.money_cap_enforced) row(el('ai-budget'), 'Costo comunicato (non tetto di spesa)', `${usage.reported_cost ?? 'non comunicato'} · ${usage.cost_unreported_calls} tentativi con costo non comunicato`);
   } catch (error) {el('ai-budget').textContent = `${error.message}. Contabilità non disponibile: nessun consumo nullo presunto.`;}
 }
 async function loadSecretary() {

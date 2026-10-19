@@ -42,6 +42,7 @@ class Element {
     this.tagName = tag.toUpperCase();
     this.children = []; this.dataset = {}; this.attributes = {};
     this.hidden = false; this.disabled = false; this.value = ''; this._text = '';
+    this.style = {};
     this.classList = {toggle() {}, add() {}, remove() {}, contains() {return false;}};
   }
   get textContent() {return this._text + this.children.map(child => child.textContent).join('');}
