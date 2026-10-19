@@ -202,7 +202,9 @@ def field_metadata(key):
 
 def schema():
     groups = {
-        'Identità e AI': ['AGENT_NAME', 'OPENROUTER_API_KEY', 'OPENROUTER_MODEL',
+        'AI · limiti dei Worker (chiamate, token, concorrenza)': [key for key in BUDGET_FIELDS if key != 'AI_BUDGET_DAILY_COST'],
+        'AI · tetto di spesa in denaro (opzionale)': ['AI_BUDGET_DAILY_COST'],
+        'Nome assistente e modello AI': ['AGENT_NAME', 'OPENROUTER_API_KEY', 'OPENROUTER_MODEL',
                   'OPENROUTER_AUDIO_MODEL'],
         'Database': ['DATABASE_URL'],
         'Telegram e WhatsApp': ['TELEGRAM_BOT_TOKEN', *INTERACTIVE,
@@ -211,8 +213,6 @@ def schema():
         'Preferenze': ['TIMEZONE', 'LANGUAGE', 'DIGEST_TIME', 'NOTIFY_PRIORITY_THRESHOLD', 'POLL_INTERVAL'],
         'Segretario · modalità e quiet hours': list(SECRETARY_FIELDS),
         'Segretario · notifiche di revisione': list(REVIEW_FIELDS),
-        'AI · limiti Worker (non monetari)': [key for key in BUDGET_FIELDS if key != 'AI_BUDGET_DAILY_COST'],
-        'AI · tetto di spesa giornaliero': ['AI_BUDGET_DAILY_COST'],
         'Deployment (sola lettura)': sorted(DEPLOYMENT),
     }
     for i in range(1, 51):

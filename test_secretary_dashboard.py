@@ -537,23 +537,53 @@ class SecretaryDashboardTests(unittest.TestCase):
         # Soglie richieste: verde <60%, gialla 60–80%, arancione 80–100%, rossa >=100%.
         for text in ("if (ratio < 0.6) return 'ok'", "if (ratio < 0.8) return 'warn'",
                      "if (ratio < 1) return 'high'", "return 'full'",
-                     'function budgetMeter(parent, label, used, limit)',
+                     'function budgetMeter(parent, label, used, limit, target)',
                      "fill.className = `budget-fill ${level}`",
                      "fill.style.width = `${Number.isFinite(ratio) ? Math.min(100, Math.max(0, ratio * 100)) : 100}%`",
                      "fill.setAttribute('role', 'progressbar')",
                      "fill.setAttribute('aria-valuenow', String(used))",
                      "const flag = node('span', 'SATURATO')",
-                     "budgetMeter(el('ai-budget'), 'Tentativi HTTP oggi (UTC)', usage.calls, limits.DAILY_CALLS)",
-                     "budgetMeter(el('ai-budget'), 'Token addebitati conservativamente', usage.charged_tokens, limits.DAILY_TOKENS)",
-                     "budgetMeter(el('ai-budget'), 'Slot prenotati / massimo simultanei', usage.inflight, limits.MAX_INFLIGHT)",
+                     "const edit = node('button', 'Modifica questo limite')",
+                     'edit.onclick = () => openSettingsGroup(target.group, target.key)',
+                     'async function openSettingsGroup(group, key)',
+                     "el('budget-settings').onclick = () => openSettingsGroup(AI_LIMITS_GROUP, 'AI_BUDGET_MAX_INFLIGHT')",
+                     "const AI_LIMITS_GROUP = 'AI · limiti dei Worker (chiamate, token, concorrenza)'",
+                     "const AI_COST_GROUP = 'AI · tetto di spesa in denaro (opzionale)'",
+                     "budgetMeter(el('ai-budget'), 'Tentativi HTTP oggi (UTC)', usage.calls, limits.DAILY_CALLS,",
+                     "budgetMeter(el('ai-budget'), 'Token addebitati conservativamente', usage.charged_tokens, limits.DAILY_TOKENS,",
+                     "budgetMeter(el('ai-budget'), 'Slot prenotati / massimo simultanei', usage.inflight, limits.MAX_INFLIGHT,",
+                     "row(el('ai-budget'), 'Token prenotati in anticipo (stima per eccesso)', String(usage.reserved_tokens))",
+                     "row(el('ai-budget'), 'Token comunicati dal provider (consumo reale)', usage.reported_tokens ?? 'non comunicati')",
                      'result.money_cap_enforced', 'result.scope_caps', 'result.scope_usage'):
             self.assertIn(text, script)
+        # La vecchia riga accoppiava due metriche diverse: non deve tornare.
+        self.assertNotIn("'Prenotati / comunicati dal provider'", script)
         for text in ('.budget-fill.ok{background:#3ecf8e}', '.budget-fill.warn{background:#e6c34a}',
                      '.budget-fill.high{background:#e6913a}', '.budget-fill.full{background:#e5484d}',
-                     '.budget-track{', '.budget-flag{'):
+                     '.budget-track{', '.budget-flag{', '.budget-edit{'):
             self.assertIn(text, style)
         self.assertIn('Barre di saturazione', page)
         self.assertIn('SATURATO', page)
+        self.assertIn('Modifica i limiti AI', page)
+
+    def test_budget_limits_endpoint_and_settings_group_names(self):
+        with patch.object(ai_budget, '_limits', return_value=dict(
+                DAILY_CALLS=10000, DAILY_TOKENS=500000000, MAX_INFLIGHT=2,
+                MAX_OUTPUT_TOKENS=65536, DAILY_COST=0, password='PRIVATE')):
+            response = self.client.get('/api/secretary/budget/limits')
+        self.assertEqual(response.status_code, 200)
+        fields = {field['key']: field['value'] for field in response.json['fields']}
+        self.assertEqual(fields['AI_BUDGET_MAX_INFLIGHT'], '2')
+        self.assertEqual(fields['AI_BUDGET_DAILY_COST'], '0')
+        self.assertNotIn('PRIVATE', response.get_data(as_text=True))
+        # I gruppi FE devono rendere immediato dove si cambia il limite.
+        schema = admin_config.schema()
+        self.assertEqual(schema['AI_BUDGET_MAX_INFLIGHT']['group'],
+                         'AI · limiti dei Worker (chiamate, token, concorrenza)')
+        self.assertEqual(schema['AI_BUDGET_DAILY_COST']['group'],
+                         'AI · tetto di spesa in denaro (opzionale)')
+        self.assertNotIn('AI · limiti Worker (non monetari)',
+                         {field['group'] for field in schema.values()})
 
 
 class SecretaryDashboardPostgresTests(unittest.TestCase):

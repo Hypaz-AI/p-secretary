@@ -108,6 +108,9 @@ el('config-back').onclick = editAgain;
 el('config-cancel').onclick = () => {el('config-fields').querySelectorAll('[data-key]').forEach(i => {i.value = i.dataset.original;}); editAgain(); el('config-status').textContent = 'Modifiche annullate. Credenziali salvate invariate.';};
 el('config-load').onclick = async () => {
   if (Object.keys(pendingChanges()).length && !confirm('Scartare le modifiche non salvate e ricaricare?')) return;
+  await loadConfiguration();
+};
+async function loadConfiguration() {
   try {
     const result = await api('/api/configuration');
     configRevision = result.revision;
@@ -178,7 +181,20 @@ el('config-load').onclick = async () => {
     filterGroups(); el('config-load').textContent = 'Ricarica impostazioni';
     el('config-save').hidden = false; el('config-status').textContent = 'Modificare solo i campi necessari. Le verifiche di rete sono senza invii o pairing; OAuth e sessioni richiedono il terminale.';
   } catch(e) {el('config-status').textContent = e.message;}
-};
+}
+// Deep link: apre Impostazioni sul gruppo e sul campo che controlla una barra di budget.
+async function openSettingsGroup(group, key) {
+  showPage('integration-settings');
+  if (!el('config-form').hidden) {
+    const button = [...document.querySelectorAll('#config-groups button')].find(b => b.textContent.startsWith(group));
+    if (button) {button.click(); const input = el('setting-' + key); if (input) {input.focus(); input.scrollIntoView({behavior:'smooth', block:'center'});} return;}
+  }
+  await loadConfiguration();
+  const button = [...document.querySelectorAll('#config-groups button')].find(b => b.textContent.startsWith(group));
+  if (button) button.click();
+  const input = el('setting-' + key);
+  if (input) {input.focus(); input.scrollIntoView({behavior:'smooth', block:'center'});}
+}
 el('config-form').onsubmit = async event => {
   event.preventDefault();
   const changes = pendingChanges();
@@ -459,7 +475,7 @@ function budgetLevel(ratio) {
   if (ratio < 1) return 'high';
   return 'full';
 }
-function budgetMeter(parent, label, used, limit) {
+function budgetMeter(parent, label, used, limit, target) {
   const ratio = limit > 0 ? used / limit : Infinity;
   const level = budgetLevel(ratio);
   const percent = Number.isFinite(ratio) ? Math.round(ratio * 100) : '∞';
@@ -468,6 +484,11 @@ function budgetMeter(parent, label, used, limit) {
   const head = node('div', ''); head.className = 'budget-head';
   head.append(node('span', label), node('small', detail));
   if (level === 'full') {const flag = node('span', 'SATURATO'); flag.className = 'budget-flag'; head.append(flag);}
+  if (target) {
+    const edit = node('button', 'Modifica questo limite'); edit.type = 'button'; edit.className = 'budget-edit';
+    edit.onclick = () => openSettingsGroup(target.group, target.key);
+    head.append(edit);
+  }
   const track = node('div', ''); track.className = 'budget-track';
   const fill = node('div', ''); fill.className = `budget-fill ${level}`;
   fill.style.width = `${Number.isFinite(ratio) ? Math.min(100, Math.max(0, ratio * 100)) : 100}%`;
@@ -479,20 +500,28 @@ function budgetMeter(parent, label, used, limit) {
   track.append(fill); meter.append(head, track); parent.append(meter);
   return meter;
 }
+const AI_LIMITS_GROUP = 'AI · limiti dei Worker (chiamate, token, concorrenza)';
+const AI_COST_GROUP = 'AI · tetto di spesa in denaro (opzionale)';
 async function loadBudget() {
   el('ai-budget').replaceChildren();
   try {
     const result = await api('/api/secretary/budget'); const usage = result.usage; const limits = result.limits;
-    budgetMeter(el('ai-budget'), 'Tentativi HTTP oggi (UTC)', usage.calls, limits.DAILY_CALLS);
-    budgetMeter(el('ai-budget'), 'Token addebitati conservativamente', usage.charged_tokens, limits.DAILY_TOKENS);
-    budgetMeter(el('ai-budget'), 'Slot prenotati / massimo simultanei', usage.inflight, limits.MAX_INFLIGHT);
+    budgetMeter(el('ai-budget'), 'Tentativi HTTP oggi (UTC)', usage.calls, limits.DAILY_CALLS,
+      {group: AI_LIMITS_GROUP, key: 'AI_BUDGET_DAILY_CALLS'});
+    budgetMeter(el('ai-budget'), 'Token addebitati conservativamente', usage.charged_tokens, limits.DAILY_TOKENS,
+      {group: AI_LIMITS_GROUP, key: 'AI_BUDGET_DAILY_TOKENS'});
+    budgetMeter(el('ai-budget'), 'Slot prenotati / massimo simultanei', usage.inflight, limits.MAX_INFLIGHT,
+      {group: AI_LIMITS_GROUP, key: 'AI_BUDGET_MAX_INFLIGHT'});
     if (result.money_cap_enforced && Number(result.daily_cost) > 0) {
-      budgetMeter(el('ai-budget'), 'Costo comunicato / tetto di spesa', Number(usage.reported_cost || 0), Number(result.daily_cost));
+      budgetMeter(el('ai-budget'), 'Costo comunicato / tetto di spesa', Number(usage.reported_cost || 0), Number(result.daily_cost),
+        {group: AI_COST_GROUP, key: 'AI_BUDGET_DAILY_COST'});
     }
     Object.keys(result.scope_caps || {}).forEach(scope => {
       budgetMeter(el('ai-budget'), `Budget ${BUDGET_SCOPE_NAMES[scope] || scope}`, (result.scope_usage || {})[scope] || 0, result.scope_caps[scope]);
     });
-    row(el('ai-budget'), 'Prenotati / comunicati dal provider', `${usage.reserved_tokens} / ${usage.reported_tokens ?? 'non comunicati'}`);
+    // Due metriche distinte, mai un rapporto fuorviante: la prenotazione è una stima per eccesso.
+    row(el('ai-budget'), 'Token prenotati in anticipo (stima per eccesso)', String(usage.reserved_tokens));
+    row(el('ai-budget'), 'Token comunicati dal provider (consumo reale)', usage.reported_tokens ?? 'non comunicati');
     row(el('ai-budget'), 'Massimo output per tentativo', String(limits.MAX_OUTPUT_TOKENS));
     if (!result.money_cap_enforced) row(el('ai-budget'), 'Costo comunicato (non tetto di spesa)', `${usage.reported_cost ?? 'non comunicato'} · ${usage.cost_unreported_calls} tentativi con costo non comunicato`);
   } catch (error) {el('ai-budget').textContent = `${error.message}. Contabilità non disponibile: nessun consumo nullo presunto.`;}
@@ -681,6 +710,7 @@ async function loadRuntime() {
   }
 }
 el('secretary-refresh').onclick = () => {loadSecretary(); loadKnowledge(); loadRuntime(); loadBudget();};
+el('budget-settings').onclick = () => openSettingsGroup(AI_LIMITS_GROUP, 'AI_BUDGET_MAX_INFLIGHT');
 function loadWorkspace() {return Promise.all([loadSecretary(), loadKnowledge(), loadPolicies(), loadSupport(), loadRuntime(), loadBudget()]);}
 async function refresh() {
   try {

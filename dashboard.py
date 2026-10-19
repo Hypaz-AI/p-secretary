@@ -182,6 +182,16 @@ def budget_view():
                 reservations_refunded=False)
 
 
+def budget_limits_view():
+    """Editable Worker budget caps only: no usage, prompts or credentials."""
+    budget = _service('ai_budget')
+    limits = budget._limits()
+    fields = [dict(key='AI_BUDGET_' + name, value=str(limits[name]))
+              for name in ('DAILY_CALLS', 'DAILY_TOKENS', 'MAX_INFLIGHT', 'MAX_OUTPUT_TOKENS')]
+    fields.append(dict(key='AI_BUDGET_DAILY_COST', value=str(limits['DAILY_COST'])))
+    return dict(available=True, fields=fields)
+
+
 def _json_object(keys):
     """Reject duplicate keys/nonfinite JSON before any service or DB mutation."""
     def pairs(items):
@@ -614,6 +624,11 @@ def register_secretary(app):
     @bounded
     def secretary_budget():
         return budget_view()
+
+    @app.get('/api/secretary/budget/limits')
+    @bounded
+    def secretary_budget_limits():
+        return budget_limits_view()
 
     @app.post('/api/secretary/emails')
     @bounded
