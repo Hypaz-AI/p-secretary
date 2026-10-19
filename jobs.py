@@ -7,6 +7,7 @@ import json
 import hashlib
 import builtins
 import logging
+import re
 import threading
 import time
 import uuid
@@ -16,7 +17,7 @@ from dataclasses import dataclass, field
 import db
 
 VERSION = 'durable_work_v2'
-RUNTIME_VERSION = 'durable_work_runtime_v3'
+RUNTIME_VERSION = 'durable_work_runtime_v4'
 logger = logging.getLogger(__name__)
 _local = threading.local()
 HEARTBEAT_SECONDS = 30
@@ -91,13 +92,32 @@ def safe_error(error):
     return code if (isinstance(known, type) and issubclass(known, BaseException)
                     or code in ('Deferred', 'LeaseLost')) else 'JobError'
 
+
+_CREDENTIAL = re.compile(r'(?i)(token|password|passwd|secret|api[_-]?key|authorization|credential)\s*[:=]\s*\S+')
+_BEARER = re.compile(r'(?i)\bbearer\s+\S+')
+_URL = re.compile(r'\b\w+://\S+')
+
+
+def describe_error(error):
+    """Explicit, human-readable failure reason for the owner.
+
+    Unlike safe_error (a bounded class code), this keeps the real message so the
+    dashboard can explain WHY a job failed. Credentials, bearer tokens and URLs
+    are still redacted, and the result is single-line and length-bounded.
+    """
+    text = str(error) if isinstance(error, BaseException) else str(error)
+    text = ''.join(ch if ch.isprintable() else ' ' for ch in text)
+    for pattern in (_BEARER, _CREDENTIAL, _URL):
+        text = pattern.sub('[redacted]', text)
+    return ' '.join(text.split())[:500]
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS work_jobs (
  id BIGSERIAL PRIMARY KEY, kind TEXT NOT NULL, key TEXT NOT NULL UNIQUE,
  payload JSONB NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
  attempts INTEGER NOT NULL DEFAULT 0, available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- lease_until TIMESTAMPTZ, token TEXT, error TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- finished_at TIMESTAMPTZ);
+ lease_until TIMESTAMPTZ, token TEXT, error TEXT, failure_reason TEXT,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ);
 CREATE INDEX IF NOT EXISTS work_ready ON work_jobs(kind,available_at) WHERE status IN ('pending','running');
 CREATE TABLE IF NOT EXISTS source_cursors (
  key TEXT PRIMARY KEY, value JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
@@ -124,6 +144,7 @@ def migrate(conn):
             conn.execute('INSERT INTO schema_migrations(version,reset_rows) VALUES (%s,0)', (VERSION,))
         if not conn.execute('SELECT 1 FROM schema_migrations WHERE version=%s', (RUNTIME_VERSION,)).fetchone():
             conn.execute("""ALTER TABLE work_jobs ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE work_jobs ADD COLUMN IF NOT EXISTS failure_reason TEXT;
                 UPDATE work_jobs SET priority=CASE
                     WHEN kind='owner' THEN 100
                     WHEN kind='action' AND (payload ? 'owner_reply_mid' OR payload ? 'owner_reminder') THEN 90
@@ -173,19 +194,23 @@ def claim(kind):
             ORDER BY priority DESC,available_at,id FOR UPDATE SKIP LOCKED LIMIT 1)
             RETURNING id,payload,attempts''', (token, kind)).fetchone()
         # An exhausted crashed lease must not remain invisibly running forever.
-        conn.execute("UPDATE work_jobs SET status='failed',error='lease exhausted' WHERE status='running' AND lease_until<now() AND attempts>=8")
+        conn.execute("""UPDATE work_jobs SET status='failed',error='lease exhausted',
+            failure_reason='Lease scaduto senza heartbeat: tentativi esauriti'
+            WHERE status='running' AND lease_until<now() AND attempts>=8""")
         return (row[0], row[1], row[2], token) if row else None
 
 
 def finish(job, error=None):
     identity, _, attempts, token = job
     with db._conn() as conn:
-        conn.execute('''UPDATE work_jobs SET status=%s,error=%s,token=NULL,lease_until=NULL,
+        conn.execute('''UPDATE work_jobs SET status=%s,error=%s,failure_reason=%s,
+            token=NULL,lease_until=NULL,
             finished_at=CASE WHEN %s THEN now() ELSE NULL END,
             available_at=now()+(%s * interval '1 second') WHERE id=%s AND token=%s
             AND status='running' AND lease_until>now()''',
             ('done' if error is None else 'failed' if attempts >= 8 else 'pending',
-             safe_error(error) if error is not None else None, error is None,
+             safe_error(error) if error is not None else None,
+             describe_error(error) if error is not None else None, error is None,
              min(3600, 15 * 2 ** (attempts-1)), identity, token))
 
 
@@ -264,7 +289,7 @@ class Worker:
                             defer(job)
                         else:
                             logger.warning('Work job %s failed (%s)', job[0], safe_error(exc))
-                            finish(job, safe_error(exc))
+                            finish(job, exc)
                     except Exception:
                         pass  # Lease expiry recovers database outages.
             self.stop_event.wait(1)
@@ -276,6 +301,8 @@ class Worker:
 def metrics():
     with db._conn() as conn:
         rows = conn.execute('''SELECT kind,status,count(*),
-            EXTRACT(EPOCH FROM now()-min(created_at)),max(finished_at)
+            EXTRACT(EPOCH FROM now()-min(created_at)),max(finished_at),
+            (array_agg(failure_reason ORDER BY finished_at DESC NULLS LAST, id DESC)
+                FILTER (WHERE failure_reason IS NOT NULL))[1]
             FROM work_jobs GROUP BY kind,status ORDER BY kind,status''').fetchall()
-        return [dict(zip(('kind','status','count','oldest_age_seconds','last_success'), r)) for r in rows]
+        return [dict(zip(('kind','status','count','oldest_age_seconds','last_success','failure_reason'), r)) for r in rows]

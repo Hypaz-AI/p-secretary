@@ -78,6 +78,19 @@ class LeaseTests(IsolatedTests):
         self.assertEqual(jobs.safe_error('https://private/token'), 'JobError')
         self.assertEqual(jobs.safe_error(ValueError('private body')), 'ValueError')
 
+    def test_describe_error_keeps_explicit_message_but_redacts_secrets(self):
+        self.assertEqual(jobs.describe_error(ValueError('Connection refused by provider')),
+                         'Connection refused by provider')
+        self.assertEqual(jobs.describe_error('Notification not acknowledged'),
+                         'Notification not acknowledged')
+        self.assertEqual(jobs.describe_error(ValueError('token=private-example')), '[redacted]')
+        self.assertEqual(jobs.describe_error(ValueError('Authorization: Bearer private-token')),
+                         '[redacted]')
+        self.assertEqual(jobs.describe_error(ValueError('postgresql://secret@host/private body')),
+                         '[redacted] body')
+        self.assertNotIn('\n', jobs.describe_error(ValueError('line1\nline2')))
+        self.assertLessEqual(len(jobs.describe_error(ValueError('x' * 2000))), 500)
+
     def test_heartbeat_renews_in_background_and_stops_on_lease_loss(self):
         renewed = threading.Event()
         worker = jobs.Worker('analysis', Mock())
@@ -116,8 +129,9 @@ class LeaseTests(IsolatedTests):
                 jobs, 'assert_current'), patch.object(jobs, 'finish', side_effect=lambda *a: worker.stop()) as finish, \
                 patch.object(jobs.logger, 'warning') as log:
             worker.run()
-        finish.assert_called_once_with(self.job, 'ValueError')
+        finish.assert_called_once_with(self.job, worker.handler.side_effect)
         self.assertNotIn('private', str(log.call_args_list))
+        self.assertNotIn('private', jobs.describe_error(worker.handler.side_effect))
         self.assertIsNone(jobs.execution_context())
 
     def test_worker_never_calls_handler_for_lost_lease(self):

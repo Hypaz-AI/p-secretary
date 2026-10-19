@@ -42,10 +42,11 @@ assert not errors, errors
              patch.object(jobs.logger, 'exception') as traceback_log:
             worker.run()
             handler.assert_called_once_with(job[1])
-            jobs.finish.assert_called_once_with(job, 'ValueError')
+            jobs.finish.assert_called_once_with(job, handler.side_effect)
             log.assert_called_once_with('Work job %s failed (%s)', job[0], 'ValueError')
             traceback_log.assert_not_called()
-            self.assertNotIn(secret, str(jobs.finish.call_args_list) + str(log.call_args_list))
+            self.assertNotIn(secret, str(log.call_args_list))
+            self.assertNotIn(secret, jobs.describe_error(handler.side_effect))
         self.assertIsNone(jobs.execution_context())
 
     def setUp(self):
@@ -157,7 +158,7 @@ assert not errors, errors
         jobs.finish((1,{},3,'lease-token'), TimeoutError('token=private-example'))
         sql, args = self.conn.execute.call_args.args
         self.assertIn('token=%s', sql)
-        self.assertEqual(args,('pending','TimeoutError',False,60,1,'lease-token'))
+        self.assertEqual(args,('pending','TimeoutError','[redacted]',False,60,1,'lease-token'))
 
     def test_claim_uses_skip_locked_and_expiry(self):
         self.conn.execute.return_value.fetchone.return_value = (1,{},1)
