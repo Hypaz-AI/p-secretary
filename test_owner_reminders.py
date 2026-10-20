@@ -142,6 +142,10 @@ class OwnerReminderTests(unittest.TestCase):
         self.conn.execute.return_value.fetchall.side_effect = [
             [(7, 3, self.task['owner_deadline_date'], due, None),
              (9, 2, None, None, due)], [(8, due)]]
+        # Retention runs first in schedule(): stamp today's prune as done so
+        # the audit DELETE does not consume this test's mocked queries.
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        self.conn.execute.return_value.fetchone.side_effect = [({'day': today},)]
         with patch('flows.enabled', return_value=False), patch('jobs.enqueue', return_value=None) as enqueue:
             pipeline.schedule()
         self.assertEqual([c.args[2] for c in enqueue.call_args_list],
@@ -151,7 +155,7 @@ class OwnerReminderTests(unittest.TestCase):
                               remind_at=due.isoformat()))
         self.assertEqual(enqueue.call_args_list[2].args[3],
                          dict(type='reminder', id=8, deadline=due.isoformat()))
-        owner_sql = self.conn.execute.call_args_list[0].args[0]
+        owner_sql = self.conn.execute.call_args_list[1].args[0]
         self.assertIn('owner_remind_at,deadline FROM tasks', owner_sql)
         self.assertIn("status='open'", owner_sql)
         self.assertIn('deadline IS NOT NULL', owner_sql)

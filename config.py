@@ -162,6 +162,25 @@ LANGUAGE = get("LANGUAGE", "it")
 SECRETARY_MODE = get("SECRETARY_MODE", "observe").lower()
 if SECRETARY_MODE not in ("observe", "active"):
     SECRETARY_MODE = "observe"
+# Contesto per task nella riconciliazione: caratteri del body sorgente
+# inclusi nel prompt AI per ogni task candidato (RECONCILE_CONTEXT_CHARS).
+# Il trim riduce token/latenza; la validazione delle citazioni resta sul
+# body completo, quindi una citazione troncata resta comunque substring.
+try:
+    RECONCILE_CONTEXT_CHARS = int(get("RECONCILE_CONTEXT_CHARS", "1200"))
+except ValueError:
+    RECONCILE_CONTEXT_CHARS = 1200
+if not 200 <= RECONCILE_CONTEXT_CHARS <= 20000:
+    RECONCILE_CONTEXT_CHARS = 1200
+# Retention dell'audit degli effetti (EFFECT_AUDIT_RETENTION_DAYS giorni).
+# 0 disattiva. Le ricevute (effect_receipts) restano immutabili: qui si
+# pota solo il registro bulk dei reason-code di policy.
+try:
+    EFFECT_AUDIT_RETENTION_DAYS = int(get("EFFECT_AUDIT_RETENTION_DAYS", "30"))
+except ValueError:
+    EFFECT_AUDIT_RETENTION_DAYS = 30
+if not 0 <= EFFECT_AUDIT_RETENTION_DAYS <= 3650:
+    EFFECT_AUDIT_RETENTION_DAYS = 30
 # Quiet hours GLOBALI (ora locale, 0-23): durante la fascia le notifiche
 # ordinarie non urgenti vengono rinviate all'uscita della fascia stessa.
 # Le emergenze (urgent=true o gravità alta) restano immediate.

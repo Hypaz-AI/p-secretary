@@ -374,13 +374,21 @@ class ReconcileTests(OfflineTests):
             self.assertTrue(tr.owner_commands('/rifiuta_attivita 12'))
             self.assertIn('non pendente', notify.call_args.args[2])
 
-    def test_notification_chunks_are_plain_text_and_untruncated(self):
+    def test_notification_chunks_are_plain_text_untruncated_and_provenanced(self):
         text = 'a' * 8001
         with patch.object(tr.jobs, 'enqueue') as enqueue:
-            tr._notify(self.conn, 'test', text)
+            tr._notify(self.conn, 'test', text, 42)
         payloads = [call.args[3] for call in enqueue.call_args_list]
         self.assertEqual(''.join(payload['text'] for payload in payloads), text)
         self.assertTrue(all(not payload['html'] for payload in payloads))
+        self.assertTrue(all(payload['evidence_message_id'] == 42 for payload in payloads))
+
+    def test_proposal_notification_carries_evidence_provenance(self):
+        # The proposal payload must carry the native evidence message id:
+        # it is the authority for the notify effect (policy.can_operate),
+        # while 'message_id' stays reserved for verdict notifications.
+        _, _, notify, _ = self.run_reconcile(result={'changes': [item(unique_match=False)]})
+        self.assertEqual(notify.call_args.args[3], 100)
 
 
 if __name__ == '__main__':

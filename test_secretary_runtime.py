@@ -179,11 +179,13 @@ class OfflineRuntimeTests(unittest.TestCase):
         callback.assert_called_once()
 
     def test_policy_revoked_between_attempt_and_http(self):
+        # Revocation is monotonic policy: the job fails permanently instead of
+        # looping on Deferred; the attempt receipt stays 'uncertain' (no blind resend).
         with patch.object(policy, 'prepare_effect', return_value=True), \
              patch.object(policy, 'record_receipt', return_value=True) as receipt, \
              patch.object(policy, 'can_operate', return_value=False):
             callback = MagicMock()
-            with self.assertRaises(jobs.Deferred):
+            with self.assertRaises(jobs.Permanent):
                 pipeline._effect('notify:7', 7, 'notify', {}, callback)
         callback.assert_not_called()
         self.assertEqual(receipt.call_args.args[-1], 'uncertain')
@@ -1475,7 +1477,7 @@ class RuntimePostgresTests(unittest.TestCase):
         self.assertEqual(self.conn.execute('SELECT count(*) FROM secretary_runtime_reviews').fetchone()[0], 0)
         self.assertEqual(self.conn.execute('SELECT version FROM secretary_practices').fetchone()[0], 1)
 
-    def test_calendar_and_zip_current_policy_remain_denied(self):
+    def test_calendar_ungranted_and_zip_without_provenance(self):
         self.delegate()
         event = dict(title='Owner event', dt='2099-01-01T10:00:00+00:00')
         identity = pipeline.save_event(self.conn, event, f'owner:{self.origin}:event:0', 'owner', True)
@@ -1487,7 +1489,15 @@ class RuntimePostgresTests(unittest.TestCase):
              patch.object(pipeline.gcal, 'create_event') as create:
             pipeline.action(dict(type='calendar',id=identity))  # Ungranted local proposal stays inert.
         create.assert_not_called()
-        self.assertFalse(policy.can_operate(self.conn, self.origin, 'zip'))
+        # zip_send is delegated to native invoice provenance: a month without
+        # any archived invoice message fails permanently instead of looping.
+        self.assertTrue(policy.can_operate(self.conn, self.origin, 'zip_send'))
+        with patch.object(pipeline.capabilities, 'enabled', return_value=True), \
+             patch.object(pipeline.flows, 'enabled', return_value=True), \
+             patch.object(pipeline.telegram, 'send_document') as send:
+            with self.assertRaises(jobs.Permanent):
+                pipeline.action(dict(type='zip', month='2026-09'))
+        send.assert_not_called()
 
     def test_schedule_and_observe_are_coalesced_bounded(self):
         self.delegate()

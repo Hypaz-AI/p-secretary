@@ -57,6 +57,23 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(user['current_message']['channel'], 'email_sent')
         self.assertEqual(user['current_message']['sender'], 'io → Anna')
 
+    def test_per_task_context_is_trimmed_but_current_message_is_not(self):
+        # RECONCILE_CONTEXT_CHARS trims only the per-task source body sent to
+        # the model (token/latency budget); the current message body stays
+        # complete, and evidence validation in the worker uses the full text.
+        long = 'x' * 5000
+        tasks = [dict(self.tasks[0], body=long)]
+        with patch.object(brain.config, 'RECONCILE_CONTEXT_CHARS', 1200):
+            self.run_reconcile(tasks=tasks)
+        user = json.loads(self.payload()['messages'][1]['content'])
+        self.assertEqual(len(user['tasks'][0]['body']), 1200)
+        self.assertEqual(user['tasks'][0]['body'], long[:1200])
+        self.assertEqual(user['current_message']['body'], self.body)
+        # A missing/None body stays None: never a crash on legacy rows.
+        self.run_reconcile(tasks=[dict(self.tasks[0], body=None)])
+        user = json.loads(self.payload()['messages'][1]['content'])
+        self.assertIsNone(user['tasks'][0]['body'])
+
     def test_clock_and_timezone_are_trusted_system_context(self):
         now = datetime(2026, 12, 31, 23, 15, tzinfo=ZoneInfo('Europe/Rome'))
         with patch.object(brain.config, 'TIMEZONE', 'Europe/Rome'), patch.object(brain, 'datetime') as clock:

@@ -28,6 +28,16 @@ class Deferred(RuntimeError):
     """Paused/configuration-blocked work does not consume retry attempts."""
 
 
+class Permanent(RuntimeError):
+    """A job that can never succeed: fail immediately, with receipt and reason.
+
+    Unlike Deferred (transient backoff), a Permanent denial is monotonic policy:
+    missing native provenance, historical evidence or a revoked grant cannot
+    become consent by waiting. The job goes to terminal 'failed' with an
+    explicit failure_reason instead of looping forever at +60s.
+    """
+
+
 class LeaseLost(RuntimeError):
     """Execution must stop: token expired, superseded, stopped or deadline passed."""
 
@@ -200,7 +210,7 @@ def claim(kind):
         return (row[0], row[1], row[2], token) if row else None
 
 
-def finish(job, error=None):
+def finish(job, error=None, *, permanent=False):
     identity, _, attempts, token = job
     with db._conn() as conn:
         conn.execute('''UPDATE work_jobs SET status=%s,error=%s,failure_reason=%s,
@@ -208,10 +218,13 @@ def finish(job, error=None):
             finished_at=CASE WHEN %s THEN now() ELSE NULL END,
             available_at=now()+(%s * interval '1 second') WHERE id=%s AND token=%s
             AND status='running' AND lease_until>now()''',
-            ('done' if error is None else 'failed' if attempts >= 8 else 'pending',
+            ('done' if error is None else 'failed'
+                if permanent or attempts >= 8 else 'pending',
              safe_error(error) if error is not None else None,
-             describe_error(error) if error is not None else None, error is None,
-             min(3600, 15 * 2 ** (attempts-1)), identity, token))
+             describe_error(error) if error is not None else None,
+             error is None or permanent,
+             0 if permanent or error is None else min(3600, 15 * 2 ** (attempts-1)),
+             identity, token))
 
 
 def defer(job):
@@ -305,6 +318,9 @@ class Worker:
                     try:
                         if isinstance(exc, LeaseLost):
                             pass  # Never finalize a superseded execution.
+                        elif isinstance(exc, Permanent):
+                            logger.warning('Work job %s permanently failed (%s)', job[0], safe_error(exc))
+                            finish(job, exc, permanent=True)
                         elif isinstance(exc, Deferred):
                             defer(job)
                         else:

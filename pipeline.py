@@ -225,7 +225,10 @@ def _effect(key, mid, effect, payload, callback, *, deterministic=False,
                 if not prepare(key):
                     raise EffectUncertain('Retry receipt is not executable')
             else:
-                raise jobs.Deferred('Effect policy denied')
+                # A policy denial is monotonic: missing native provenance or a
+                # revoked grant can never become consent by waiting. Fail the
+                # job visibly instead of deferring forever.
+                raise jobs.Permanent('Effect policy denied')
         if not policy.record_receipt(conn, key, 'attempted'):
             raise jobs.Deferred('Effect authorization changed')
         jobs.assert_current(conn)
@@ -234,7 +237,7 @@ def _effect(key, mid, effect, payload, callback, *, deterministic=False,
         # Recheck consent after committing the attempt, immediately before HTTP.
         with db._conn() as conn, conn.transaction():
             if not policy.effect_allowed(conn, mid, effect, payload, authorization=authorization):
-                raise jobs.Deferred('Effect policy revoked')
+                raise jobs.Permanent('Effect policy revoked')
         jobs.assert_current()
         if not callback():
             raise EffectUncertain('Remote outcome is not acknowledged')
@@ -328,7 +331,8 @@ def action(payload):
                     AND status IN ('pending','running') LIMIT 1""",
                     ('owner-reply:%', key)).fetchone():
                     raise jobs.Deferred('Earlier owner reply still delivering')
-        mid = payload.get('owner_reply_mid') or payload.get('message_id')
+        mid = (payload.get('owner_reply_mid') or payload.get('evidence_message_id')
+               or payload.get('message_id'))
         if payload.get('secretary_review'):
             import secretary_runtime
             try:
@@ -352,6 +356,10 @@ def action(payload):
             with db._conn() as conn, conn.transaction():
                 jobs.assert_current(conn)
                 conn.execute('UPDATE message_analysis SET notified=TRUE WHERE message_id=%s', (payload['message_id'],))
+        elif payload.get('evidence_message_id'):
+            # Proposal notifications carry their evidence provenance separately:
+            # they never mark a verdict notification as delivered.
+            pass
         if payload.get('digest_day'):
             jobs.assert_current()
             jobs.set_cursor('last_digest_sent_day', payload['digest_day'])
@@ -480,16 +488,34 @@ def action(payload):
                         raise jobs.Deferred('Reminder changed')
                 jobs.assert_current()
                 return telegram.notify(prefix+row[0]+label, html=False)
-            _effect(_notification_key(payload), origin[0] if origin else None, 'notify',
+            if not origin or not origin[0]:
+                # A task without any native origin (e.g. /task-created) can never
+                # pass the notify gate: fail visibly instead of looping forever.
+                raise jobs.Permanent('Promemoria senza provenienza nativa notificabile')
+            _effect(_notification_key(payload), origin[0], 'notify',
                     dict(text=prefix+row[0]+label, html=False, recipient=str(config.TELEGRAM_CHAT_ID)), remind)
     elif kind == 'zip':
         if not capabilities.enabled('monthly_zip') or not flows.enabled('monthly_zip'):
             raise jobs.Deferred('ZIP paused')
         import invoices
         # Per-entity receipts prevent a partial batch retry from resending the
-        # first archive. Current policy deliberately does not delegate zip_send.
+        # first archive. zip_send is delegated: each archive carries the native
+        # provenance of an invoice message of that month (evidence_message_id),
+        # resolved server-side; a month without native invoice provenance fails
+        # permanently instead of looping.
         month = payload['month']
         entities = set(config.INVOICE_ENTITIES) | {m['entity'] for m in db.months_with_invoices() if m['month'] == month}
+        with db._conn() as conn:
+            evidence_mid = conn.execute('''SELECT (payload->>'message_id')::bigint FROM work_jobs
+                WHERE kind='action' AND key=%s LIMIT 1''', (f'invoice:{month}',)).fetchone()
+            if evidence_mid is None:
+                # Fall back to any native message that archived an invoice of this month.
+                evidence_mid = conn.execute('''SELECT i.message_id FROM invoices i
+                    JOIN communications c ON c.id=i.message_id
+                    WHERE i.month=%s ORDER BY i.id LIMIT 1''', (month,)).fetchone()
+        evidence_mid = evidence_mid[0] if evidence_mid else None
+        if evidence_mid is None:
+            raise jobs.Permanent('Archivio ZIP senza provenienza nativa notificabile')
         for entity in sorted(entities):
             if db.zip_sent(entity, month):
                 continue
@@ -502,7 +528,7 @@ def action(payload):
                     raise jobs.Deferred('ZIP paused')
                 jobs.assert_current()
                 return telegram.send_document(path, caption=f'📦 Fatture {entity} — {month}')
-            _effect(f'zip:{month}:{entity}', payload.get('message_id'), 'zip',
+            _effect(f'zip:{month}:{entity}', evidence_mid, 'zip',
                     dict(month=month, entity=entity, sha256=digest,
                          recipient=str(config.TELEGRAM_CHAT_ID)), send_zip)
             jobs.assert_current()
@@ -562,6 +588,26 @@ def owner_task_schedule_label(task, now=None):
     return '; '.join(parts)
 
 
+def _prune_effect_audit(conn):
+    """Daily bulk retention of the policy audit log (reason codes only).
+
+    effect_receipts stay immutable; this prunes only the high-volume audit
+    rows (can_read_context inserts ~one row per candidate task per claim).
+    Guarded by a source_cursors day stamp: at most one DELETE per day.
+    """
+    days = config.EFFECT_AUDIT_RETENTION_DAYS
+    if days <= 0:
+        return
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    stamp = conn.execute("SELECT value FROM source_cursors WHERE key='effect_audit_retention_day'").fetchone()
+    if stamp and stamp[0] and stamp[0].get('day') == today:
+        return
+    conn.execute('DELETE FROM effect_audit WHERE created_at < now() - (%s * interval \'1 day\')', (days,))
+    conn.execute('''INSERT INTO source_cursors(key,value) VALUES ('effect_audit_retention_day',%s)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now()''',
+        (json.dumps({'day': today}),))
+
+
 def schedule():
     import secretary
     import secretary_runtime
@@ -571,6 +617,7 @@ def schedule():
             jobs.submit('action', f'zip:{month}', {'type':'zip','month':month})
     with db._conn() as conn, conn.transaction():
         jobs.assert_current(conn)
+        _prune_effect_audit(conn)
         secretary.due_reviews(conn)
         secretary_runtime.backlog(conn)
         for row in conn.execute("""SELECT id,version,owner_deadline_date,owner_remind_at,deadline FROM tasks

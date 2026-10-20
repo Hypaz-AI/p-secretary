@@ -62,3 +62,42 @@ class PostgresJobsTests(unittest.TestCase):
             self.assertEqual(self.conn.execute('SELECT status FROM work_jobs').fetchone()[0],'running')
             jobs.finish(retried)
         self.assertEqual(self.conn.execute('SELECT status FROM work_jobs').fetchone()[0],'done')
+
+    def test_permanent_failure_is_terminal_with_reason_and_no_backoff(self):
+        # A Permanent denial must land in terminal 'failed' immediately, with
+        # an explicit failure_reason and no retry backoff: it can never succeed.
+        jobs.migrate(self.conn)
+        with self.conn.transaction():
+            jobs.enqueue(self.conn,'action','zombie:1',{'type':'notify'})
+        from contextlib import nullcontext
+        with patch('db._conn',side_effect=lambda:nullcontext(self.conn)):
+            job = jobs.claim('action')
+            self.assertIsNotNone(job)
+            jobs.finish(job, jobs.Permanent('Effect policy denied'), permanent=True)
+        row = self.conn.execute('SELECT status,error,failure_reason,available_at,finished_at '
+                                 'FROM work_jobs WHERE id=%s',(job[0],)).fetchone()
+        self.assertEqual(row[0],'failed')
+        self.assertEqual(row[1],'Permanent')
+        self.assertIn('Effect policy denied',row[2])
+        self.assertIsNotNone(row[4])
+        # Terminal failure is never re-claimed, even after the backoff window.
+        self.conn.execute("UPDATE work_jobs SET available_at=now()-interval '1 hour'")
+        self.assertIsNone(jobs.claim('action'))
+
+    def test_worker_permanent_exception_fails_job_not_defer(self):
+        # Worker.run must route Permanent to finish(permanent=True): the job
+        # ends 'failed' with a reason instead of looping on Deferred forever.
+        jobs.migrate(self.conn)
+        with self.conn.transaction():
+            jobs.enqueue(self.conn,'action','loop:1',{'type':'notify'})
+        from contextlib import nullcontext
+        with patch('db._conn',side_effect=lambda:nullcontext(self.conn)):
+            worker = jobs.Worker('action', lambda payload: (_ for _ in ()).throw(
+                jobs.Permanent('Effect policy denied')))
+            worker.stop_event.set()  # One claim iteration only.
+            worker.run()
+        row = self.conn.execute('SELECT status,error,failure_reason FROM work_jobs '
+                                "WHERE key='loop:1'").fetchone()
+        self.assertEqual(row[0],'failed')
+        self.assertEqual(row[1],'Permanent')
+        self.assertIn('Effect policy denied',row[2])

@@ -153,7 +153,7 @@ ALIASES = {'analysis': 'ai_text', 'ai': 'ai_text', 'media': 'ai_media',
            'task_complete': 'task_apply', 'task_update': 'task_apply',
            'notification': 'notify', 'calendar': 'calendar_write',
            'zip': 'zip_send', 'invoice': 'extract'}
-LOCAL_EFFECTS = frozenset(('archive', 'extract', 'reconcile', 'task_propose', 'notify'))
+LOCAL_EFFECTS = frozenset(('archive', 'extract', 'reconcile', 'task_propose', 'notify', 'zip_send'))
 OWNER_EFFECTS = frozenset(('owner_command', 'owner_dialogue', 'task_apply',
                            'task_create', 'reminder_create', 'memory_write'))
 DATA_EFFECTS = frozenset(('ai_text', 'ai_media', 'ai_history'))

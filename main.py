@@ -731,6 +731,12 @@ def main():
 
     workers = [jobs.Worker('analysis', _analysis_job).start(),
                jobs.Worker('media', media_archive.process).start(),
+               # Two reconcile workers: claim() is FOR UPDATE SKIP LOCKED, so
+               # concurrent claims are safe. Reconciliation is the throughput
+               # bottleneck (one job per ingested message, up to 3 AI calls
+               # each with full per-task context); a second worker halves the
+               # queue latency without changing any policy gate.
+               jobs.Worker('reconcile', _reconcile_job).start(),
                jobs.Worker('reconcile', _reconcile_job).start(),
                jobs.Worker('action', pipeline.action).start(),
                jobs.Worker('owner', _owner_job).start(),

@@ -393,13 +393,20 @@ def reconcile_tasks(subject, sender, body, channel, attachments, tasks) -> dict:
     images = media_text.image_parts(attachments)
     system = (RECONCILIATION_PROMPT +
               f'\nADESSO: {datetime.now(ZoneInfo(config.TIMEZONE)).isoformat()}; FUSO: {config.TIMEZONE}')
+    # Trim only the per-task source context sent to the model (token/latency
+    # budget). Evidence validation stays on the full body in the caller, so a
+    # trimmed quote remains a substring of the complete text: no authority
+    # flows from the trim, and the current message body is sent untrimmed.
+    limit = config.RECONCILE_CONTEXT_CHARS
+    trimmed = [dict(task, body=(task['body'] or '')[:limit] if task.get('body') else task.get('body'))
+               for task in tasks]
     user = json.dumps({
         'current_message': {'subject': subject, 'sender': sender, 'body': body,
                             'channel': channel, 'attachment_text': extracted,
                             'attachments': [{'filename': a.get('filename', ''),
                                              'content_type': a.get('content_type', '')}
                                             for a in attachments]},
-        'tasks': tasks,
+        'tasks': trimmed,
     }, ensure_ascii=False, default=_reconciliation_json_default)
     if images:
         # _chat accepts text only: preserve native vision parts on this path.

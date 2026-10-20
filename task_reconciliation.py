@@ -117,11 +117,18 @@ def parse_changes(result, tasks, body, extracted='', *, allow_visual_evidence=Fa
     return parsed
 
 
-def _notify(conn, key, text):
-    # Telegram's plain-text limit applies to proposals/listings too. Never truncate.
+def _notify(conn, key, text, evidence_mid):
+    """Queue proposal notifications with their native evidence provenance.
+
+    evidence_message_id is the message the proposal was derived from: it is
+    the native authority for the notify effect (policy.can_operate), while the
+    'message_id' key stays reserved for verdict notifications (which mark
+    message_analysis.notified). Never truncate Telegram's plain-text limit.
+    """
     for index, start in enumerate(range(0, len(text), 3500)):
         jobs.enqueue(conn, 'action', f'{key}:{index}',
-                     {'type': 'notify', 'text': text[start:start + 3500], 'html': False})
+                     {'type': 'notify', 'text': text[start:start + 3500], 'html': False,
+                      'evidence_message_id': evidence_mid})
 
 
 def _allows_candidate(conn, identity, *, expected_version=None):
@@ -243,7 +250,7 @@ def reconcile(payload):
                     and policy.can_operate(conn, mid, 'task_apply')):
                 if apply_change(conn, identity) == 'applied':
                     _notify(conn, f'task-auto:{identity}',
-                            'Modifica automatica applicata\n' + _describe(change, tasks))
+                            'Modifica automatica applicata\n' + _describe(change, tasks), mid)
             else:
                 # Recheck snapshots even for proposals: do not advertise stale changes.
                 if not task or task != ('open', change['expected_version']):
@@ -251,7 +258,7 @@ def reconcile(payload):
                     continue
                 _notify(conn, f'task-proposal:{identity}',
                         f"Proposta #{identity} — in attesa di conferma\n{_describe(change, tasks)}\n"
-                        f"/conferma_attivita {identity}\n/rifiuta_attivita {identity}")
+                        f"/conferma_attivita {identity}\n/rifiuta_attivita {identity}", mid)
 
 
 def _describe(change, tasks):
@@ -494,5 +501,5 @@ def owner_commands(text, *, message_id=None):
             row = conn.execute("""UPDATE task_changes SET status='rejected'
                 WHERE id=%s AND status='pending' RETURNING id""", (int(parts[1]),)).fetchone()
             reply = 'Proposta rifiutata.' if row else 'Proposta non pendente.'
-        _notify(conn, 'task-command:' + uuid.uuid4().hex, reply)
+        _notify(conn, 'task-command:' + uuid.uuid4().hex, reply, authority)
     return True

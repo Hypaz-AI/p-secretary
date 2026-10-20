@@ -101,7 +101,9 @@ assert not errors, errors
     def test_notification_without_native_source_is_blocked_before_send(self):
         self.conn.execute.return_value.fetchone.return_value = None
         with patch('connectors.telegram.notify') as send:
-            with self.assertRaisesRegex(jobs.Deferred, 'Effect policy denied'):
+            # A policy denial is monotonic: the job fails permanently and
+            # visibly instead of looping on Deferred forever.
+            with self.assertRaisesRegex(jobs.Permanent, 'Effect policy denied'):
                 pipeline.action({'type':'notify','message_id':42,'text':'x'})
         send.assert_not_called()
         self.assertFalse(any('UPDATE message_analysis' in call.args[0]
@@ -110,6 +112,30 @@ assert not errors, errors
         audit = next(call for call in self.conn.execute.call_args_list
                      if 'INSERT INTO effect_audit' in call.args[0])
         self.assertEqual(audit.args[1], (42, 'notify', False, 'missing_message'))
+
+    def test_proposal_notification_uses_evidence_provenance_not_notified_flag(self):
+        # Proposal notifications carry evidence_message_id as their native
+        # authority; they must never mark a verdict notification as delivered.
+        payload = {'type':'notify','text':'x','html':False,'evidence_message_id':42}
+        with self.native_source(), patch('connectors.telegram.notify', return_value=True) as send, \
+             patch.object(pipeline.policy, 'prepare_effect', return_value=True), \
+             patch.object(pipeline.policy, 'record_receipt', return_value=True):
+            pipeline.action(payload)
+        send.assert_called_once_with('x', html=False)
+        self.assertFalse(any('UPDATE message_analysis' in call.args[0]
+                             for call in self.conn.execute.call_args_list))
+
+    def test_reminder_without_native_origin_fails_permanently(self):
+        # A task without any native origin can never pass the notify gate.
+        # reminder_is_current passes, the task row exists (deliverable in
+        # principle), but the origin lookup returns nothing: permanent failure.
+        with patch('task_reconciliation.reminder_is_current', return_value=True):
+            self.conn.execute.return_value.fetchone.side_effect = [
+                ('Titolo attività',), None]  # task row, then origin lookup
+            with patch('connectors.telegram.notify') as send:
+                with self.assertRaisesRegex(jobs.Permanent, 'provenienza nativa'):
+                    pipeline.action({'type': 'reminder', 'id': 7, 'deadline': '2099-01-01T00:00:00+00:00'})
+            send.assert_not_called()
 
     def test_task_proposal_commands_use_persistent_owner_handler(self):
         with patch('task_reconciliation.owner_commands', return_value=True) as owner:
@@ -143,6 +169,35 @@ assert not errors, errors
             'type': 'reminder', 'id': 7, 'deadline': deadline.isoformat()})
         reviews.assert_called_once_with(self.conn)
         backlog.assert_called_once_with(self.conn)
+
+    def test_effect_audit_retention_prunes_once_per_day(self):
+        # Retention is guarded by a source_cursors day stamp: one DELETE per
+        # day, disabled at EFFECT_AUDIT_RETENTION_DAYS=0. Receipts untouched.
+        # First schedule(): no stamp -> prune + stamp today. Second: the
+        # stamped day matches the real current day -> skip.
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        self.conn.execute.return_value.fetchone.side_effect = [None, ({'day': today},)]
+        with patch('flows.enabled', return_value=False), \
+             patch('secretary.due_reviews'), patch('secretary_runtime.backlog'):
+            with patch.object(pipeline.config, 'EFFECT_AUDIT_RETENTION_DAYS', 30):
+                pipeline.schedule()
+                pipeline.schedule()
+        prunes = [call for call in self.conn.execute.call_args_list
+                  if 'DELETE FROM effect_audit' in call.args[0]]
+        self.assertEqual(len(prunes), 1)
+        self.assertIn('interval', prunes[0].args[0])
+        self.assertEqual(prunes[0].args[1], (30,))
+        stamps = [call for call in self.conn.execute.call_args_list
+                  if 'effect_audit_retention_day' in call.args[0]]
+        self.assertEqual(len(stamps), 3)  # read + upsert, then read again
+        self.conn.execute.reset_mock()
+        with patch('flows.enabled', return_value=False), \
+             patch('secretary.due_reviews'), patch('secretary_runtime.backlog'), \
+             patch.object(pipeline.config, 'EFFECT_AUDIT_RETENTION_DAYS', 0):
+            pipeline.schedule()
+        self.assertFalse(any('DELETE FROM effect_audit' in call.args[0]
+                             for call in self.conn.execute.call_args_list))
 
     def test_notification_ack_marks_actual_sent(self):
         with self.native_source(), patch('connectors.telegram.notify', return_value=True) as send, \

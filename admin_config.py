@@ -61,6 +61,8 @@ SECRETARY_FIELDS = {
     'SECRETARY_MODE': 'Modalità operativa: observe = solo proposte e bozze, nessun invio a terzi; active = consente gli invii esplicitamente approvati dal proprietario. Non è un interruttore di sicurezza: policy e approvazioni restano attive.',
     'QUIET_HOURS_START': 'Ora locale 0–23 di inizio della fascia silenziosa globale; default 22. Le notifiche ordinarie non urgenti vengono rinviate, mai scartate. Inizio=fine disattiva la fascia.',
     'QUIET_HOURS_END': 'Ora locale 0–23 di fine fascia silenziosa globale; default 8. Le emergenze (urgent o gravità alta) passano sempre subito.',
+    'RECONCILE_CONTEXT_CHARS': 'Caratteri del contesto sorgente per attività nel prompt di riconciliazione (200–20000); default 1200. Riduce token/latenza; la validazione delle citazioni resta sul testo completo.',
+    'EFFECT_AUDIT_RETENTION_DAYS': 'Giorni di retention del registro di audit delle policy (0–3650); default 30, 0 disattiva. Le ricevute degli effetti restano immutabili: si pota solo il registro bulk dei reason-code.',
 }
 REVIEW_FIELDS = {
     'SECRETARY_REVIEW_QUIET_START': 'Ora locale 0–23 di inizio silenzio per le sole notifiche di revisione; default 22.',
@@ -149,6 +151,10 @@ def field_metadata(key):
         result.update(type='select', options=['observe', 'active'])
     if key in ('QUIET_HOURS_START', 'QUIET_HOURS_END'):
         result.update(type='number', min=0, max=23, step=1, supported=True)
+    if key == 'RECONCILE_CONTEXT_CHARS':
+        result.update(type='number', min=200, max=20000, step=100, supported=True)
+    if key == 'EFFECT_AUDIT_RETENTION_DAYS':
+        result.update(type='number', min=0, max=3650, step=1, supported=True)
     if key in REVIEW_FIELDS:
         result.update(type='number', min=0 if key.endswith(('_START', '_END')) else 5 if key.endswith('_MIN_MINUTES') else 1,
                       max=23 if key.endswith(('_START', '_END')) else 10080, step=1,
@@ -390,6 +396,10 @@ def validate(changes, values):
                 raise ValueError('Tetto di spesa fuori intervallo (0 – 1e9); 0 disattiva il tetto monetario')
         if key in ('QUIET_HOURS_START', 'QUIET_HOURS_END') and (not value.isdecimal() or not 0 <= int(value) <= 23):
             raise ValueError('Ora quiet hours fuori intervallo 0–23')
+        if key == 'RECONCILE_CONTEXT_CHARS' and (not value.isdecimal() or not 200 <= int(value) <= 20000):
+            raise ValueError('Contesto riconciliazione fuori intervallo 200–20000')
+        if key == 'EFFECT_AUDIT_RETENTION_DAYS' and (not value.isdecimal() or not 0 <= int(value) <= 3650):
+            raise ValueError('Retention audit fuori intervallo 0–3650')
         if key == 'SECRETARY_MODE' and value not in ('observe', 'active'):
             raise ValueError('Modalità segretario non valida')
         if (spec['type'] == 'select' and value not in spec['options']

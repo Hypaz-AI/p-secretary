@@ -171,10 +171,18 @@ class AuthorityTests(IsolatedTests):
                 self.assertEqual(call.args[1], ('email', 'ai_text'))
 
     def test_no_blanket_remote_send_calendar_zip_or_unknown_grant(self):
-        for effect in ('send', 'email_send', 'whatsapp_send', 'calendar', 'zip', 'pay',
+        # 'zip' is now the delegated alias of zip_send (LOCAL_EFFECTS): it is
+        # tested separately below. Everything else here stays non-delegated.
+        for effect in ('send', 'email_send', 'whatsapp_send', 'calendar', 'pay',
                        'delete', 'model-secret@example.invalid'):
             self.assertFalse(self.allowed(effect=effect))
         self.assertNotIn('model-secret', str(self.conn.execute.call_args_list))
+
+    def test_zip_send_is_delegated_local_effect(self):
+        # zip_send is delegated: an archived native message may authorize the
+        # monthly archive notification, with its own provenance.
+        self.assertIn('zip_send', policy.LOCAL_EFFECTS)
+        self.assertTrue(self.allowed(native(), 'zip_send'))
 
 
 class ReceiptTests(IsolatedTests):
