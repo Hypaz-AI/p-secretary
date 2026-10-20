@@ -437,6 +437,12 @@ def analyze(subject: str, sender: str, body: str, channel: str,
 
     try:
         raw = _chat(system, user_msg)
+    except (ai_budget.BudgetExceeded, ai_budget.BudgetUnavailable) as exc:
+        # Budget/accounting failures are NOT analysis failures: they are
+        # infrastructure conditions. Masking them as category=errore would
+        # burn a durable retry on a verdict that can never succeed, and would
+        # hide the real cause from the operator. Propagate to the worker.
+        raise RuntimeError(f'Analysis unavailable: {exc}') from exc
     except Exception as exc:  # noqa: BLE001
         return normalize_verdict({
             "summary": f"(analisi AI non riuscita: {exc})",

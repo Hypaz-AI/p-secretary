@@ -20,6 +20,11 @@
 .budget-fill.high{background:#e6913a}
 .budget-fill.full{background:#e5484d}
 .budget-edit{margin-left:auto;padding:6px 12px;font-size:12px;min-height:0}
+.budget-repair{margin-top:14px;padding:14px;border:1px solid #a33338;border-radius:10px;background:#2a1215}
+.budget-repair strong{display:block;color:#ffd9d9;margin-bottom:10px}
+.budget-repair-actions{display:flex;gap:10px;flex-wrap:wrap}
+.budget-repair-actions button{padding:8px 14px;font-size:13px;min-height:0}
+.budget-repair small{display:block;margin-top:8px;color:#bce8dc}
 /* Diagnostic results remain readable on narrow screens and with keyboard focus. */
 .health-card {min-width:0; padding:1rem; border:1px solid #668099; border-radius:12px; overflow-wrap:anywhere;}
 #health-check:focus-visible {outline:3px solid #53b8f3; outline-offset:4px;}

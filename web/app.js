@@ -524,6 +524,29 @@ async function loadBudget() {
     row(el('ai-budget'), 'Token comunicati dal provider (consumo reale)', usage.reported_tokens ?? 'non comunicati');
     row(el('ai-budget'), 'Massimo output per tentativo', String(limits.MAX_OUTPUT_TOKENS));
     if (!result.money_cap_enforced) row(el('ai-budget'), 'Costo comunicato (non tetto di spesa)', `${usage.reported_cost ?? 'non comunicato'} · ${usage.cost_unreported_calls} tentativi con costo non comunicato`);
+    // Slot bloccati da worker morti: azione di riparazione immediata.
+    const orphaned = result.orphaned || [];
+    if (orphaned.length) {
+      const panel = node('div', ''); panel.className = 'budget-repair';
+      panel.append(node('strong', `⚠ ${orphaned.length} slot bloccati da worker morti (job non più in esecuzione)`));
+      const actions = node('div', ''); actions.className = 'budget-repair-actions';
+      const free = node('button', 'Libera slot'); free.type = 'button';
+      free.onclick = async () => {
+        free.disabled = true;
+        try {const r = await api('/api/secretary/budget/reconcile', {method: 'POST'});
+             panel.append(node('small', `Slot liberati: ${r.freed}`)); await loadBudget();}
+        catch (error) {free.disabled = false; panel.append(node('small', error.message));}
+      };
+      const requeue = node('button', 'Riaccoda analisi fallite'); requeue.type = 'button';
+      requeue.onclick = async () => {
+        requeue.disabled = true;
+        try {const r = await api('/api/secretary/jobs/requeue', {method: 'POST', body: JSON.stringify({kind: 'analysis'})});
+             panel.append(node('small', `Analisi riaccodate: ${r.requeued.length}`));}
+        catch (error) {requeue.disabled = false; panel.append(node('small', error.message));}
+      };
+      actions.append(free, requeue); panel.append(actions);
+      el('ai-budget').append(panel);
+    }
   } catch (error) {el('ai-budget').textContent = `${error.message}. Contabilità non disponibile: nessun consumo nullo presunto.`;}
 }
 async function loadSecretary() {

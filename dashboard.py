@@ -172,12 +172,16 @@ def budget_view():
     scopes = raw.get('scopes') or {}
     scope_caps = {name: limits['SCOPE_' + name] for name in budget.SCOPE_CALLS
                   if limits.get('SCOPE_' + name, 0) > 0}
+    with db._conn() as conn:
+        orphaned = budget.orphans(conn)
     return dict(available=True, usage=result,
                 limits={key: limits[key] for key in ('DAILY_CALLS', 'DAILY_TOKENS',
                         'MAX_INFLIGHT', 'MAX_OUTPUT_TOKENS')},
                 daily_cost=str(daily_cost), money_cap_enforced=daily_cost > 0,
                 scope_caps=scope_caps,
                 scope_usage={name: scopes.get(name, 0) for name in scope_caps},
+                orphaned=[dict(job_id=item['job_id'], reserved_tokens=item['reserved_tokens'],
+                               created_at=item['created_at'].isoformat()) for item in orphaned],
                 day_timezone='UTC', scope='jobs execution context only',
                 reservations_refunded=False)
 
@@ -629,6 +633,34 @@ def register_secretary(app):
     @bounded
     def secretary_budget_limits():
         return budget_limits_view()
+
+    @app.post('/api/secretary/budget/reconcile')
+    @bounded
+    def secretary_budget_reconcile():
+        """Operator-initiated release of provably dead in-flight slots."""
+        _owner()
+        if request.args:
+            raise ValueError('Unknown parameter')
+        _json_object(())
+        budget = _service('ai_budget')
+        with db._conn() as conn, conn.transaction():
+            freed = budget.reconcile_orphans(conn)
+        return dict(available=True, freed=len(freed))
+
+    @app.post('/api/secretary/jobs/requeue')
+    @bounded
+    def secretary_jobs_requeue():
+        """Operator-initiated retry of failed jobs (analysis/reconcile/owner)."""
+        _owner()
+        data = _json_object(('kind',))
+        kind = data['kind']
+        if kind not in ('analysis', 'reconcile', 'owner'):
+            raise ValueError('Unknown job kind')
+        limit = data.get('limit', 50)
+        if type(limit) is not int or not 0 < limit <= 200:
+            raise ValueError('Invalid limit')
+        requeued = _service('jobs').requeue_failed(kind, limit)
+        return dict(available=True, kind=kind, requeued=requeued)
 
     @app.post('/api/secretary/emails')
     @bounded

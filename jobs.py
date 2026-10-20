@@ -221,6 +221,26 @@ def defer(job):
             WHERE id=%s AND token=%s AND status='running' AND lease_until>now()""", (job[0],job[3]))
 
 
+def requeue_failed(kind, limit=50):
+    """Operator-initiated retry of failed jobs: back to pending, attempts reset.
+
+    Only jobs already in terminal 'failed' state are touched; running or
+    pending jobs are never disturbed. Returns the requeued job ids so the
+    dashboard can report exactly what was requeued.
+    """
+    if kind not in ('analysis', 'reconcile', 'owner'):
+        raise ValueError('Unknown job kind')
+    if type(limit) is not int or not 0 < limit <= 200:
+        raise ValueError('Invalid requeue limit')
+    with db._conn() as conn:
+        return [row[0] for row in conn.execute('''UPDATE work_jobs SET status='pending',
+            attempts=0,available_at=now(),token=NULL,lease_until=NULL,error=NULL,
+            failure_reason=NULL,finished_at=NULL
+            WHERE id IN (SELECT id FROM work_jobs WHERE kind=%s AND status='failed'
+                ORDER BY id DESC LIMIT %s FOR UPDATE SKIP LOCKED)
+            RETURNING id''', (kind, limit)).fetchall()]
+
+
 def event_id(key):
     # Hex is a subset of Google's permitted base32hex alphabet.
     return hashlib.sha256(key.encode()).hexdigest()

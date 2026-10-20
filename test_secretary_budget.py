@@ -245,6 +245,55 @@ class BudgetPostgresTests(PostgreSQLFixture):
         self.conn.execute("UPDATE secretary_ai_usage SET state='uncertain' WHERE id=%s", (reservation,))
         self.assertEqual(self.request(), 'ok')
 
+    def test_dead_reservation_auto_released_on_next_reserve(self):
+        # A crashed worker leaves a reserved slot: the next _reserve must free
+        # it (job no longer running under the reserving token) and admit a new
+        # call even with MAX_INFLIGHT=1.
+        job = self.running()
+        with job_context(job[0], {}, job[3]) as context:
+            reservation = budget._reserve(context, budget._limits(), 100, PAYLOAD)
+        self.conn.execute("UPDATE work_jobs SET token='replaced' WHERE id=%s", (job[0],))
+        with patch.dict('os.environ', AI_BUDGET_MAX_INFLIGHT='1'):
+            self.assertEqual(self.request(), 'ok')
+        states = dict(self.conn.execute("SELECT state,count(*) FROM secretary_ai_usage GROUP BY 1").fetchall())
+        self.assertEqual(states, dict(uncertain=1, completed=1))
+        self.assertEqual(self.conn.execute("SELECT state FROM secretary_ai_usage WHERE id=%s",
+                                           (reservation,)).fetchone()[0], 'uncertain')
+
+    def test_live_reservation_is_never_auto_released(self):
+        # A job still running with a valid lease keeps its slot: live I/O is
+        # untouched by the auto-release.
+        job = self.running()
+        with job_context(job[0], {}, job[3]) as context:
+            reservation = budget._reserve(context, budget._limits(), 100, PAYLOAD)
+        with patch.dict('os.environ', AI_BUDGET_MAX_INFLIGHT='1'):
+            with self.assertRaises(budget.BudgetExceeded):
+                self.request()
+        self.assertEqual(self.conn.execute("SELECT state FROM secretary_ai_usage WHERE id=%s",
+                                           (reservation,)).fetchone()[0], 'reserved')
+
+    def test_orphans_lists_only_dead_and_reconcile_frees_them(self):
+        dead_job = self.running()
+        with job_context(dead_job[0], {}, dead_job[3]) as context:
+            dead = budget._reserve(context, budget._limits(), 100, PAYLOAD)
+        live_job = self.running()
+        with job_context(live_job[0], {}, live_job[3]) as context:
+            live = budget._reserve(context, budget._limits(), 100, PAYLOAD)
+        self.conn.execute("UPDATE work_jobs SET token='replaced' WHERE id=%s", (dead_job[0],))
+        orphaned = budget.orphans(self.conn)
+        self.assertEqual([item['id'] for item in orphaned], [dead])
+        self.assertEqual(orphaned[0]['job_id'], dead_job[0])
+        self.assertEqual(orphaned[0]['reserved_tokens'], 100)
+        # Reconcile frees exactly the orphan, under the write lock.
+        freed = budget.reconcile_orphans(self.conn)
+        self.assertEqual([row[0] for row in freed], [dead])
+        self.assertEqual(self.conn.execute("SELECT state FROM secretary_ai_usage WHERE id=%s",
+                                           (dead,)).fetchone()[0], 'uncertain')
+        self.assertEqual(self.conn.execute("SELECT state FROM secretary_ai_usage WHERE id=%s",
+                                           (live,)).fetchone()[0], 'reserved')
+        # Idempotent: nothing left to free.
+        self.assertEqual(budget.reconcile_orphans(self.conn), [])
+
     def test_daily_caps_reset_by_utc_day_but_yesterday_usage_retained(self):
         self.request()
         old_day = self.conn.execute("UPDATE secretary_ai_usage SET usage_day=usage_day-1 RETURNING usage_day").fetchone()[0]

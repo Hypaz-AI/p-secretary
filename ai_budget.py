@@ -202,6 +202,18 @@ def _reserve(context, limits, count, payload):
             day = conn.execute("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date").fetchone()[0]
             calls, tokens = conn.execute('''SELECT count(*),coalesce(sum(charged_tokens),0)
                 FROM secretary_ai_usage WHERE usage_day=%s''', (day,)).fetchone()
+            # Auto-release of provably dead reservations: a slot is orphaned
+            # when its job is no longer running under the same token (lease
+            # expired, token replaced by reclaim, job failed or deleted). No
+            # live process can settle it, so holding the slot forever would
+            # wedge MAX_INFLIGHT. This reconciles crashed workers; it never
+            # releases a reservation whose job is still running with a valid
+            # lease, so live I/O is untouched.
+            conn.execute('''UPDATE secretary_ai_usage u SET state='uncertain', finished_at=now()
+                WHERE u.state='reserved' AND NOT EXISTS (
+                    SELECT 1 FROM work_jobs j WHERE j.id=u.job_id AND j.token=u.job_token
+                    AND j.status='running' AND j.lease_until>now()
+                    AND j.lease_until>clock_timestamp())''')
             active = conn.execute("SELECT count(*) FROM secretary_ai_usage WHERE state='reserved'").fetchone()[0]
             if (calls >= limits['DAILY_CALLS'] or tokens + count > limits['DAILY_TOKENS']
                     or active >= limits['MAX_INFLIGHT']):
@@ -298,6 +310,40 @@ def usage(conn, day=None):
                      'reported_cost', 'cost_unreported_calls'), row),
                 scopes=scopes,
                 inflight=conn.execute("SELECT count(*) FROM secretary_ai_usage WHERE state='reserved'").fetchone()[0])
+
+
+def orphans(conn):
+    """Reserved rows whose job is provably no longer running (same token).
+
+    A reservation is orphaned when its job is not running under the token that
+    reserved it: lease expired, token replaced by reclaim, job failed or
+    deleted. No live process can settle such a row, so it wedges MAX_INFLIGHT
+    until reconciled. Rows whose job is still running with a valid lease are
+    never listed: live I/O is untouched.
+    """
+    return [dict(zip(('id', 'job_id', 'job_token', 'reserved_tokens', 'created_at'), row))
+            for row in conn.execute('''SELECT id,job_id,job_token,reserved_tokens,created_at
+                FROM secretary_ai_usage WHERE state='reserved' AND NOT EXISTS (
+                    SELECT 1 FROM work_jobs j WHERE j.id=secretary_ai_usage.job_id
+                    AND j.token=secretary_ai_usage.job_token
+                    AND j.status='running' AND j.lease_until>now()
+                    AND j.lease_until>clock_timestamp())
+                ORDER BY created_at''').fetchall()]
+
+
+def reconcile_orphans(conn):
+    """Mark orphaned reservations as uncertain and return how many were freed.
+
+    Operator-initiated reconciliation: the caller (dashboard endpoint) must
+    have established that the requests are no longer live. Runs under the
+    budget write lock so it cannot race a concurrent _reserve.
+    """
+    conn.execute('SELECT pg_advisory_xact_lock(%s)', (WRITE_LOCK,))
+    return conn.execute('''UPDATE secretary_ai_usage u SET state='uncertain', finished_at=now()
+        WHERE u.state='reserved' AND NOT EXISTS (
+            SELECT 1 FROM work_jobs j WHERE j.id=u.job_id AND j.token=u.job_token
+            AND j.status='running' AND j.lease_until>now()
+            AND j.lease_until>clock_timestamp()) RETURNING id''').fetchall()
 
 
 class TruncatedCompletion(RuntimeError):

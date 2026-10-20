@@ -456,14 +456,17 @@ class SecretaryDashboardTests(unittest.TestCase):
         raw = dict(calls=2, reserved_tokens=16000, charged_tokens=17000, reported_tokens=12000,
                    reported_cost=None, cost_unreported_calls=2, inflight=1, prompt='PRIVATE', job_token='PRIVATE')
         with patch.object(ai_budget, 'usage', return_value=raw) as usage, \
+             patch.object(ai_budget, 'orphans', return_value=[]) as orphans, \
              patch.object(ai_budget, '_limits', return_value=dict(DAILY_CALLS=200, DAILY_TOKENS=500000,
                     MAX_INFLIGHT=2, MAX_OUTPUT_TOKENS=65536, password='PRIVATE')):
             response = self.client.get('/api/secretary/budget')
         usage.assert_called_once_with(self.conn)
+        orphans.assert_called_once_with(self.conn)
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.json['usage']['reported_cost'])
         self.assertEqual(response.json['limits']['DAILY_CALLS'], 200)
         self.assertFalse(response.json['money_cap_enforced'])
+        self.assertEqual(response.json['orphaned'], [])
         self.assertNotIn('PRIVATE', response.get_data(as_text=True))
 
     def test_budget_snapshot_exposes_optional_caps_for_saturation_flags(self):
@@ -474,7 +477,10 @@ class SecretaryDashboardTests(unittest.TestCase):
                       MAX_OUTPUT_TOKENS=65536, DAILY_COST=Decimal('5.00'),
                       SCOPE_dialogue=10, SCOPE_review=0, SCOPE_research=0,
                       SCOPE_analysis=0, password='PRIVATE')
+        orphan = dict(id='abc', job_id=42, job_token='PRIVATE', reserved_tokens=8192,
+                      created_at=datetime(2026, 10, 19, 15, 30, tzinfo=timezone.utc))
         with patch.object(ai_budget, 'usage', return_value=raw), \
+             patch.object(ai_budget, 'orphans', return_value=[orphan]), \
              patch.object(ai_budget, '_limits', return_value=limits):
             response = self.client.get('/api/secretary/budget')
         self.assertEqual(response.status_code, 200)
@@ -483,7 +489,34 @@ class SecretaryDashboardTests(unittest.TestCase):
         # Solo scope server-dichiarati con tetto attivo, mai nomi arbitrari.
         self.assertEqual(response.json['scope_caps'], {'dialogue': 10})
         self.assertEqual(response.json['scope_usage'], {'dialogue': 4})
+        # Gli orfani espongono solo job_id/tokens/timestamp, mai il token del job.
+        self.assertEqual(response.json['orphaned'],
+                         [dict(job_id=42, reserved_tokens=8192,
+                               created_at='2026-10-19T15:30:00+00:00')])
         self.assertNotIn('PRIVATE', response.get_data(as_text=True))
+
+    def test_budget_reconcile_and_jobs_requeue_endpoints(self):
+        with patch.object(ai_budget, 'reconcile_orphans', return_value=[('a',), ('b',)]) as reconcile:
+            response = self.post('/api/secretary/budget/reconcile', {})
+        reconcile.assert_called_once_with(self.conn)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json, dict(available=True, freed=2))
+        with patch.object(jobs, 'requeue_failed', return_value=[7, 9]) as requeue:
+            response = self.post('/api/secretary/jobs/requeue', {'kind': 'analysis'})
+        requeue.assert_called_once_with('analysis', 50)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json, dict(available=True, kind='analysis', requeued=[7, 9]))
+        # Unknown kind and bad limit are refused before any mutation.
+        for data in ({'kind': 'knowledge'}, {'kind': 'analysis', 'limit': 0},
+                     {'kind': 'analysis', 'limit': 201}, {'kind': 'analysis', 'limit': 'x'}):
+            with self.subTest(data=data):
+                self.assertEqual(self.post('/api/secretary/jobs/requeue', data).status_code, 400)
+        # Both endpoints require authentication and same-origin.
+        anonymous = dashboard.create_app({'username': 'owner', 'password': 'offline'}).test_client()
+        self.assertEqual(anonymous.post('/api/secretary/budget/reconcile', json={}).status_code, 401)
+        self.assertEqual(anonymous.post('/api/secretary/jobs/requeue', json={}).status_code, 401)
+        self.assertEqual(self.client.post('/api/secretary/budget/reconcile', json={}).status_code, 403)
+        self.assertEqual(self.client.post('/api/secretary/jobs/requeue', json={}).status_code, 403)
 
     def test_budget_config_fields_not_secrets_positive_and_restart_only(self):
         self.assertEqual(set(admin_config.BUDGET_FIELDS) | {'AI_BUDGET_DAILY_COST'},
@@ -554,13 +587,20 @@ class SecretaryDashboardTests(unittest.TestCase):
                      "budgetMeter(el('ai-budget'), 'Slot prenotati / massimo simultanei', usage.inflight, limits.MAX_INFLIGHT,",
                      "row(el('ai-budget'), 'Token prenotati in anticipo (stima per eccesso)', String(usage.reserved_tokens))",
                      "row(el('ai-budget'), 'Token comunicati dal provider (consumo reale)', usage.reported_tokens ?? 'non comunicati')",
+                     "const orphaned = result.orphaned || []",
+                     "slot bloccati da worker morti",
+                     "const free = node('button', 'Libera slot')",
+                     "api('/api/secretary/budget/reconcile', {method: 'POST'})",
+                     "const requeue = node('button', 'Riaccoda analisi fallite')",
+                     "api('/api/secretary/jobs/requeue', {method: 'POST', body: JSON.stringify({kind: 'analysis'})})",
                      'result.money_cap_enforced', 'result.scope_caps', 'result.scope_usage'):
             self.assertIn(text, script)
         # La vecchia riga accoppiava due metriche diverse: non deve tornare.
         self.assertNotIn("'Prenotati / comunicati dal provider'", script)
         for text in ('.budget-fill.ok{background:#3ecf8e}', '.budget-fill.warn{background:#e6c34a}',
                      '.budget-fill.high{background:#e6913a}', '.budget-fill.full{background:#e5484d}',
-                     '.budget-track{', '.budget-flag{', '.budget-edit{'):
+                     '.budget-track{', '.budget-flag{', '.budget-edit{', '.budget-repair{',
+                     '.budget-repair-actions{'):
             self.assertIn(text, style)
         self.assertIn('Barre di saturazione', page)
         self.assertIn('SATURATO', page)

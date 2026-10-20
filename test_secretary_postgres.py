@@ -163,6 +163,35 @@ class SecretaryPostgresTests(unittest.TestCase):
                         self.conn.execute(command)
         self.assertEqual(self.tables(), before)
 
+    def test_requeue_failed_only_touches_terminal_failed_jobs(self):
+        # A failed analysis job is requeued as pending with attempts reset; a
+        # running job and a pending job are never disturbed.
+        failed = jobs.enqueue(self.conn, 'analysis', 'analysis:1', {'message_id': 1})[0]
+        self.conn.execute("UPDATE work_jobs SET status='failed',error='RuntimeError',"
+                          "failure_reason='Analysis unavailable',attempts=8,finished_at=now() WHERE id=%s", (failed,))
+        running = jobs.enqueue(self.conn, 'analysis', 'analysis:2', {'message_id': 2})[0]
+        jobs.claim('analysis')
+        pending = jobs.enqueue(self.conn, 'analysis', 'analysis:3', {'message_id': 3})[0]
+        other = jobs.enqueue(self.conn, 'owner', 'owner:1', {'message_id': 4})[0]
+        self.conn.execute("UPDATE work_jobs SET status='failed',attempts=8 WHERE id=%s", (other,))
+        self.assertEqual(jobs.requeue_failed('analysis'), [failed])
+        row = self.conn.execute("SELECT status,attempts,error,failure_reason,finished_at FROM work_jobs WHERE id=%s",
+                                (failed,)).fetchone()
+        self.assertEqual(row, ('pending', 0, None, None, None))
+        self.assertEqual(self.conn.execute("SELECT status FROM work_jobs WHERE id=%s", (running,)).fetchone()[0],
+                         'running')
+        self.assertEqual(self.conn.execute("SELECT status FROM work_jobs WHERE id=%s", (pending,)).fetchone()[0],
+                         'pending')
+        self.assertEqual(self.conn.execute("SELECT status FROM work_jobs WHERE id=%s", (other,)).fetchone()[0],
+                         'failed')
+        # Unknown kind is refused; limit is bounded.
+        with self.assertRaises(ValueError):
+            jobs.requeue_failed('knowledge')
+        with self.assertRaises(ValueError):
+            jobs.requeue_failed('analysis', 0)
+        with self.assertRaises(ValueError):
+            jobs.requeue_failed('analysis', 201)
+
     def test_prepare_llm_outside_transaction_create_links_restart_replay(self):
         mid = self.archive()
         attachment = self.conn.execute('''INSERT INTO attachments(message_id,channel,filename)
