@@ -114,7 +114,10 @@ non è mai un confine di sicurezza.
 7. **Notifiche autonome**: solo vere emergenze, tetto giornaliero serializzato con
    advisory lock (`AGENT_NOTIFY_MAX_PER_DAY`).
 8. Il `Dockerfile` copia i moduli **per nome**: ogni nuovo `*.py` di primo livello va
-   aggiunto (lo verifica `test_dashboard_api.test_packaging_and_ci_contracts`).
+   aggiunto. Anche `.dockerignore` parte da `**` e riammette solo ciò che elenca: ogni NUOVA
+   CARTELLA copiata dal Dockerfile (come `agent/`) va riammessa con `!cartella/` e
+   `!cartella/*.py`, altrimenti la build fallisce solo in CI ("/agent: not found").
+   Lo verifica `test_dashboard_api.test_packaging_and_ci_contracts`.
 
 ## Convenzioni dei test (~55 file)
 Offline-first: rete e DB vietati via patch. SQL opt-in con

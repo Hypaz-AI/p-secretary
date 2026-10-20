@@ -311,6 +311,20 @@ class DashboardApiTests(unittest.TestCase):
         image = (root / 'Dockerfile').read_text()
         self.assertIn('COPY agent/ ./agent/', image)
         self.assertIn('COPY connectors/ ./connectors/', image)
+        # `.dockerignore` parte da `**`: una cartella copiata dal Dockerfile ma non riammessa
+        # lì NON entra nel contesto di build ("/agent: not found" solo in CI, mai nei test).
+        admitted = {line.strip() for line in (root / '.dockerignore').read_text().splitlines()}
+        self.assertEqual(next(line.strip() for line in (root / '.dockerignore').read_text().splitlines() if line.strip()), '**')
+        for line in image.splitlines():
+            parts = line.split()
+            if parts[:1] == ['COPY'] and not parts[1].startswith('--'):
+                for source in parts[1:-1]:
+                    top = source.split('/')[0]
+                    if '/' in source and (root / top).is_dir():
+                        self.assertIn(f'!{top}/', admitted, f'{top}/ è copiata dal Dockerfile ma esclusa da .dockerignore')
+                    elif source.endswith('.py'):
+                        self.assertIn('!*.py', admitted)
+        self.assertIn('!agent/*.py', admitted)
         # Il runtime è incorporato nell'immagine: niente download all'avvio.
         self.assertIn('python -m copilot download-runtime', image)
         self.assertIn('COPILOT_SKIP_CLI_DOWNLOAD=1', image)

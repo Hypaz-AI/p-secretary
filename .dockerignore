@@ -2,6 +2,8 @@
 !requirements.txt
 !*.py
 test_*.py
+!agent/
+!agent/*.py
 !connectors/
 !connectors/*.py
 !web/
@@ -13,3 +15,5 @@ test_*.py
 !data/package-lock.json
 !docker/
 !docker/entrypoint.py
+# Ultima regola vince: niente bytecode locale nell'immagine.
+**/__pycache__
