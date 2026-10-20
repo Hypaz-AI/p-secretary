@@ -10,16 +10,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm chro
 WORKDIR /opt/pi-secretary
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+# Runtime dell'agente incorporato nell'immagine: nessun download all'avvio (la cache XDG è una tmpfs)
+# e nessun accesso di rete del runtime oltre al gateway locale verso OpenRouter.
+RUN COPILOT_CLI_EXTRACT_DIR=/opt/copilot-runtime python -m copilot download-runtime \
+    && chmod -R a+rX /opt/copilot-runtime
+ENV COPILOT_CLI_EXTRACT_DIR=/opt/copilot-runtime COPILOT_SKIP_CLI_DOWNLOAD=1
 COPY data/package.json data/package-lock.json ./node/
 RUN cd node && npm ci --omit=dev && npm cache clean --force
-COPY actions.py admin_config.py brain.py config.py dashboard.py db.py digest.py documents.py email_attachments.py file_browser.py flows.py invoices.py jobs.py main.py message_store.py pipeline.py recovery.py installer.py ./
+COPY actions.py admin_config.py config.py dashboard.py dashboard_owner.py db.py digest.py documents.py email_attachments.py file_browser.py flows.py invoices.py jobs.py main.py message_store.py pipeline.py recovery.py installer.py ./
 COPY ai_budget.py platform_health.py historical_import.py setup_gcal.py setup_ms_auth.py setup_telegram.py setup_telegram_account.py setup_whatsapp.py ./
 COPY setup_ui.py ./
-COPY task_reconciliation.py ./
-COPY agent_tools.py research.py owner_instructions.py ./
-COPY owner_dialogue.py owner_commitments.py ./
-COPY policy.py capabilities.py knowledge.py secretary.py secretary_runtime.py ./
-COPY execution.py quiet_hours.py privacy.py ./
+COPY task_reconciliation.py owner_commitments.py ./
+COPY policy.py capabilities.py knowledge.py privacy.py ./
+COPY agent/ ./agent/
 COPY connectors/ ./connectors/
 COPY web/ ./web/
 COPY docker/entrypoint.py ./docker/entrypoint.py

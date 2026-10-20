@@ -3,210 +3,144 @@
 For a new installation, start with the Italian [quick start](README.md) and
 [Docker guide](docker/README.md). The host/virtualenv deployment section below
 is an alternative for operators, not an additional step after Docker setup.
+Flows and diagrams: [AGENT_FLOWS.md](AGENT_FLOWS.md). Settings: [CONFIGURATION.md](CONFIGURATION.md).
 
-## Integrated bounded secretary and dashboard boundary
+## Architecture in one page
 
-The dashboard consumes `secretary.snapshot/resolve_approval`,
-`knowledge.snapshot/search/open_source`, `capabilities.OPTIONAL` and the existing
-`flows.settings/set_enabled` store. The optional runtime snapshot is projected to
-displayable review/proposal fields, never prepared inputs/model prompts. Missing
-modules report 501; unavailable schemas report 503 (knowledge may explicitly
-return available=false). HTTP reads never bootstrap/migrate/start workers.
+One **agent** (GitHub Copilot SDK, LLM = OpenRouter) interprets owner requests and
+incoming messages using typed tools. The model is never an authority: native
+provenance, consents, leases and receipts decide what is allowed. There are no fixed
+classification/plan pipelines; to add a capability, add a tool in `agent/toolkit.py`.
 
-`main()` calls `db.init()` **before** flows and workers. The current startup is
-wired as follows (migration steps 1–2 share advisory lock 73190421 and one
-transaction; flows/workers start afterwards):
+`main()` calls `db.init()` **before** flows and workers. Migrations are additive and
+run under advisory locks in one transaction: native messages/attachments, jobs, task
+lifecycle, media, capabilities (with legacy provenance captured **first**), policy,
+knowledge, AI budget, the `agent_*` tables and the `agent` views (`agent/schema.py`).
+It then starts six durable workers, one job at a time per kind: `analysis` (incoming
+triage), `owner` (dialogue), `digest`, `action` (the only place with external effects),
+`media` and `knowledge`. Named periodic activities have at most one live launcher thread
+each, in addition to the workers and their lease-heartbeat threads. **Run one
+scheduler/owner instance per deployment.** HTTP reads never bootstrap or migrate.
 
-1. Captures legacy installation provenance before base/native migration creates
-   its receipt table; it does not infer provenance from newly created timestamps.
-2. Applies native messages/attachments, jobs, task reconciliation, media and owner
-   dialogue migrations, then capabilities (with captured legacy provenance),
-   policy, secretary, knowledge, secretary runtime, note provenance, execution
-   and AI budget. `execution.migrate` and `ai_budget.migrate` are already wired.
-3. Initialises flows preserving explicit flags. Native storage/revisions enqueue
-   knowledge and live observations; periodic scheduling calls due_reviews and
-   runtime backlog recovery. No startup consent grants or inferred delegations.
-4. Starts eight durable workers, one job at a time per kind: `analysis`, `media`,
-   `reconcile`, `action`, `owner`, `knowledge`, `secretary_review` and
-   `secretary_email_execution`. Named periodic activities have at most one live
-   launcher thread each; these are additional to the eight job workers and their
-   lease heartbeat threads. Run one scheduler/owner instance per deployment.
+Verify upgrades on an isolated clone, not on live accounts or user data. No startup
+step grants consents or infers delegations.
 
-This is an integrated **bounded review secretary**: review, local drafts and
-owner-decision proposals with version/source/lease checks, plus separately
-authorized effects. It is not arbitrary workflow/dependency execution. Source
-checks on integrated paths are not certification of every direct/legacy call;
-in particular, persistent AI accounting applies only in Worker job contexts.
-Verify upgrades on an isolated clone, not on live accounts or user data.
+### The agent runtime
 
-Public APIs still needed:
-trusted dashboard responsibility stop with CAS/audit/dependent invalidation, and
-policy list/upsert with allowlisted channel/effect and CAS. Until those exist,
-bounded trusted-only SQL helpers in dashboard.py implement those operations.
-They accept neither table/column identifiers nor SQL from HTTP. They must not be
-reused as arbitrary model tools. The configured owner is asserted server-side
-only after login/CSRF; dashboard credentials grant owner-level control.
+- One `CopilotClient` (a ~150 MB binary, about 190 MB of memory in use) runs in a dedicated thread,
+  `mode='empty'` (no shell, file, network or git tools); any permission request other than
+  the turn's own tools is denied. Sessions are **ephemeral**: the context is rebuilt from the
+  database on every turn and the session is deleted at the end.
+- The runtime talks only to a **loopback gateway** in the app process. The OpenRouter key
+  never enters the runtime; each turn gets a one-shot bearer bound to its job, and every
+  request is accounted in the ledger with an explicit `max_tokens`. Lost lease, exhausted
+  budget or unavailable ledger refuse the request **before** contacting the provider.
+- The runtime binary is **baked into the Docker image** (`COPILOT_CLI_EXTRACT_DIR=/opt/copilot-runtime`,
+  `COPILOT_SKIP_CLI_DOWNLOAD=1`) because the container's cache directory is a tmpfs; nothing is
+  downloaded at start. Its version is fixed by the pinned `github-copilot-sdk` (arm64 and amd64
+  builds exist; the Raspberry Pi 4 needs the arm64 one, so build the image **on the Pi** or with
+  an arm64 builder).
 
-### Provenance and historical context
+### Read-only database role
 
-New practice/responsibility owner plans use schema v2. Before inference the
-server resolves **all actual exported inputs**, including snapshot/history, to
-flattened native `input_sources`; `input_versions` records snapshot references.
-Applied immutable plans and bound receipts preserve those dependencies across
-partial updates. Read-egress resolution also follows prior applied runtime review
-inputs. Missing/cyclic/unverifiable manifests deny derived context; legacy v1
-replay is not proof of permission to export its derived text to AI.
+The agent reads only the `agent` schema (views that embed the consents). Its second,
+independent barrier is the `agent_ro` role: `NOLOGIN`, no attributes, `SELECT` on those views only.
+**The app provisions it on every start** (`db.init` → `agent.schema.ensure_readonly_role`,
+best effort, idempotent, atomic):
 
-The shared owner-context/task-reconciliation resolver checks task source/owner
-origins and every applied `task_changes.message_id`, not only the latest
-`last_evidence_id`. Pending/rejected changes are excluded; missing/denied applied
-evidence blocks that context. These checks do **not** supply full model-input
-manifests for legacy task/personal-memory write plans or a complete typed-memory
-conflict/provenance model.
+- **Local compose database** (the `secretary` user is a superuser) or any user with `CREATEROLE`:
+  the role is created at the first start. No manual step.
+- **External database, application user without `CREATEROLE`** (the production case): the DBA runs
+  **once** PART 1 of `deploy/agent_ro.sql` (`CREATE ROLE agent_ro NOLOGIN; GRANT agent_ro TO <app user>;`).
+  `USAGE` on the schema and `SELECT` on the views are then granted by the app itself (it owns
+  them), so the order of operations does not matter and views added by later versions are
+  covered through default privileges. Restart the app after the DBA step.
+- Without the role the app still works (AST guard + READ ONLY transaction), prints a warning at
+  startup with the two statements, and the dashboard page **Agente** shows «Protezione database».
+  `AGENT_DB_ROLE=` (empty) means "no role wanted".
 
-`ai_text`, `ai_media` and `ai_history` are separate, default-deny consents per
-email/Telegram/WhatsApp channel (Telegram bot and account share consent).
-`policy.can_read_context` permits historical read-only AI context only with both
-text and history consent; media/document sources additionally need media consent.
-`policy.can_operate` continues to reject historical operations. Granting history
-consent never enables command/task/effect replay or historical media conversion.
-Read-only historical context support is not a promise that every consumer, such
-as the operational digest, uses history.
+On PostgreSQL 16+ a role creator with `CREATEROLE` is only an *administrator* member and
+`SET ROLE` is denied until an explicit `GRANT`; the app checks the `SET` privilege (not mere
+membership) and grants it. Verification, as the application user: `SET LOCAL ROLE agent_ro;
+SELECT count(*) FROM agent.messages;` works, and `SELECT count(*) FROM public.email_messages;` must fail.
 
-### Dashboard link acceptance and attention acknowledgement
+### Retiring the old secretary tables (optional)
 
-- POST `/api/secretary/runtime/links/<id>/accept`, body `expected_version` only:
-   accepts the exact stored proposal version, evidence revision and practice/
-   responsibility scope. The server rechecks native origins, creates the link,
-   advances the practice version, invalidates dependent approvals and queues a
-   review. Receipt replay is historical, not renewed permission. It cannot link
-   arbitrary search results or accept replacement evidence/authority from JSON.
-- POST `/api/secretary/runtime/practices/<id>/acknowledge`, body
-   `expected_version,attention_hash`: acknowledges only the displayed practice
-   version and SHA-256 attention snapshot. Unchanged attention is silenced and
-   queued stale/acknowledged review notifications are suppressed at send checks.
-   It neither completes the practice nor changes delegation or permissions.
+The previous secretary (practices, responsibilities, reviews, email execution, research,
+owner dialogue/instructions, reconciliation) is gone from the code, but its tables remain
+in the database, unread. After a backup, `deploy/drop_legacy_tables.sql` removes them in
+one transaction and aborts if a non-legacy table depends on them. It is **never run by
+the application**.
 
-Both require login, same-origin/CSRF and backend-constructed DashboardOwner, reject
-unknown/duplicate JSON keys and return `external_execution=false`. Neither sends
-externally; accepting a link can schedule a later consent-gated review.
+## Provenance and consent
+
+`ai_text`, `ai_media` and `ai_history` are separate default-deny consents per
+email/Telegram/WhatsApp channel (the Telegram bot and personal account share consent).
+They are embedded in the `agent.*` views and re-evaluated at every query, live mail read,
+provider send and digest seal. Historical imports are read-only context
+(`policy.can_read_context`) and never enable commands, tasks, effects or media conversion.
+Native owner authority is only live, direct, non-forwarded text in the private bot chat.
 
 ### Explicit recovery of consent-blocked media
 
-Denied live media conversion becomes terminal `blocked/media_consent_required`.
-Changing consent or replaying storage does not automatically reset it. From an
-opened current source, the dashboard offers an explicit POST
-`/api/media/retry-blocked` with exactly `message_id,expected_channel`; native
-channels are `telegram`, `telegram (account)` or `whatsapp`.
-Both current text/media grants and unchanged live provenance are required.
-Only eligible blocks with no recorded provider attempt and no transcript/active
-lease are reset; historical sources and ambiguous prior provider attempts remain
-excluded. Limits: 20 attachments per request, three consent resets per attachment;
-each recovered job retains the normal eight-attempt bound. Recovery does not
-grant consent or call AI inline; the worker rechecks before inference/publication.
+Denied live media conversion becomes terminal `blocked/media_consent_required`. Changing
+consent or replaying storage does not reset it. In the dashboard (**Permessi AI** →
+*Recupero media bloccati*) an explicit POST `/api/media/retry-blocked` with exactly
+`message_id,expected_channel` (`telegram`, `telegram (account)` or `whatsapp`) re-queues it.
+Both current text and media grants and unchanged live provenance are required. Only eligible
+blocks with no recorded provider attempt and no transcript/active lease are reset;
+historical sources and ambiguous prior provider attempts stay excluded. Limits: 20
+attachments per request, three consent resets per attachment; each recovered job keeps the
+normal eight-attempt bound. Recovery does not grant consent or call AI inline; the worker
+rechecks before inference and publication.
 
-### Explicit text-only email gateway
+Media that were **never persisted** (for example a WhatsApp download that kept failing) are
+reported by `messages.media_missing` in the agent views and in the audit trail
+(`MEDIA_ERRORS` in `connectors/whatsapp.py`); the bridge now retries the download with
+backoff and records the outcome instead of silently dropping the attachment.
 
-The dashboard integrates `execution.request_email/email_snapshot/dispatch_email`.
-After startup migrations, `main()` starts
-`jobs.Worker(execution.KIND, execution.execute_approved)`. No worker is started by
-a dashboard request; a queued dispatch still does not prove worker liveness or
-successful sending.
+### Outgoing email
 
-1. **Prepara invio**: choose an existing active/waiting practice and its displayed
-   version, one bare recipient address, an explicit configured `account_address`,
-   exact text and expiry with timezone. Runtime drafts are shown literally and
-   can populate text only; they cannot infer sender/recipient or authorize sends.
-2. **Approva**: `secretary.resolve_approval` checks the exact displayed payload,
-   current version and stable key. It never dispatches, enqueues or sends email.
-   The response includes `operation_key`; the UI retains it as
-   `approval_operation_key` in the DOM across manual snapshot refreshes, never
-   browser storage. Logout/full reload clears it; absent receipt disables send.
-3. **Invio esplicito**: a separate owner click posts the exact sender, subject,
-   payload, approved version, approval receipt key and stable dispatch key.
-   The gateway commits an identifier-only job; worker validation rechecks native
-   authority, versions, expiry, SMTP binding, receipt, document bytes and lease.
+The agent only **drafts** (`email_propose` → `agent_email_outbox`, state `proposed`).
+`/invia ID` (current native owner text, `SECRETARY_MODE=active`) approves it; the `action`
+worker then sends one text-only message to one bare address from a configured account. An
+attempt is committed before SMTP; a timeout, crash or false return is `uncertain` and is
+**never** resent automatically. `accepted` means the SMTP server accepted the message, not
+that it was delivered or read; revoking cannot recall a send already in flight. No
+attachments, threads/Message-ID, display names, lists or custom headers.
 
-Subject is fixed to **Messaggio approvato** and displayed before approval/send.
-The connector supports **text only, no attachments**. Nonempty approved document
-lists are displayed and explicitly rejected, never silently dropped. No default
-account, arbitrary SMTP/URL/path payload, remote draft or generic model tool exists
-in this gateway. Threaded replies/Message-ID metadata are not supported.
-One committed attempt precedes SMTP; timeout/crash/false is uncertain, never
-automatically resent. `accepted` means connector accepted, not delivered/read.
-Revocation cannot recall SMTP already in flight. Never blindly replay a send.
+### Real AI caps (not a money budget)
 
-Authenticated APIs: POST `/api/secretary/emails` (request_email argument fields),
-GET `/api/secretary/emails/<id>`, POST `/api/secretary/emails/<id>/dispatch`
-(`expected_version,account_address,subject,payload,approval_operation_key,operation_key`).
-Mutations require same-origin and CSRF; request/dispatch bodies are capped at
-49152 bytes. Unknown/duplicate keys, nonfinite JSON, header/list recipients,
-spoofed owner flags and invalid bounds fail before writes. Owner identity is
-constructed only by the backend. GET `/api/secretary/execution` shows at most 24
-sealed proposals/outcomes and 50 sender addresses, never SMTP secrets/job tokens.
-
-Upgrade checklist: back up DB plus private config/media first; test the
-additive migrations on a new clone with external I/O disabled. Preserve explicit
-legacy flags, including false. Fresh/unknown profiles pause optional invoice/ZIP
-flows; do not rewrite existing responsibilities, backfill them from old tasks or
-auto-allow AI. Historical invoices/ZIP remain accessible in the collapsed archive
-without re-enabling processing. Review ambiguous old effects before restart.
-
-Configuration: global observe/active mode and daily monetary budget remain
-planned, not enforced; `SECRETARY_MODE` has no runtime consumer and stays read-only.
-Review-only quiet hours are implemented by secretary_runtime via
-SECRETARY_REVIEW_QUIET_START/END, default 22/8 local; they do not silence all
-notifications or stop AI spending. The support endpoint distinguishes this from
-global quiet hours.
-
-### Real Worker AI caps (not a money budget)
-
-`ai_budget` enforces `AI_BUDGET_DAILY_CALLS=200`,
-`AI_BUDGET_DAILY_TOKENS=500000`, `AI_BUDGET_MAX_INFLIGHT=2` and
-`AI_BUDGET_MAX_OUTPUT_TOKENS=65536` inside jobs execution contexts. Every HTTP
-attempt/retry consumes one call and serialized-input-byte + maximum-output +
-overhead token reservation, without refunds, on a UTC day. Each ledger row also
-carries a server-derived `scope` (global / dialogue / review / research /
-analysis, from the system prompt); optional per-scope caps
-(`AI_BUDGET_DIALOGUE_DAILY_CALLS`, `AI_BUDGET_REVIEW_DAILY_CALLS`,
-`AI_BUDGET_RESEARCH_DAILY_CALLS`, `AI_BUDGET_ANALYSIS_DAILY_CALLS`) can only
-**narrow**, never exceed, the global cap; 0 or absent disables that scope cap;
-invalid values fail closed. Higher provider usage
-is charged too; this cannot predict exact multimodal tokenization or prices.
-Direct/local legacy calls and periodic digest generation outside a Worker are
-explicitly outside persistent enforcement. Nine job workers do not mean nine
-simultaneous accounted AI calls: the default shared in-flight cap is two.
-Workers fail closed if DB/ledger/fence is unavailable. Crash-reserved slots are
-not automatically released: reconcile only after establishing no request is live.
-GET `/api/secretary/budget` exposes aggregate counters and finite limits only;
-reported cost NULL means unknown, not free. No prompts, bodies, secrets or lease
-IDs are returned. Configure monetary limits separately at OpenRouter.
-Web-editable caps are positive integers up to 2147483647 (output 65536), applied
-only after restart; inherited deployment values remain read-only.
+`ai_budget` enforces `AI_BUDGET_DAILY_CALLS=200`, `AI_BUDGET_DAILY_TOKENS=500000`,
+`AI_BUDGET_MAX_INFLIGHT=2` and `AI_BUDGET_MAX_OUTPUT_TOKENS=65536` on every agent request
+(through the gateway) and media conversion, per UTC day. Every HTTP attempt or retry consumes
+one call plus a reservation of serialized input + maximum output + overhead tokens, without
+refunds; higher provider usage is charged too. Each ledger row carries a server-derived
+`scope` (`agent_owner`, `agent_inbox`, or `global` for media); the optional
+`AI_BUDGET_AGENT_OWNER_DAILY_CALLS` / `AI_BUDGET_AGENT_INBOX_DAILY_CALLS` can only **narrow**
+the global cap, 0 or absent disables the scope cap and invalid values fail closed. An
+exhausted budget **defers** the job without consuming attempts. Workers fail closed when the
+DB, ledger or lease is unavailable. Crash-reserved slots are not released automatically:
+reconcile (`POST /api/budget/reconcile`) only after establishing that no request is live.
+Reported cost NULL means unknown, not free. Web search has no dedicated budget (explicit
+decision). Configure monetary limits separately at OpenRouter.
 
 ## Validation and CI isolation
 
-`.github/workflows/docker.yml` installs requirements and runs full offline
-`unittest discover` with `env -i`, no deployment dotenv, a temporary data directory
-and no inherited provider/DB credentials. A separate job repeats discovery against
-a disposable PostgreSQL service with an explicit `secretary_test` database and
-random test schemas. Existing auto-PG tests may create their own Unix-socket-only
-temporary clusters. Neither job starts main.py or connects to production.
-CI explicitly runs dashboard/execution/budget contracts before full discovery;
-the isolated PostgreSQL full-discovery job also discovers their SQL tests.
-These are workflow definitions, not a claim of current green CI. Full-validation
-results are supplied separately by the parent run; this documentation update
-runs no tests/terminal commands and reads no user data.
+`.github/workflows/docker.yml` has an offline job (explicit agent/dashboard/budget contract
+modules, then full `unittest discover` with `env -i`, no deployment dotenv, temporary data
+directory and no inherited credentials, plus `sh -n`, `node --check` and an image build) and
+a PostgreSQL job that repeats discovery against a disposable service with an explicit
+`secretary_test` database and Unix-socket URL. Neither job starts `main.py` or touches
+production, and the real-runtime scenarios are skipped there unless
+`PI_SECRETARY_TEST_AGENT_RUNTIME` points to a runtime binary. These are workflow definitions,
+not a claim of a green CI run.
 
-`test_secretary_dashboard.py` covers login/CSRF/origin/Host, bounds/validation,
-missing support, redaction, consent defaults/CAS, exact approval API invocation,
-restrictive stop/invalidation, UI text rendering and packaging. Its real SQL
-class is opt-in via PI_SECRETARY_TEST_DATABASE_URL, insists on an explicit `_test`
-dbname without libpq service, uses a random schema and never falls back to
-DATABASE_URL. It tests actual payload mismatch/retry, consent CAS, stop and
-rollback on audit failure, then actual email request/approval/dispatch receipts,
-tamper/revocation/document rejection and mocked connector acceptance. No real
-provider calls occur. Do not set the test URL to any production cluster.
+Opt-in SQL classes need `PI_SECRETARY_TEST_DATABASE_URL` naming a disposable `_test` database
+(no libpq service, random schemas, never `DATABASE_URL`); some need a Unix socket. Some
+`*PostgresTests` classes bootstrap their own temporary cluster even without the URL: run them
+by explicit class. Never point the test URL at a production cluster. See `AGENTS.md` for the
+exact commands.
 
 ## Email attachment filesystem storage details
 
@@ -231,90 +165,70 @@ blob/schema deletion is performed. Non-email attachments are unchanged.
 
 ## Architecture
 
-`pipeline.ingest` commits native message + analysis job in one transaction.
-Email UID seen flags and WhatsApp spool acknowledgement occur only after that
-commit. The analysis path uses native policy gates and durable local/outbox
-commits; indexing and bounded secretary observation/review have separate workers.
-An independent action worker executes effects outside transactions. A serialized
-owner worker preserves dialogue history without waiting for email or analysis;
-email execution has its own worker. Job payloads remain in PostgreSQL, not an
-unbounded RAM executor queue. Connections are thread-local/short-lived with
-connection, statement and lock timeouts.
+`pipeline.ingest` commits the native message **and** one `analysis` job in a single
+transaction; email UID seen flags and the WhatsApp spool acknowledgement happen only after
+that commit. Job payloads live in PostgreSQL, not in an unbounded in-memory queue, and
+connections are thread-local and short-lived with connection, statement and lock timeouts.
 
-Jobs use SKIP LOCKED, token fencing, 15-minute crash leases, heartbeat every
-30 seconds and a one-hour execution deadline. Ordinary failures retry with
-exponential backoff (15s to 1h), maximum eight attempts, then visible `failed`.
-Deferred paused work does not consume attempts; consent-blocked media remains
-terminal until eligible explicit recovery. A lease cannot recall in-flight I/O.
-No automatic deletion of jobs/messages/dedup identities is performed. Plan storage capacity;
-retention policy must archive source files and referenced rows together.
-Do not reset job rows as a generic recovery procedure. Review native authority,
-leases and effect receipts first; resetting a job does not renew an authorization
-or make an attempted/uncertain send safe. Use the bounded media recovery API for
-eligible consent blocks, not bulk SQL resets.
+Jobs use `SKIP LOCKED`, token fencing, 15-minute crash leases, a heartbeat every 30 seconds
+and a one-hour execution deadline. Ordinary failures retry with exponential backoff (15 s to
+1 h), at most eight attempts, then a visible `failed` state. `Deferred` work (paused flow,
+missing consent, exhausted budget) does not consume attempts. A lease cannot recall in-flight
+I/O. `jobs.assert_current` rechecks the lease before every effect. Use `POST /api/jobs/requeue`
+(`analysis`, `owner`, `digest`) for failed jobs, and the media recovery API for consent
+blocks. **Do not reset job rows with bulk SQL**: a reset renews no authorization and does not
+make an attempted/uncertain send safe; review native authority, leases and effect receipts first.
 
-Integrated pipeline notifications/owner replies/ZIP sends and the email gateway
-commit an attempt before remote I/O. Attempted/uncertain non-idempotent effects
-stop for reconciliation; retries do not blindly resend after timeout, lost reply
-or a crash. Acknowledged acceptance is not proof of delivery/read, and no global
-exactly-once guarantee covers legacy/direct paths. Deterministic Calendar IDs and
-content-addressed local writes allow narrower safe reconciliation/retry.
-`notified=true` follows acknowledged Telegram acceptance. Digest generation is
-periodic, with a persistent day cursor and outbox identity, not a durable
-AI-generation job. Dashboard metrics report queue states, oldest age, completion,
-acknowledged notifications, tasks and pending/proposed Calendar entries.
+No automatic deletion of jobs, messages or deduplication identities happens, except one daily
+retention pass that prunes the policy audit (`EFFECT_AUDIT_RETENTION_DAYS`, receipts are kept) and
+the agent run audit (`agent_runs` and their tool calls, 30 days). Plan storage capacity; any retention must archive source files and referenced
+rows together.
+
+Notifications, owner replies, ZIP sends and outgoing email commit an attempt **before** remote
+I/O. Attempted/uncertain non-idempotent effects stop for reconciliation: retries never blindly
+resend after a timeout, a lost reply or a crash. Acknowledged acceptance is not proof of
+delivery, and there is no global exactly-once guarantee; deterministic Calendar IDs and
+content-addressed local writes allow narrower safe reconciliation. `notified=true` follows
+acknowledged Telegram acceptance. The daily digest is a durable job (`digest:YYYY-MM-DD`),
+queued idempotently at `DIGEST_TIME`; without readable sources it does not call the model.
+Dashboard metrics report queue states, oldest age, completion, acknowledged notifications,
+tasks and pending/proposed Calendar entries.
 
 ## Calendar and tasks
 
-External events default to `proposal`. `/appuntamenti` displays local IDs and sync
-state alongside remote events, deduplicated by Google event ID. `/conferma ID`
-requests a sealed create grant; `/annulla ID` requests a separate cancel grant.
-Only current direct native owner text can grant, including an explicit natural
-create intent; task creation/deadlines and model flags cannot. Invalid/unconfigured
-seals leave a local proposal. Owner dialogue distinguishes local save/pending
-from remote success. SHA256 keys produce deterministic Google IDs; create 409
-is reconciled by GET against expected fields.
+The agent never writes to Calendar: `calendar_propose` stores a **local proposal**. External
+events also default to `proposal`. `/appuntamenti` lists local IDs and sync state next to remote
+events, deduplicated by Google event ID. `/conferma ID` requests a sealed create grant and
+`/annulla ID` a separate cancel grant. Only current direct native owner text can grant; task
+creation, deadlines and model output cannot. Invalid or unconfigured seals leave a local
+proposal. SHA-256 keys produce deterministic Google IDs; a create 409 is reconciled by GET
+against the expected fields.
 
-`secretary_effect_grants_v3` binds event payload/state and current native owner
-text to the explicit configured Calendar ID, timezone, and normalized create
-start/end/duration/reminder values. Execution rechecks target/configuration and
-expiry before I/O and uses the sealed target. Expired grants or legacy grants
-with NULL target fail closed; replay cannot extend expiry or bind an old command
-to today's destination. Review and obtain fresh owner authorization rather than
-backfilling a target. Credentials/configuration presence alone is not permission.
+`secretary_effect_grants_v3` binds event payload/state and the current native owner text to the
+explicit configured Calendar ID, timezone and normalized start/end/duration/reminder values.
+Execution rechecks target, configuration and expiry before I/O and uses the sealed target.
+Expired grants, or legacy grants with a NULL target, fail closed; a replay cannot extend expiry
+or bind an old command to today's destination: obtain fresh owner authorization rather than
+backfilling a target. Credentials alone are not permission. Sender-label auto-create
+(`CALENDAR_EXTERNAL_AUTO` / `CALENDAR_TRUSTED_SENDERS`) is not active. Updating existing events,
+availability planning and remote drift repair are **not implemented**: cancel/create needs fresh
+explicit authorization. Source text is evidence, not authority.
 
-The earlier `CALENDAR_EXTERNAL_AUTO` / `CALENDAR_TRUSTED_SENDERS` sender-label
-auto-create policy is **not active** in the integrated path. Task-derived events,
-including deadlines of owner tasks where a proposal exists, never inherit an
-automatic Calendar grant. Owner commitments use their own reminder schedule;
-the digest's legacy deadline planner creates local proposals, not remote writes.
-Updating existing events, availability planning and ongoing Calendar drift repair
-are **not implemented**: cancel/create requires fresh explicit authorization.
-Legacy events are not automatically backfilled/reconciled. Source text is evidence,
-not authority; role separation alone is not a complete prompt-injection defense.
-
-`/task titolo | YYYY-MM-DDTHH:MM+02:00` creates an owner task (deadline optional).
-`/attivita` lists open tasks with source message ID and optional deadline;
-`/fatto ID` completes one. Owner date-only deadlines stay date-only (default
-reminder 09:00 local); timed deadlines default to a reminder at the deadline,
-unless an explicit reminder overrides it. Legacy external-task reminders use a
-persistent within-24h-of-deadline identity, including overdue tasks. No arbitrary
-deadline/time or Calendar intent is inferred. Automatic spam/newsletter mailbox
-mark-as-read exists only in the private legacy synchronous classifier, not
-`pipeline.ingest` used by current runtime ingestion.
+`/task title | YYYY-MM-DDTHH:MM+02:00` creates an owner task (deadline optional); `/attivita`
+lists open tasks; `/fatto ID` completes one. Date-only deadlines stay date-only (default
+reminder 09:00 local); timed deadlines default to a reminder at the deadline unless an explicit
+reminder overrides it. Tasks created from incoming messages keep a reminder identity within 24 h
+of the deadline, overdue included. In dialogue the agent can create, edit, complete or cancel
+tasks, even in bulk, only on an exact owner phrase in the current message (verified against the
+archived text); incoming messages from third parties can only create **new** tasks with an exact
+quote and can never modify existing ones. Every change is versioned with its evidence.
 
 ## Remaining operational scope
 
-The integrated boundaries above do not finish the architecture roadmap. Remaining:
-arbitrary workflows/dependency execution (the read-only research worker is
-partial coverage); full legacy task/memory model-input provenance (typed-memory
-topic conflicts are resolved via replace-on-conflict); general existing-evidence
-practice linking from retrieval; executable stop-condition rules; Calendar
-update, availability and remote drift handling; email attachments/threaded sends;
-global monetary cap/mode/global quiet hours; coordinated privacy erase/export;
-and a full restored-backup production drill plus semantic/quality evaluation.
-Bounded link acceptance, CAS, origin/applied-evidence checks and sealed effects
-must not be described as those broader guarantees.
+Not done: Calendar update, availability and remote drift; outgoing email in threads and with
+attachments; erase inside backups (erase covers the database and reports the files to delete);
+a full restored-backup drill; qualitative evaluation of the agent on the real archive; unit
+tests of `agent/mail.py` against a real IMAP server and of `agent/web.py` against the network (both are covered offline with fakes).
 
 ## Recovery, invoices and delivery limits
 
@@ -344,26 +258,41 @@ not automatically resend that ZIP; review/reissue manually.
 
 ## Installation and deployment (operator only)
 
-Use a dedicated Python 3.11+ virtualenv; install requirements.txt, then freeze the
-resolved platform-specific versions into a reviewed deployment lock artifact.
-The repository currently specifies compatible ranges, not a fully reproducible
-cross-platform lock. WhatsApp requires Node + Chromium and `npm ci` using the
-reviewed data/package-lock.json. Do not download x86 Chromium on ARM.
+Use a dedicated Python 3.11+ virtualenv; install `requirements.txt` and freeze the resolved
+platform-specific versions into a reviewed lock artifact (the repository pins ranges, plus an
+exact `github-copilot-sdk`). **Download the agent runtime once**, as the service user:
+`COPILOT_CLI_EXTRACT_DIR=/opt/copilot-runtime python -m copilot download-runtime`, and run the
+service with `COPILOT_CLI_EXTRACT_DIR` set to the same directory and `COPILOT_SKIP_CLI_DOWNLOAD=1`.
+The runtime must be an arm64 build on a Raspberry Pi. WhatsApp requires Node + Chromium and
+`npm ci` using the reviewed `data/package-lock.json`; do not download x86 Chromium on ARM.
 
-`deploy/pi-secretary.service` is a template; adjust user/paths before installing.
-Keep secrets/session files private (0700 directories, 0600 files). Do not expose
-the HTTP dashboard on the Internet: bind loopback:8080, terminate HTTPS using
-Caddy/nginx with a valid certificate, set DASHBOARD_COOKIE_SECURE=true and
-DASHBOARD_HOSTNAME to the public hostname. Configure proxy headers deliberately;
-do not trust arbitrary X-Forwarded-* headers. Existing port-80 overrides must be
-removed/reviewed separately. Run only one scheduler/owner instance per deployment.
+`deploy/pi-secretary.service` is a template; adjust user/paths before installing. Keep secrets
+and session files private (0700 directories, 0600 files). Do not expose the HTTP dashboard on the
+Internet: bind loopback:8080, terminate HTTPS with Caddy/nginx using a valid certificate, set
+`DASHBOARD_COOKIE_SECURE=true` and `DASHBOARD_HOSTNAME` to the public hostname, and configure
+proxy headers deliberately (never trust arbitrary `X-Forwarded-*`). Existing port-80 overrides
+must be removed or reviewed separately. Run one scheduler/owner instance per deployment.
 
-Startup applies additive native/jobs/runtime/secretary/execution/budget migrations
-under the schema advisory lock, including `durable_work_v2` and its runtime
-upgrade. The legacy native migration refuses an unapproved legacy history
-conversion; resets are rejected by db.init. Back up and test migration on a clone
-first. No production migration/restart or user-data access is part of this
-documentation update.
+Startup applies the additive migrations under the schema advisory lock, including
+`durable_work_v2` and its runtime upgrade. The legacy native migration refuses an unapproved
+history conversion and `db.init` rejects resets. Back up and test the migration on a clone first.
+
+### Upgrading from the previous secretary
+
+1. Back up the database and the private config/media; test on a clone with external I/O disabled.
+2. Rebuild the image (the Dockerfile copies modules **by name**) and recreate the container.
+3. The new `agent` schema and `agent_*` tables are created at startup. If the application user
+   cannot create roles, ask the DBA to run PART 1 of `deploy/agent_ro.sql` (two statements) and
+   restart. Existing flags (including `false`) and consents are preserved; nothing
+   is auto-allowed, and optional invoice/ZIP flows of unknown provenance stay paused.
+4. Review ambiguous old effects (attempted/uncertain receipts) before enabling `SECRETARY_MODE=active`.
+5. Only after a backup, optionally run `deploy/drop_legacy_tables.sql`.
+6. Attachments stored with the absolute path of a previous host keep working for the agent: the
+   `agent.attachments.rel_path` view column keeps only the part from the media directory name
+   (`email_attachments/`, `tg_files/`, ...) onward and the file box resolves it under `/data`.
+   Files that are genuinely missing on disk are **considered lost by decision of the owner**: no
+   repair or reconciliation is attempted and no rows are rewritten; `stored` and `media_missing`
+   in the views tell which ones they are, so the agent says so instead of inventing content.
 
 ## Backup and restore drill
 

@@ -164,7 +164,7 @@ Archivia testo/didascalie in entrata/uscita, non risponde ai contatti, non esegu
 i loro comandi e non segna letto. Scarica vocali e immagini supportati (fino a
 10 MiB) e accoda la conversione AI in testo salvato nel DB: i media vengono
 trasmessi ai provider OpenRouter con relativi costi e condizioni di trattamento.
-Il digest e il contesto del dialogo possono usare il testo persistente.
+L'agente (dialogo e riepilogo) può leggere il testo persistente, solo con il consenso media.
 «Sola lettura» è una scelta del codice, non un permesso Telegram limitato.
 
 ### WhatsApp
@@ -322,8 +322,14 @@ Informazioni operative in [OPERATIONS.md](../OPERATIONS.md):
 	risposta persa; nessuna consegna esattamente una volta.
 - Recupero limitato da `RECOVERY_DAYS` (default 14, 1–90) e limiti connettori;
 	WhatsApp dipende da cronologia disponibile, Telegram da quote/retention.
-- Gravità alta/urgenza AI possono superare soglia `mai`; polling, errori e rete
-	restano rilevanti. Non è un sistema d'emergenza garantito.
+- L'agente avvisa subito solo per vere emergenze, fino a `AGENT_NOTIFY_MAX_PER_DAY`
+	(default 5) al giorno; polling, errori e rete restano rilevanti. Non è un
+	sistema d'emergenza garantito.
+- L'agente interroga il DB con il ruolo di sola lettura `agent_ro`. Con il **database locale**
+	del compose lo crea l'app da sola al primo avvio; con un **database esterno** senza
+	`CREATEROLE` il DBA esegue una volta la PARTE 1 di `deploy/agent_ro.sql` (vedi
+	OPERATIONS.md). Il runtime dell'agente è già nell'immagine; su Raspberry costruiscila
+	sul Raspberry (arm64).
 - PDF/XML con limiti difensivi, niente OCR, verifica P7M, estrazione ZIP o
 	validazione fiscale. ZIP mesi chiusi dal mese successivo; fatture tardive
 	non causano reinvio automatico di ZIP già consegnati.
@@ -332,6 +338,6 @@ Informazioni operative in [OPERATIONS.md](../OPERATIONS.md):
 - Allegati email in `data/email_attachments/<sha256>`; vecchi BYTEA leggibili.
 	Migrazione blob opzionale e restore sono procedure per operatori.
 
-[IMPLEMENTATION.md](../IMPLEMENTATION.md) è un riepilogo tecnico, non onboarding.
+[AGENT_FLOWS.md](../AGENT_FLOWS.md) descrive i flussi dell'agente; non è onboarding.
 Nessuna promessa di hardening production-ready, upgrade DB automatici o
 compatibilità hardware senza verifica.

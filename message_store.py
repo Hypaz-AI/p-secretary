@@ -1,7 +1,7 @@
 """Versioned native message storage; only the configured PostgreSQL is used."""
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import config
@@ -13,68 +13,16 @@ TABLES = {'email': 'email_messages', 'whatsapp': 'whatsapp_messages',
 
 
 def enqueue_derived(conn, message_id, *, historical=False):
-    """Caller-atomic catalogue + live inbox, lazily loaded to avoid db cycles.
+    """Caller-atomic catalogue of derived text (documents/media), lazily loaded.
 
     Runtime requires the complete bootstrap. Missing schemas/import failures
     deliberately propagate: a partially migrated installation must not silently
     lose indexing or bypass policy. Tests of base storage can mock this boundary.
+    The agent reads the result through the consent-aware agent.* views; there is
+    no per-message planning queue any more.
     """
     import knowledge
-    receipt = knowledge.enqueue(conn, message_id)
-    if historical:
-        return receipt
-    import secretary_runtime
-    secretary_runtime.observe(conn, message_id)
-    revision = receipt.get('revision')
-    if revision:
-        _refresh_observation(conn, message_id, revision)
-    return receipt
-
-
-def _refresh_observation(conn, mid, revision):
-    """Rearm only changed evidence, never failed/blocked work or identical retries.
-
-    observe holds the secretary write lock. The ingress revision lives in input
-    until runtime saves a plan, then its source revision is authoritative. Clearing
-    a superseded running token fences the old worker before it can publish.
-    """
-    row = conn.execute('''SELECT status,input,plan FROM secretary_runtime_observations
-        WHERE message_id=%s FOR UPDATE''', (mid,)).fetchone()
-    if row is None:
-        return
-    status, saved, plan = row
-    saved = saved or {}
-    sources = saved.get('sources') or []
-    previous = sources[0].get('revision') if plan is not None and sources else saved.get('ingress_revision')
-    if previous == revision:
-        return
-    marker = json.dumps(dict(ingress_revision=revision))
-    if previous is None and status == 'pending' and plan is None:
-        conn.execute('''UPDATE secretary_runtime_observations SET input=%s
-            WHERE message_id=%s''', (marker, mid))
-        return
-    rearmed = conn.execute('''UPDATE work_jobs SET status='pending',attempts=0,
-        available_at=now(),finished_at=NULL,error=NULL,token=NULL,lease_until=NULL
-        WHERE kind='secretary_review' AND key=%s AND status IN ('pending','running','done')
-        RETURNING id''', (f'secretary-observe:{mid}',)).fetchone()
-    if rearmed:
-        conn.execute('''UPDATE secretary_runtime_observations SET status='pending',input=%s,plan=NULL
-            WHERE message_id=%s''', (marker, mid))
-
-
-def reconciliation_excluded(conn, message_id):
-    """Read durable provenance, including for pipeline callers with supplied IDs.
-
-    The communications view does not expose metadata. Call inside the enqueue
-    transaction; shared row locks fence concurrent promotion by a live edit.
-    Missing IDs are not classified as historical.
-    """
-    for table in TABLES.values():
-        row = conn.execute(f"""SELECT metadata @> '{{"historical": true}}'::jsonb
-            FROM {table} WHERE id=%s FOR SHARE""", (message_id,)).fetchone()
-        if row:
-            return row[0] is True
-    return False
+    return knowledge.enqueue(conn, message_id)
 
 
 def merge_whatsapp_metadata(old, incoming):
@@ -202,13 +150,11 @@ def migrate(conn, base_schema, approved=False):
 
 
 def store(conn, channel, sender, subject, body, ts=None, source_id=None,
-        metadata=None, attachments=None, update_existing=False, reconcile=False,
-        historical=False):
-    """Archive atomically; explicit history stays excluded across live retries.
+        metadata=None, attachments=None, update_existing=False, historical=False):
+    """Archive atomically; explicit history stays marked across live retries.
 
-    reconcile=False alone is not historical provenance (pipeline storage uses
-    that default too). Only a strictly newer live personal-Telegram revision
-    can promote an explicitly historical identity.
+    Only a strictly newer live personal-Telegram revision can promote an
+    explicitly historical identity.
     """
     meta = dict(metadata or {})
     # This reserved provenance field is controlled by the explicit store option,
@@ -228,11 +174,7 @@ def store(conn, channel, sender, subject, body, ts=None, source_id=None,
             existing = conn.execute('''SELECT id,metadata,sender,subject FROM whatsapp_messages
                 WHERE channel=%s AND source_id=%s FOR UPDATE''', (channel, source_id)).fetchone()
             if existing:
-                mid = enrich_whatsapp(conn, existing, meta, attachments)
-                if reconcile and not historical and existing[1].get('historical') is not True:
-                    import task_reconciliation
-                    task_reconciliation.queue(conn, mid)
-                return mid
+                return enrich_whatsapp(conn, existing, meta, attachments)
         conversation = None
         external = meta.get('chat_id')  # email Message-ID is NOT a thread ID
         if external is not None:
@@ -273,12 +215,6 @@ def store(conn, channel, sender, subject, body, ts=None, source_id=None,
             mid = existing[0]
             from connectors import media_archive
             media_archive.enqueue_message(conn, mid)
-            # A conditional personal-Telegram upsert returns no row for an
-            # older revision. Never give that rejected edit a reconciliation key.
-            if (reconcile and not historical and not update_existing
-                    and not (len(existing) > 1 and existing[1] is True)):
-                import task_reconciliation
-                task_reconciliation.queue(conn, mid)
             enqueue_derived(conn, mid, historical=(historical
                 or len(existing) > 1 and existing[1] is True))
             return mid
@@ -304,11 +240,6 @@ def store(conn, channel, sender, subject, body, ts=None, source_id=None,
         from connectors import media_archive
         if native(channel) != 'email':
             media_archive.enqueue_message(conn, row[0])
-        if reconcile and not historical and not (len(row) > 1 and row[1] is True):
-            import task_reconciliation
-            revision = (datetime.fromisoformat(meta['revision_date'])
-                        .astimezone(timezone.utc).isoformat() if update_existing else '')
-            task_reconciliation.queue(conn, row[0], revision=revision)
         enqueue_derived(conn, row[0], historical=(historical
             or len(row) > 1 and row[1] is True))
         return row[0]

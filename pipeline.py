@@ -7,7 +7,6 @@ from urllib.parse import quote
 from datetime import datetime, time, timezone
 from zoneinfo import ZoneInfo
 
-import brain
 import config
 import db
 import flows
@@ -29,10 +28,6 @@ def ingest(channel, sender, subject, body, state=None, attachments=None,
         if policy.can_operate(conn, mid, 'extract'):
             jobs.enqueue(conn, 'analysis', f'analysis:{mid}', {'message_id': mid})
             queued = True
-            import task_reconciliation
-            task_reconciliation.queue(conn, mid)
-            import secretary_runtime
-            secretary_runtime.observe(conn, mid)
         jobs.assert_current(conn)
     return {'queued': queued, 'message_id': mid}
 
@@ -61,98 +56,6 @@ def load_message(mid):
 def merge_agenda(remote, local):
     ids = {a.get('event_id') for a in remote if a.get('event_id')}
     return sorted(remote + [a for a in local if not a.get('event_id') or a['event_id'] not in ids], key=lambda a:a['dt'])
-
-
-def analyze(payload):
-    mid = payload['message_id']
-    with db._conn() as conn, conn.transaction():
-        jobs.assert_current(conn)
-        if not policy.can_operate(conn, mid, 'extract'):
-            return
-    (channel, sender, subject, body, source_id), attachments = load_message(mid)
-    flow = 'email' if channel.startswith('email') else 'whatsapp' if channel == 'whatsapp' else 'telegram_bot'
-    if not flows.enabled(flow):
-        raise jobs.Deferred('Source paused')
-    with db._conn() as conn:
-        if conn.execute('SELECT 1 FROM message_analysis WHERE message_id=%s', (mid,)).fetchone():
-            return
-        _analysis_permission(conn, mid, attachments)
-    if channel.startswith('telegram') or channel == 'whatsapp':
-        from connectors import media_text
-        # Archived media must be converted durably before semantic analysis.
-        body = media_text.message_text(body, attachments)
-    with db._conn() as conn, conn.transaction():
-        jobs.assert_current(conn)
-        _analysis_permission(conn, mid, attachments)
-    verdict = brain.normalize_verdict(brain.analyze(subject, sender, body, channel, attachments))
-    if verdict['category'] == 'errore':
-        raise RuntimeError('Analysis unavailable')
-    from main import format_verdict
-    notify = verdict['urgent'] or verdict['severity'] == 'alta' or config.priority_at_least(verdict['priority'], config.NOTIFY_PRIORITY_THRESHOLD)
-    # A permanent owner instruction ("avvisami sempre quando scrive X") makes
-    # this message urgent for the owner, bypassing quiet hours via the
-    # existing emergency semantics. The condition is the owner's own words,
-    # judged semantically by the model; the message content is untrusted data
-    # and can never create or modify conditions.
-    try:
-        import owner_instructions
-        matched = owner_instructions.evaluate_notify(sender, subject, body, channel)
-        if matched:
-            notify = True
-            verdict = dict(verdict, urgent=True)
-    except Exception:
-        pass  # Missing table/migration must never break analysis.
-    with db._conn() as conn, conn.transaction():
-        # Serializes analysis commit, including concurrent lease recovery.
-        conn.execute('SELECT pg_advisory_xact_lock(%s)', (mid,))
-        jobs.assert_current(conn)
-        if not policy.can_operate(conn, mid, 'extract'):
-            return
-        _analysis_permission(conn, mid, attachments)
-        if conn.execute('SELECT 1 FROM message_analysis WHERE message_id=%s', (mid,)).fetchone():
-            return
-        db.message_store.analyze(conn, mid, channel, verdict, False, source_id)
-        if notify:
-            import quiet_hours
-            notification = {'type':'notify', 'message_id':mid,
-                'text':format_verdict(channel, sender, subject, verdict),
-                'urgent': bool(verdict['urgent']), 'severity': verdict['severity']}
-            inserted = jobs.enqueue(conn, 'action', f'notify:{mid}', notification)
-            if inserted and not quiet_hours.notification_ready(notification, datetime.now(timezone.utc)):
-                # Fascia silenziosa globale: le notifiche ordinarie non urgenti
-                # vengono rinviate all'uscita della fascia, mai scartate.
-                deferred = quiet_hours.defer_until(datetime.now(timezone.utc))
-                conn.execute('UPDATE work_jobs SET available_at=%s WHERE key=%s', (deferred, f'notify:{mid}'))
-        if verdict['needs_action'] and verdict['action'].strip():
-            deadline = None
-            try:
-                deadline = datetime.fromisoformat(verdict.get('action_deadline') or '')
-                if deadline.tzinfo is None:
-                    deadline = deadline.replace(tzinfo=ZoneInfo(config.TIMEZONE))
-            except (ValueError, TypeError):
-                pass
-            conn.execute('''INSERT INTO tasks(source_message,title,deadline) VALUES (%s,%s,%s)
-                ON CONFLICT(source_message) DO NOTHING''', (mid, verdict['action'], deadline))
-        for index, event in enumerate(verdict['appointments']):
-            try:
-                event = gcal.validate_event(event)
-            except ValueError:
-                continue
-            # No display label, legacy allowlist or model flag grants authority.
-            save_event(conn, event, f'message:{mid}:{index}', f'{channel}: {sender}', False)
-        if verdict['is_invoice'] and attachments and capabilities.enabled('invoices', conn=conn):
-            jobs.enqueue(conn, 'action', f'invoice:{mid}', {'type':'invoice', 'message_id':mid, 'verdict':verdict})
-        import secretary_runtime
-        secretary_runtime.observe(conn, mid)
-        jobs.assert_current(conn)
-
-
-def _analysis_permission(conn, mid, attachments):
-    # data_policies is dashboard-managed. No environment default grants consent.
-    if not policy.can_operate(conn, mid, 'ai_text'):
-        raise jobs.Deferred('AI text data policy denied')
-    if attachments and not policy.can_operate(conn, mid, 'ai_media'):
-        raise jobs.Deferred('AI media data policy denied')
 
 
 def _event_origin(conn, key):
@@ -333,18 +236,7 @@ def action(payload):
                     raise jobs.Deferred('Earlier owner reply still delivering')
         mid = (payload.get('owner_reply_mid') or payload.get('evidence_message_id')
                or payload.get('message_id'))
-        if payload.get('secretary_review'):
-            import secretary_runtime
-            try:
-                secretary_runtime.assert_notification_current(payload)
-            except secretary_runtime.ReviewStopped:
-                return  # Do not defer revoked/completed/acknowledged work forever.
         def deliver():
-            # Review notification fences are re-read at the actual send, not
-            # merely when the review was queued.
-            if payload.get('secretary_review'):
-                import secretary_runtime
-                secretary_runtime.assert_notification_current(payload)
             jobs.assert_current()
             return telegram.notify(payload['text'], html=payload.get('html', True))
         _effect(_notification_key(payload), mid, 'notify',
@@ -494,6 +386,33 @@ def action(payload):
                 raise jobs.Permanent('Promemoria senza provenienza nativa notificabile')
             _effect(_notification_key(payload), origin[0], 'notify',
                     dict(text=prefix+row[0]+label, html=False, recipient=str(config.TELEGRAM_CHAT_ID)), remind)
+    elif kind == 'email':
+        from agent import outbox
+        from connectors import email as mail
+        with db._conn() as conn:
+            jobs.assert_current(conn)
+            draft = outbox.load_approved(conn, payload['id'])
+        if draft is None:
+            return  # già inviata, scartata o mai approvata: nessun effetto
+        if not outbox.sends_allowed():
+            raise jobs.Deferred('Invio a terzi disattivato (modalità observe)')
+        account = outbox.account_for(draft['account'])
+        effect_payload = dict(account=draft['account'], recipient=draft['recipient'],
+                              subject=draft['subject'],
+                              body_sha256=hashlib.sha256(draft['body'].encode()).hexdigest())
+
+        def send():
+            jobs.assert_current()
+            return mail.send_with_attachments(account, draft['recipient'], draft['subject'], draft['body'])
+        try:
+            _effect(f"email-send:{payload['id']}", draft['approved_by_message'], 'email_send',
+                    effect_payload, send)
+        except EffectUncertain:
+            with db._conn() as conn:
+                outbox.mark(conn, payload['id'], 'uncertain')
+            raise
+        with db._conn() as conn:
+            outbox.mark(conn, payload['id'], 'sent')
     elif kind == 'zip':
         if not capabilities.enabled('monthly_zip') or not flows.enabled('monthly_zip'):
             raise jobs.Deferred('ZIP paused')
@@ -589,28 +508,28 @@ def owner_task_schedule_label(task, now=None):
 
 
 def _prune_effect_audit(conn):
-    """Daily bulk retention of the policy audit log (reason codes only).
+    """Retention giornaliera: registro di audit delle policy e audit dell'agente.
 
-    effect_receipts stay immutable; this prunes only the high-volume audit
-    rows (can_read_context inserts ~one row per candidate task per claim).
-    Guarded by a source_cursors day stamp: at most one DELETE per day.
+    effect_receipts restano immutabili; si potano solo le righe ad alto volume
+    (can_read_context inserisce ~una riga di audit per candidato) e le
+    esecuzioni dell'agente (agent_runs, con i relativi strumenti).
+    Un solo passaggio al giorno, protetto da un timbro in source_cursors.
     """
     days = config.EFFECT_AUDIT_RETENTION_DAYS
-    if days <= 0:
-        return
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     stamp = conn.execute("SELECT value FROM source_cursors WHERE key='effect_audit_retention_day'").fetchone()
     if stamp and stamp[0] and stamp[0].get('day') == today:
         return
-    conn.execute('DELETE FROM effect_audit WHERE created_at < now() - (%s * interval \'1 day\')', (days,))
+    if days > 0:
+        conn.execute('DELETE FROM effect_audit WHERE created_at < now() - (%s * interval \'1 day\')', (days,))
+    from agent import schema as agent_schema
+    agent_schema.prune(conn)
     conn.execute('''INSERT INTO source_cursors(key,value) VALUES ('effect_audit_retention_day',%s)
         ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now()''',
         (json.dumps({'day': today}),))
 
 
 def schedule():
-    import secretary
-    import secretary_runtime
     current = datetime.now(ZoneInfo(config.TIMEZONE)).strftime('%Y-%m')
     if capabilities.enabled('monthly_zip') and flows.enabled('monthly_zip'):
         for month in sorted({m['month'] for m in db.months_with_invoices() if m['month'] < current}):
@@ -618,8 +537,6 @@ def schedule():
     with db._conn() as conn, conn.transaction():
         jobs.assert_current(conn)
         _prune_effect_audit(conn)
-        secretary.due_reviews(conn)
-        secretary_runtime.backlog(conn)
         for row in conn.execute("""SELECT id,version,owner_deadline_date,owner_remind_at,deadline FROM tasks
             WHERE status='open' AND (owner_deadline_date IS NOT NULL OR owner_remind_at IS NOT NULL
                 OR (deadline IS NOT NULL AND
@@ -634,68 +551,3 @@ def schedule():
             jobs.enqueue(conn, 'action', f'task-reminder:{row[0]}',
                          {'type':'reminder','id':row[0], 'deadline':row[1].isoformat()})
         jobs.assert_current(conn)
-
-
-def owner_commands(text):
-    import task_reconciliation
-    jobs.assert_current()
-    context = jobs.execution_context()
-    if context is not None:
-        # Durable owner commands use the fenced receipt/outbox coordinator,
-        # never the legacy direct-Telegram compatibility path below.
-        import owner_dialogue
-        return owner_dialogue.command(text, context.message_id)
-    if task_reconciliation.owner_commands(text):
-        return True
-    parts = text.strip().split(maxsplit=1)
-    command = parts[0].lower() if parts else ''
-    if command not in ('/attivita','/fatto','/conferma','/annulla','/task'):
-        return False
-    with db._conn() as conn, conn.transaction():
-        if command == '/task':
-            # Explicit syntax, no AI guessing: /task title | ISO timestamp
-            title, _, raw_deadline = (parts[1] if len(parts)>1 else '').partition('|')
-            deadline = None
-            try:
-                if not title.strip():
-                    raise ValueError('Missing title')
-                if raw_deadline.strip():
-                    deadline = datetime.fromisoformat(raw_deadline.strip())
-                    if deadline.tzinfo is None:
-                        deadline = deadline.replace(tzinfo=ZoneInfo(config.TIMEZONE))
-                row = conn.execute('INSERT INTO tasks(title,deadline) VALUES (%s,%s) RETURNING id', (title.strip(),deadline)).fetchone()
-                reply = f'Attività #{row[0]} salvata.'
-            except ValueError:
-                reply = 'Usare /task titolo | YYYY-MM-DDTHH:MM+02:00 (scadenza facoltativa).'
-        elif command == '/attivita':
-            rows = conn.execute("""SELECT id,title,deadline,source_message,owner_deadline_date,owner_remind_at,
-                owner_origin_message FROM tasks WHERE status='open'
-                ORDER BY COALESCE(owner_deadline_date, (deadline AT TIME ZONE %s)::date) NULLS LAST,id LIMIT 50""",
-                (config.TIMEZONE,)).fetchall()
-            tasks = [dict(zip(('id', 'title', 'deadline', 'source_message', 'owner_deadline_date',
-                              'owner_remind_at', 'owner_origin_message'), row)) for row in rows]
-            reply = '\n'.join(f"#{t['id']} {t['title']} — {owner_task_schedule_label(t)} "
-                              f"(fonte #{t.get('owner_origin_message') or t['source_message']})"
-                              for t in tasks) or 'Nessuna attività aperta.'
-        else:
-            if len(parts)<2 or not parts[1].isdigit():
-                reply = 'Specificare un ID numerico.'
-            elif command == '/fatto':
-                closed = task_reconciliation.close_task(conn, int(parts[1]))
-                reply = 'Attività completata.' if closed else 'Attività non aperta.'
-            else:
-                identity = int(parts[1])
-                target = 'pending' if command == '/conferma' else 'cancel_pending'
-                allowed = ('proposal',) if command == '/conferma' else ('proposal','local','pending','synced')
-                context = jobs.execution_context()
-                authority = context.message_id if context else None
-                if not authority or not policy.can_operate(conn, authority, 'owner_command', owner_required=True):
-                    raise jobs.Deferred('Calendar command requires native owner provenance')
-                jobs.assert_current(conn)
-                row = conn.execute("UPDATE appointments SET sync_state=%s,done=%s WHERE id=%s AND sync_state=ANY(%s) RETURNING id", (target, command=='/annulla', identity,list(allowed))).fetchone()
-                if row:
-                    jobs.enqueue(conn, 'action', f'{command}:{identity}:{authority}',
-                                 {'type':'calendar','id':identity, 'authority_message_id':authority})
-                reply = 'Operazione in coda.' if row else 'Appuntamento non trovato.'
-    telegram.notify(reply, html=False)
-    return True

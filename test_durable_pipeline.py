@@ -1,5 +1,4 @@
 """Offline regressions; production connections and HTTP are forbidden."""
-import json
 import subprocess
 import sys
 import unittest
@@ -13,21 +12,23 @@ from connectors import gcal
 
 
 class DurableTests(unittest.TestCase):
-    def test_formatter_import_is_safe_in_worker_thread(self):
+    def test_worker_handlers_import_is_safe_in_worker_thread(self):
         # Fresh interpreter: an already cached main module would hide the bug.
         result = subprocess.run([sys.executable, '-c', '''
-import threading
+import signal, threading
+before = signal.getsignal(signal.SIGTERM)
 errors = []
 def worker():
     try:
-        from main import format_verdict
-        assert callable(format_verdict)
+        import main
+        assert callable(main._owner_job) and callable(main._analysis_job)
     except Exception as exc:
         errors.append(repr(exc))
 t = threading.Thread(target=worker)
 t.start()
 t.join()
 assert not errors, errors
+assert signal.getsignal(signal.SIGTERM) == before, 'importing main registered a signal handler'
 '''], capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -56,9 +57,6 @@ assert not errors, errors
         self.network = patch('urllib.request.urlopen', side_effect=AssertionError('Network forbidden'))
         self.network.start()
         self.addCleanup(self.network.stop)
-        exclusion = patch('message_store.reconciliation_excluded', return_value=False)
-        exclusion.start()
-        self.addCleanup(exclusion.stop)
 
     def native_source(self, **metadata):
         # Mock archived DB content only; retain the real deterministic policy decision.
@@ -66,22 +64,17 @@ assert not errors, errors
             'id': 42, 'channel': 'email', 'metadata': metadata})
 
     def test_ingest_commits_source_and_queue_without_ai(self):
-        with patch('message_store.store', return_value=42) as store, patch('brain.analyze') as ai, \
-             self.native_source(), patch('secretary_runtime.observe') as observe:
+        with patch('message_store.store', return_value=42) as store, self.native_source():
             result = pipeline.ingest('email','sender','subject','body',source_id='id')
         self.assertEqual(result['message_id'],42)
         store.assert_called_once()
-        ai.assert_not_called()
-        observe.assert_called_once_with(self.conn, 42)
         queues = [call for call in self.conn.execute.call_args_list
                   if 'INSERT INTO work_jobs' in call.args[0]]
-        self.assertEqual(len(queues), 2)
+        # Un solo job durevole: la valutazione la fa l'agente quando lo prende in carico.
+        self.assertEqual(len(queues), 1)
         sql, params = queues[0].args
         self.assertIn('ON CONFLICT',sql)
         self.assertEqual(params[:2],('analysis','analysis:42'))
-        _, reconciliation = queues[1].args
-        self.assertEqual(reconciliation[0], 'reconcile')
-        self.assertEqual(json.loads(reconciliation[2]), {'message_id': 42, 'revision': ''})
 
     def test_notification_failure_does_not_mark_sent(self):
         payload = {'type':'notify','message_id':42,'text':'x'}
@@ -137,19 +130,6 @@ assert not errors, errors
                     pipeline.action({'type': 'reminder', 'id': 7, 'deadline': '2099-01-01T00:00:00+00:00'})
             send.assert_not_called()
 
-    def test_task_proposal_commands_use_persistent_owner_handler(self):
-        with patch('task_reconciliation.owner_commands', return_value=True) as owner:
-            self.assertTrue(pipeline.owner_commands('/proposte'))
-        owner.assert_called_once_with('/proposte')
-        self.conn.execute.assert_not_called()
-
-    def test_manual_done_uses_lifecycle_cleanup(self):
-        with patch('task_reconciliation.close_task', return_value=True) as close, \
-             patch('connectors.telegram.notify') as notify:
-            self.assertTrue(pipeline.owner_commands('/fatto 7'))
-        close.assert_called_once_with(self.conn, 7)
-        self.assertEqual(notify.call_args.args[0], 'Attività completata.')
-
     def test_stale_reminder_is_not_delivered(self):
         with patch('task_reconciliation.reminder_is_current', return_value=False) as gate, \
              patch('connectors.telegram.notify') as notify:
@@ -163,12 +143,10 @@ assert not errors, errors
         # The first SELECT is for owner reminders, the second for legacy deadline reminders.
         self.conn.execute.return_value.fetchall.side_effect = [[], [(7, deadline)]]
         with patch('flows.enabled', return_value=False), patch('jobs.enqueue') as enqueue, \
-             patch('secretary.due_reviews') as reviews, patch('secretary_runtime.backlog') as backlog:
+             patch('agent.schema.prune'):
             pipeline.schedule()
         self.assertEqual(enqueue.call_args.args[3], {
             'type': 'reminder', 'id': 7, 'deadline': deadline.isoformat()})
-        reviews.assert_called_once_with(self.conn)
-        backlog.assert_called_once_with(self.conn)
 
     def test_effect_audit_retention_prunes_once_per_day(self):
         # Retention is guarded by a source_cursors day stamp: one DELETE per
@@ -178,22 +156,22 @@ assert not errors, errors
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         self.conn.execute.return_value.fetchone.side_effect = [None, ({'day': today},)]
-        with patch('flows.enabled', return_value=False), \
-             patch('secretary.due_reviews'), patch('secretary_runtime.backlog'):
+        with patch('flows.enabled', return_value=False), patch('agent.schema.prune') as agent_prune:
             with patch.object(pipeline.config, 'EFFECT_AUDIT_RETENTION_DAYS', 30):
                 pipeline.schedule()
                 pipeline.schedule()
         prunes = [call for call in self.conn.execute.call_args_list
                   if 'DELETE FROM effect_audit' in call.args[0]]
         self.assertEqual(len(prunes), 1)
+        agent_prune.assert_called_once_with(self.conn)  # stesso passaggio giornaliero
         self.assertIn('interval', prunes[0].args[0])
         self.assertEqual(prunes[0].args[1], (30,))
         stamps = [call for call in self.conn.execute.call_args_list
                   if 'effect_audit_retention_day' in call.args[0]]
         self.assertEqual(len(stamps), 3)  # read + upsert, then read again
         self.conn.execute.reset_mock()
-        with patch('flows.enabled', return_value=False), \
-             patch('secretary.due_reviews'), patch('secretary_runtime.backlog'), \
+        self.conn.execute.return_value.fetchone.side_effect = [None]
+        with patch('flows.enabled', return_value=False), patch('agent.schema.prune'), \
              patch.object(pipeline.config, 'EFFECT_AUDIT_RETENTION_DAYS', 0):
             pipeline.schedule()
         self.assertFalse(any('DELETE FROM effect_audit' in call.args[0]
@@ -253,33 +231,26 @@ assert not errors, errors
         enqueue.assert_not_called()
         self.assertIn('proposal', self.conn.execute.call_args.args[1])
 
-    def test_analysis_failure_remains_retryable(self):
-        def execute(sql, params=None):
-            cursor = MagicMock()
-            cursor.fetchone.return_value = (True,) if 'SELECT allowed FROM data_policies' in sql else None
-            return cursor
-        self.conn.execute.side_effect = execute
-        with patch.object(pipeline,'load_message',return_value=(('email','x','s','body','id'),[])), \
-             self.native_source(), \
-             patch('flows.enabled',return_value=True), \
-             patch('brain.analyze',return_value={'category':'errore'}) as ai:
-            with self.assertRaisesRegex(RuntimeError, 'Analysis unavailable'):
-                pipeline.analyze({'message_id':42})
-        ai.assert_called_once()
-        self.assertFalse(any('INSERT INTO message_analysis' in c.args[0] for c in self.conn.execute.call_args_list))
-
-    def test_analysis_without_explicit_data_grant_is_deferred_before_ai(self):
+    def test_inbox_message_without_explicit_data_grant_is_deferred_before_ai(self):
+        from agent import turns
         self.conn.execute.return_value.fetchone.return_value = None
-        with self.native_source(), patch.object(pipeline, 'load_message', return_value=(
-                ('email', 'x', 's', 'body', 'id'), [])), patch('flows.enabled', return_value=True), \
-             patch('brain.analyze') as ai:
+        with self.native_source():
             with self.assertRaisesRegex(jobs.Deferred, 'AI text data policy denied'):
-                pipeline.analyze({'message_id': 42})
-        ai.assert_not_called()
+                turns._eligible(self.conn, 42, [], primary=True)
+            # Un messaggio in attesa (non quello del job) viene solo saltato.
+            self.assertFalse(turns._eligible(self.conn, 42, [], primary=False))
         audit = [call.args[1] for call in self.conn.execute.call_args_list
                  if 'INSERT INTO effect_audit' in call.args[0]]
         self.assertIn((42, 'ai_text', False, 'data_denied'), audit)
-        self.assertFalse(any('INSERT INTO message_analysis' in c.args[0] for c in self.conn.execute.call_args_list))
+
+    def test_inbox_media_requires_the_separate_media_grant(self):
+        from agent import turns
+        allowed = lambda conn, mid, effect, **kw: effect in ('extract', 'ai_text')
+        with patch.object(pipeline.policy, 'can_operate', side_effect=allowed):
+            self.conn.execute.return_value.fetchone.return_value = None
+            with self.assertRaisesRegex(jobs.Deferred, 'AI media data policy denied'):
+                turns._eligible(self.conn, 42, [dict(id=1)], primary=True)
+            self.assertTrue(turns._eligible(self.conn, 42, [], primary=True))
 
     def test_closed_month_catchup_never_schedules_current_month(self):
         from datetime import datetime
@@ -290,7 +261,7 @@ assert not errors, errors
             {'entity':'a','month':'2000-01'}, {'entity':'b','month':'2000-02'},
             {'entity':'a','month':current}]), patch('jobs.submit') as submit, \
              patch.object(pipeline.capabilities, 'enabled', return_value=True), \
-             patch('secretary.due_reviews'), patch('secretary_runtime.backlog'):
+             patch('agent.schema.prune'):
             pipeline.schedule()
         self.assertEqual([c.args[1] for c in submit.call_args_list],['zip:2000-01','zip:2000-02'])
 

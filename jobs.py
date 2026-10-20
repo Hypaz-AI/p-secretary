@@ -63,6 +63,22 @@ def execution_context():
     return getattr(_local, 'execution', None)
 
 
+@contextmanager
+def bind(context):
+    """Run in ANOTHER thread under the lease of an already running job.
+
+    The agent runtime serves tool calls and LLM requests from helper threads;
+    binding the job's context there keeps assert_current and the AI ledger
+    fenced by the SAME lease. It grants nothing: a lost lease still raises.
+    """
+    previous = execution_context()
+    _local.execution = context
+    try:
+        yield context
+    finally:
+        _local.execution = previous
+
+
 def assert_current(conn=None):
     """Recheck immediately before every effect/commit. No-op outside a Worker.
 
@@ -100,7 +116,7 @@ def safe_error(error):
     code = type(error).__name__ if isinstance(error, BaseException) else str(error).split(':', 1)[0]
     known = getattr(builtins, code, None)
     return code if (isinstance(known, type) and issubclass(known, BaseException)
-                    or code in ('Deferred', 'LeaseLost')) else 'JobError'
+                    or code in ('Deferred', 'LeaseLost', 'Permanent')) else 'JobError'
 
 
 _CREDENTIAL = re.compile(r'(?i)(token|password|passwd|secret|api[_-]?key|authorization|credential)\s*[:=]\s*\S+')
@@ -241,7 +257,7 @@ def requeue_failed(kind, limit=50):
     pending jobs are never disturbed. Returns the requeued job ids so the
     dashboard can report exactly what was requeued.
     """
-    if kind not in ('analysis', 'reconcile', 'owner'):
+    if kind not in ('analysis', 'owner', 'digest'):
         raise ValueError('Unknown job kind')
     if type(limit) is not int or not 0 < limit <= 200:
         raise ValueError('Invalid requeue limit')

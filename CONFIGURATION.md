@@ -1,175 +1,144 @@
-# Integrazione dashboard del segretario
+# Configurazione e contratti
 
-Il servizio attuale integra un **segretario di revisione limitato**, non un motore
-di workflow arbitrari. `db.init()` applica anche le migrazioni execution/ai_budget
-prima dei flussi; `main()` avvia nove worker persistenti: analysis, media,
-reconcile, action, owner, knowledge, research, secretary_review e
-secretary_email_execution.
-Indicizzazione, osservazioni, revisioni dovute e backlog sono collegati al runtime.
-La dashboard non migra schemi e non avvia worker alla richiesta. Le sezioni sotto
-conservano le procedure di setup e i dettagli dei percorsi preesistenti, con i
-limiti attuali esplicitati. Il consenso salvato non certifica ogni chiamata legacy;
-le chiamate dirette fuori dai job non hanno il budget persistente Worker.
+Il servizio è **un agente con strumenti tipizzati** (vedi [AGENT_FLOWS.md](AGENT_FLOWS.md)),
+non un motore di workflow. `db.init()` applica le migrazioni additive prima dei flussi;
+`main()` avvia sei worker durevoli: `analysis`, `media`, `action`, `owner`, `digest`,
+`knowledge`. La dashboard non migra schemi e non avvia worker alla richiesta.
 Non eseguire prove contro account, sessioni o DB di produzione.
+
+## Variabili dell'agente
+
+Tutte hanno un default e sono validate all'avvio (fuori intervallo = default). Le prime tre
+e `SECRETARY_MODE` / `EFFECT_AUDIT_RETENTION_DAYS` si modificano anche dalla dashboard
+(Impostazioni); le altre solo da `config/secretary.env`.
+
+| Variabile | Default | Significato |
+| --- | --- | --- |
+| `AGENT_MODEL` | `openrouter/auto` | Modello dell'agente; deve supportare il tool calling. `openrouter/auto` lascia scegliere a OpenRouter |
+| `AGENT_WEB_MODEL` | `OPENROUTER_MODEL` | Modello che esegue la ricerca web (plugin `web` di OpenRouter) |
+| `AGENT_NOTIFY_MAX_PER_DAY` | 5 (0–100) | Tetto di avvisi autonomi urgenti per giorno locale; serializzato con advisory lock |
+| `AGENT_MAX_TOOL_CALLS` | 30 (1–200) | Chiamate agli strumenti per turno |
+| `AGENT_OWNER_TIMEOUT` | 240 s (30–1800) | Durata massima di un turno richiesto dall'owner |
+| `AGENT_BACKGROUND_TIMEOUT` | 900 s (60–3300) | Durata massima di triage e riepilogo |
+| `AGENT_LLM_TIMEOUT` | 180 s (20–600) | Timeout di ogni richiesta al provider |
+| `AGENT_MAX_OUTPUT_TOKENS` | 16384 (1024–65536) | Token massimi di output per richiesta (esplicito: il ledger lo richiede) |
+| `AGENT_INBOX_BATCH` | 8 (1–25) | Messaggi in arrivo valutati in un solo turno |
+| `AGENT_HISTORY_RESPONSE_MINUTES` | 20 (0–240) | Le risposte passate dell'assistente rientrano nel contesto solo entro questa finestra |
+| `AGENT_WORKSPACE_QUOTA_MB` | 200 | Quota della cartella `workspace/` |
+| `AGENT_DB_SCHEMA` | `agent` | Schema delle viste interrogabili |
+| `AGENT_DB_ROLE` | `agent_ro` | Ruolo PostgreSQL di sola lettura (vedi sotto) |
+| `SECRETARY_MODE` | `observe` | `observe`: nessuna email a terzi, le bozze restano salvate; `active`: `/invia` può inviare |
+| `EFFECT_AUDIT_RETENTION_DAYS` | 30 | Retention del registro di audit delle policy (0 la disattiva; le ricevute restano) |
+
+`OPENROUTER_MODEL` e `OPENROUTER_AUDIO_MODEL` **non** sono il modello dell'agente: servono
+solo a descrivere le immagini e trascrivere i vocali archiviati (sezione sotto).
+`NOTIFY_PRIORITY_THRESHOLD` e `QUIET_HOURS_*` non esistono più: l'agente avvisa solo per vere
+emergenze (tetto sopra) e il resto va nel riepilogo serale.
+
+### Ruolo di sola lettura `agent_ro`
+
+L'agente interroga solo lo schema `agent` (viste che incorporano i consensi). La barriera
+principale è la validazione AST + transazione READ ONLY; il ruolo è la seconda barriera
+indipendente: `NOLOGIN`, nessun attributo, `SELECT` solo sulle viste `agent.*`.
+
+**Lo predispone l'app a ogni avvio** (`db.init`), per quanto i privilegi dell'utente del database lo consentono:
+
+| Situazione | Cosa succede |
+| --- | --- |
+| **DB locale del compose** (utente `secretary`, superuser) | Il ruolo viene creato al primo avvio: nessun passo manuale |
+| Utente con `CREATEROLE` | Come sopra |
+| **DB esterno, utente senza `CREATEROLE`** (es. `svc_pi_secretary`) | Il DBA esegue **una volta** la PARTE 1 di [`deploy/agent_ro.sql`](deploy/agent_ro.sql) (`CREATE ROLE` + `GRANT` all'utente applicativo); `USAGE` e `SELECT` sulle viste li concede l'app, che ne è proprietaria |
+| Ruolo mancante e nessun privilegio | L'app parte lo stesso e stampa un avviso con le due istruzioni; la dashboard mostra «Protezione database: assente» |
+| `AGENT_DB_ROLE=` (vuoto) | Nessun ruolo voluto: restano guardia AST e transazione READ ONLY |
+
+Da PostgreSQL 16 il ruolo va **assunto** con il privilegio `SET`, che chi lo crea con `CREATEROLE`
+non ha automaticamente: l'app lo concede con un `GRANT` esplicito e lo verifica a ogni avvio.
 
 ## API HTTP locali
 
 Tutte richiedono login dashboard, controllo Host e `Cache-Control: no-store`.
-Le POST richiedono CSRF e stessa origine; nessuna riceve SQL, URL, percorsi,
-comandi, credenziali del proprietario o flag di autorità dal client.
+Le POST richiedono CSRF e stessa origine; nessuna riceve SQL, URL, percorsi, comandi,
+credenziali del proprietario o flag di autorità dal client. `DashboardOwner` è costruito
+**solo nel backend** dopo i controlli di sessione, usando `TELEGRAM_CHAT_ID`: chi ha le
+credenziali dashboard è l'amministratore fidato, non un utente con permessi ridotti.
 
 | Rotta | Contratto |
 | --- | --- |
-| `GET /api/secretary` | Proiezione di `secretary.snapshot()`: pratiche, responsabilità, approvazioni, link, ricevute, eventi e wakeup; max 24/raccolta e indicatori truncated |
-| `GET /api/secretary/runtime` | Proiezione di `secretary_runtime.snapshot(limit=20)`: stati, bozze/proposte e attenzione con versione/hash; senza input preparati, prompt o configurazioni |
-| `POST /api/secretary/runtime/links/<id>/accept` | Solo expected_version della proposta mostrata; evidenza/revisione e versioni pratica/delega rilette dal server; ricevuta e nuova revisione, nessun effetto esterno |
-| `POST /api/secretary/runtime/practices/<id>/acknowledge` | Solo expected_version della pratica e attention_hash mostrato; presa in carico dell'attenzione invariata, non completamento o autorizzazione |
-| `GET /api/secretary/support` | Supportato vs pianificato; nessun segreto o valore env privato |
-| `GET /api/knowledge` | `knowledge.snapshot(limit=20)`, documenti e stati di indicizzazione |
-| `GET /api/knowledge/search` | `q` non vuoto ≤512 caratteri, `limit` 1–50, `channel` esatto opzionale ≤80; parametri sconosciuti rifiutati |
-| `GET /api/knowledge/open/<type>/<id>` | Tipi message/document/entry/note/practice, ID positivo; nessun path/URL. not_found resta uno stato della fonte |
-| `GET /api/data-policies` | Nove coppie email/telegram/whatsapp × ai_text/ai_media/ai_history; riga assente = false, versione 0, nessuna scrittura alla lettura |
-| `POST /api/data-policies` | Esattamente channel/effect/allowed/expected_version; booleano JSON, CAS sulla versione; 0 inserisce solo se assente |
-| `POST /api/media/retry-blocked` | Solo message_id/expected_channel nativi; recupero esplicito di media correnti bloccati per consenso, non modifica i consensi |
-| `GET /api/capabilities` | Stato dei soli opzionali, letto da flows; nessun secondo archivio di flag |
-| `POST /api/flows/<id>` | Interruttore esistente, booleano enabled; non concede consenso dati né deleghe |
-| `POST /api/secretary/responsibilities/<id>` | Esattamente action (`suspend`/`revoke`) ed expected_version positivo; nessun resume/create/scope arbitrario |
-| `POST /api/secretary/approvals/<id>` | Esattamente payload/decision/expected_version/operation_key; decision approve/revoke; chiave stabile `secretary-approval:…` |
-| `POST /api/secretary/emails` | practice_id/expected_version/payload/account_address/expires_at/operation_key espliciti; prepara proposta email sigillata, non invia |
-| `GET /api/secretary/emails/<id>` | Snapshot di mittente, oggetto fisso, payload, versione, scadenza e supporto documenti |
-| `POST /api/secretary/emails/<id>/dispatch` | expected_version/account_address/subject/payload/approval_operation_key/operation_key; secondo gesto esplicito, accoda solo identificatori |
-| `GET /api/secretary/execution` | Max 24 proposte/esiti e 50 indirizzi mittente, nessun segreto SMTP/token job; accepted non significa consegnato |
-| `GET /api/secretary/budget` | Contatori e limiti aggregati UTC dei soli contesti Worker; costi mancanti ignoti, nessun tetto monetario |
+| `GET /api/dashboard` | Flussi, contatori, traffico, attività recente (solo metadati: nessun testo o contatto) |
+| `POST /api/flows/<flow>` | Interruttore esistente, booleano `enabled`; non concede consenso dati |
+| `POST /api/platform-health` | Verifica manuale e di sola lettura di DB, email, bot, Calendar, chiave AI |
+| `GET /api/agent` | Modello, protezione DB (`readonly_role`), `sends_allowed`, limiti, ultime 30 esecuzioni e 20 bozze email |
+| `GET /api/agent/runs/<id>` | Strumenti chiamati in un'esecuzione: nome, argomenti limitati, esito, durata (max 60). Mai prompt né risposte del modello |
+| `GET /api/data-policies` | Nove coppie email/telegram/whatsapp × `ai_text`/`ai_media`/`ai_history`; riga assente = falso, versione 0 |
+| `POST /api/data-policies` | Esattamente `channel`/`effect`/`allowed`/`expected_version`; CAS sulla versione |
+| `POST /api/media/retry-blocked` | Solo `message_id`/`expected_channel`; riaccoda i media correnti bloccati dal consenso |
+| `GET /api/budget`, `GET /api/budget/limits` | Contatori e limiti UTC aggregati, per scope; costi mancanti ignoti |
+| `POST /api/budget/reconcile` | Rilascia gli slot in volo di processi morti (azione dell'operatore) |
+| `POST /api/jobs/requeue` | `kind` ∈ `analysis`/`owner`/`digest`: nuovo tentativo dei job falliti (max 50) |
+| `GET /api/capabilities` | Stato dei soli opzionali (fatture/ZIP) |
+| `GET/DELETE /api/files`, `GET /api/files/download`, `POST /api/files/upload` | Browser dei file consentiti (vedi README) |
+| `GET/POST /api/configuration` | Configurazione protetta (sezione sotto) |
+| `GET /api/privacy/messages/<id>/export`, `POST …/erase` | Esportazione e oblio coordinato di un messaggio (`operation_key` obbligatoria) |
 
-Errori: 400 validazione, 401 login, 403 autorità/CSRF/origine, 409 versione o
-payload cambiato, 413 corpo eccessivo, 501 modulo opzionale assente, 503
-schema/servizio indisponibile. Nessun dettaglio di errore DB/provider viene
-restituito. Il corpo normale è ≤4096 byte; approvazioni e preparazione/dispatch
-email ≤49152 byte per testo UTF-8 fino a 8000 caratteri e documenti vincolati.
-Link/ack/retry-media ed email usano il parser rigoroso che rifiuta chiavi duplicate
-e JSON non finito; non estendere questa garanzia a tutte le rotte legacy.
-Upload/config mantengono i propri limiti. La ricerca è locale e non chiama il
-provider AI.
+Errori: 400 validazione, 401 login, 403 autorità/CSRF/origine, 409 versione cambiata, 413
+corpo eccessivo, 503 servizio/schema indisponibile. Nessun dettaglio di errore di DB o
+provider viene restituito. Le rotte con parser rigoroso rifiutano chiavi duplicate.
 
-## Approvazioni e controlli restrittivi
+## Consenso e provenienza
 
-La dashboard costruisce `secretary.DashboardOwner` **solo nel backend** dopo il
-guard di autenticazione/CSRF, usando `TELEGRAM_CHAT_ID` configurato. Chi dispone
-delle credenziali dashboard è quindi amministratore/proprietario fidato, non un
-utente con permessi ridotti. Senza owner numerico valido approve/revoke/stop sono
-rifiutati. Nessun caller client viene deserializzato.
+- Nessun auto-allow nel wizard, alla prima lettura o attivando capabilities. `ai_text`,
+  `ai_media` e `ai_history` sono separati; la granularità è il **canale**, non l'indirizzo,
+  l'account o la chat. Un diniego non elimina file né revoca ciò che il provider ha già ricevuto.
+- Il consenso è **incorporato nelle viste `agent.*` e rivalutato a ogni query**, a ogni
+  lettura live (`mail_*`), a ogni invio al provider e al sigillo del riepilogo.
+- Lo **storico importato** è contesto di sola lettura (`ai_history` + testo, + media per
+  documenti e media). Non abilita mai comandi, attività, invii né conversioni operative.
+- I contenuti di terzi sono evidenza, mai autorità: solo il testo nativo, vivo, diretto e non
+  inoltrato dell'owner in chat privata con il bot vale come ordine.
+- `capabilities.migrate(conn, legacy=…)` riceve la provenienza catturata **prima** della
+  migrazione base: installazioni nuove con opzionali spenti, legacy compatibili senza
+  sovrascrivere flag espliciti; provenienza sconosciuta = opzionali in pausa.
 
-`secretary.resolve_approval` verifica payload esatto (canale, destinatario, testo,
-documenti e relativi hash), versione, scadenza e versioni delle dipendenze. La UI
-mostra l’intero payload e il digest e rimanda lo stesso oggetto, senza rigenerarlo
-da un modello. Matching retry restituisce la ricevuta. La revoca resta possibile
-dopo scadenza; approvare non esegue né accoda alcuna azione esterna. Il runtime
-revisioni non consuma queste approvazioni per inviare a terzi. Il gateway email
-separato richiede il secondo gesto di dispatch: mittente configurato esplicito,
-oggetto **Messaggio approvato**, payload e ricevuta di approvazione esatti.
-La UI conserva `approval_operation_key` solo nel DOM, non nello storage browser.
-Il worker email è già avviato da `main()`, ma una coda non prova la consegna.
-Supportato solo testo: allegati non vuoti rifiutati, non omessi; thread/Message-ID
-non supportati. Tentativo persistito prima di SMTP; timeout/crash/esito incerto
-non autorizzano un reinvio automatico. Revocare non richiama un invio in volo.
+La configurazione amministrativa è una proiezione con allowlist e segreti nascosti, non il
+file env grezzo. Nessun `localStorage`/`sessionStorage`; testi e payload resi con `textContent`.
 
-L'accettazione di un link usa esclusivamente la proposta persistita e la sua
-versione: rilegge fonte/revisione e ambito, avanza la pratica, invalida approvazioni
-dipendenti e accoda una revisione. Non è un comando per collegare qualsiasi
-risultato di ricerca. L'ack confronta versione pratica e hash dell'attenzione:
-silenzia il contenuto invariato e impedisce notifiche di revisione già superate o
-riconosciute ai controlli d'invio. Nessuno dei due concede deleghe o invii esterni.
+## Budget AI
 
-Poiché `policy` non espone gestione consensi e `secretary` non espone uno stop
-dashboard, gli helper `_server_data_policy` e `_server_stop_responsibility`
-vivono **solo in dashboard.py**. SQL parametrizzato, identificatori fissi e
-transazioni; lo stop usa il medesimo advisory lock secretary, CAS, ricevuta e
-audit append-only, invalidando approvazioni pending/approved anche attraverso le
-pratiche collegate. La revoca è terminale; le pratiche non sono dichiarate
-completate né cancellate. Nessun tentativo di fermare un HTTP già in corso.
-Questi helper sono un confine temporaneo da sostituire con API pubbliche core,
-non un motore generico di mutazioni.
+`ai_budget.py` applica limiti persistenti (giorno UTC) a **ogni** richiesta dell'agente,
+perché passa dal gateway locale, e alle conversioni media: `AI_BUDGET_DAILY_CALLS=200`,
+`AI_BUDGET_DAILY_TOKENS=500000`, `AI_BUDGET_MAX_INFLIGHT=2`, `AI_BUDGET_MAX_OUTPUT_TOKENS=65536`.
 
-## Consenso, supporto e migrazione
+- Ogni tentativo e retry riserva una chiamata e input serializzato + output massimo +
+  margine, **senza rimborso**; l'uso dichiarato superiore è addebitato.
+- **Scope**: `agent_owner` (turni richiesti da te), `agent_inbox` (triage e riepilogo) e
+  `global` (conversioni media). `AI_BUDGET_AGENT_OWNER_DAILY_CALLS` e
+  `AI_BUDGET_AGENT_INBOX_DAILY_CALLS` aggiungono un tetto per scope **dentro** quello globale:
+  possono restringere, mai alzare. Lo scope lo dichiara il server, mai il modello.
+- DB, ledger o lease non disponibili = richiesta rifiutata prima del provider. Il budget
+  esaurito **differisce** il job senza consumare tentativi.
+- Gli slot di processi morti richiedono riconciliazione manuale (`POST /api/budget/reconcile`)
+  dopo aver escluso richieste vive. Otto worker non significano otto richieste simultanee.
+- `AI_BUDGET_DAILY_COST` (opzionale) è un tetto monetario sui costi **riportati** dal
+  provider; le richieste senza costo riportato non contano: imposta anche un limite di spesa
+  sulla chiave presso OpenRouter. La **ricerca web non ha un budget dedicato** (decisione esplicita).
+- Valori web: interi positivi fino a 2147483647 (output fino a 65536), applicati dopo il
+  riavvio; i valori ereditati dall'ambiente del processo restano in sola lettura.
 
-- Nessun auto-allow nel wizard, alla prima lettura o attivando capabilities.
-  `ai_text`, `ai_media` e `ai_history` sono separati; la granularità è **canale**, non
-  indirizzo email/account/chat. Un deny non elimina file né revoca il provider.
-- `policy.can_read_context` distingue il contesto storico di sola lettura:
-  servono testo + storico del canale, e media per documenti/media. `ai_history`
-  da solo non basta e non è un effetto operativo. `policy.can_operate` continua
-  a negare operazioni storiche; consenso storico non abilita comandi, attività,
-  invii o conversioni media storiche. Non ogni consumer usa lo storico (il digest
-  operativo lo esclude). I contenuti terzi restano evidenza, mai autorità.
-- I nuovi piani proprietario di pratiche/responsabilità sono v2: `input_sources`
-  risolti dal server a tutte le fonti native esportate, inclusi snapshot/storia,
-  e `input_versions` dei record letti. Piani applicati/ricevute e revisioni runtime
-  conservano dipendenze precedenti; derivazioni mancanti/cicliche non autorizzano
-  egress AI. Un replay v1 non prova il consenso alla derivazione.
-- Il resolver condiviso owner/task-reconciliation segue origini delle attività e
-  **tutte** le evidenze `task_changes` applicate, non solo `last_evidence_id`.
-  Proposte pending/rejected escluse; fonti applicate mancanti/negate bloccano quel
-  contesto. Non è la provenienza completa degli input modello dei vecchi piani
-  task/memoria, né un modello completo di memoria tipizzata e conflitti.
-- `SECRETARY_MODE=observe|active`, `SECRETARY_QUIET_HOURS` globale e
-  `SECRETARY_AI_DAILY_BUDGET` sono **riservati/pianificati**, commentati in
-  `.env.example`, in sola lettura nella UI. Non usarli come interruttori di
-  sicurezza; oggi non hanno consumer runtime.
-- Sono supportati `SECRETARY_REVIEW_QUIET_START`/`END`: interi 0–23, default
-  22 e 8 nel TIMEZONE. Inizio=fine disattiva la fascia. Ritardano solo le
-  notifiche di revisione, non digest, emergenze o tutte le chiamate AI.
-  `SECRETARY_REVIEW_MIN_MINUTES` (5–10080, default 60) limita il prossimo
-  riesame; `SECRETARY_REVIEW_ACK_MINUTES` (1–10080, default 1440) limita
-  riproposizioni dello stesso contenuto non riconosciuto. Richiedono runtime
-  migrato (già incluso in `db.init()`) e riavvio; il solo modulo non prova readiness.
-- `ai_budget.py` applica nei soli contesti job Worker limiti persistenti:
-  `AI_BUDGET_DAILY_CALLS=200`, `AI_BUDGET_DAILY_TOKENS=500000` (giorno UTC),
-  `AI_BUDGET_MAX_INFLIGHT=2`, `AI_BUDGET_MAX_OUTPUT_TOKENS=65536` per default.
-  Ogni tentativo/retry riserva chiamata e byte input serializzato + output massimo
-  + margine, senza rimborso; uso dichiarato superiore è addebitato. DB/ledger/lease
-  indisponibili bloccano le richieste Worker; slot di processi morti richiedono
-  riconciliazione manuale dopo aver escluso richieste vive. Otto worker non
-  significano otto richieste AI simultanee. Chiamate dirette/legacy e generazione
-  digest periodica fuori dai job non hanno questi cap persistenti. Non è un
-  tetto monetario globale: impostare limiti sulla chiave OpenRouter. Valori web
-  positivi fino a 2147483647 (output fino a 65536), applicati dopo riavvio;
-  valori ereditati dall'ambiente restano read-only.
-- `capabilities.migrate(conn, legacy=…)` deve ricevere la provenienza catturata
-  **prima** della migrazione base: fresh opzionali false, legacy compatibili
-  senza sovrascrivere flag espliciti. Provenienza assente/sconosciuta: opzionali
-  in pausa, non dedurre consenso o nuove responsabilità dai vecchi dati.
+## Calendar sigillato
 
-La dashboard non importa file di configurazione privati nelle viste segretario e
-non restituisce piani o input modello. La configurazione amministrativa rimane
-una proiezione allowlist con segreti nascosti, non il file env grezzo. Nessun
-localStorage/sessionStorage; testo/snippet/payload resi con textContent, non HTML.
-Per i requisiti bootstrap vedere [OPERATIONS.md](OPERATIONS.md).
+I grant `secretary_effect_grants_v3` richiedono il testo nativo corrente dell'owner (`/conferma`)
+e sigillano evento/stato, ID Calendar esplicito configurato, `TIMEZONE` e tempi risolti
+(inizio, fine, durata, promemoria). Il worker rilegge target e scadenza prima dell'effetto
+e usa il target sigillato. Grant scaduti, o legacy senza target, sono negati; un replay non
+rinnova né ricollega un vecchio consenso a una nuova configurazione.
 
-## Calendar sigillato e limiti del piano
+- L'agente **non** scrive su Calendar: `calendar_propose` crea solo una proposta locale.
+- Creare un'attività, anche con `/task`, non concede Calendar.
+- Notifiche, ZIP ed email registrano il tentativo **prima** dell'I/O: gli esiti
+  `attempted`/`uncertain` richiedono riconciliazione, non un reinvio cieco.
 
-I grant `secretary_effect_grants_v3` richiedono testo proprietario nativo corrente
-e sigillano evento/stato, ID Calendar esplicito configurato, TIMEZONE e tempi di
-creazione risolti (inizio/fine/durata/promemoria). Il worker rilegge target e
-scadenza prima dell'effetto e usa il target sigillato. Grant scaduti o legacy senza
-target sono negati; replay non rinnova o ricollega un vecchio consenso alla nuova
-configurazione. Serve una nuova autorizzazione proprietario, non un backfill.
-Le scadenze task non concedono Calendar: eventuali eventi restano proposte.
-`CALENDAR_EXTERNAL_AUTO`/`CALENDAR_TRUSTED_SENDERS` non attivano più auto-creazione
-per etichetta mittente nel percorso integrato. Segnare spam/newsletter come letti
-è solo comportamento del classificatore privato legacy, non dell'ingest attuale.
-Anche notifiche/ZIP del pipeline registrano il tentativo prima dell'I/O: esiti
-attempted/uncertain non idempotenti richiedono riconciliazione, non reinvio cieco.
-
-Restano fuori dal completamento: workflow/dipendenze arbitrari; memoria tipizzata,
-conflitti e provenienza completa degli input dei vecchi piani task/memoria;
-collegamento generale di evidenze esistenti da retrieval alle pratiche; condizioni
-di stop eseguibili (non basta il testo salvato); Calendar update/disponibilità/
-drift remoto; allegati e thread di invio email; modalità/tetto monetario globali;
-erase/export privacy coordinati; prova completa di backup ripristinato,
-validazione in produzione e valutazione semantica. Il piano architetturale rimane
-una roadmap. Questa modifica è solo documentale: nessun dato utente letto,
-test/comando terminale eseguito o risultato di suite dichiarato; la validazione
-completa corrente sarà aggiunta dal run principale.
+Restano fuori: aggiornamento e disponibilità Calendar e drift remoto, allegati e thread nelle
+email in uscita, erase nei backup, prova completa di un backup ripristinato.
 
 # Vocali e immagini Telegram e WhatsApp
 
@@ -188,10 +157,9 @@ rappresentazione testuale analizzabile e non la codifica base64 dell'immagine.
 Originali e didascalie non vengono modificati. I risultati riusciti sono riusati
 fra riavvii/retry. Gli errori provider seguono i retry limitati; il consenso negato
 produce stato terminale `blocked/media_consent_required`, non retry automatico.
-Analisi/dialogo non usano testo parziale; fonti bloccate/non disponibili hanno
-segnalazioni esplicite. Il testo derivato è riutilizzabile solo nei percorsi che
-ne verificano le fonti; non tutti i consumer lo esportano (il digest attuale non
-carica trascrizioni). La sola conversione non esegue comandi, non invia risposte
+L'agente non usa testo parziale; fonti bloccate o non disponibili hanno
+segnalazioni esplicite (`messages.media_missing` per gli allegati non persistiti). Il testo
+derivato si legge dalle viste `agent.documents`/`attachment_text`, sempre dopo il consenso media. La sola conversione non esegue comandi, non invia risposte
 ai contatti e non crea appuntamenti.
 
 Al primo avvio la migrazione additiva accoda anche audio/immagini già archiviati
@@ -203,8 +171,8 @@ Non recupera automaticamente i vecchi media MTProto archiviati solo come metadat
 devono essere riacquisiti dal recupero o dall'importazione storica.
 I risultati vision possono contenere errori: controllare dati critici.
 
-Per recuperare una fonte **corrente** dopo aver concesso testo e media, aprirla
-in Documenti e ricerca e usare **Riprova media bloccati dal consenso**. Il POST
+Per recuperare una fonte **corrente** dopo aver concesso testo e media, usare
+la pagina **Permessi AI** → **Recupero media bloccati dal consenso**. Il POST
 `/api/media/retry-blocked` accetta solo `message_id` e `expected_channel`
 (`telegram`, `telegram (account)`, `whatsapp`); non concede consenso. Esclude
 storico, trascrizioni presenti e tentativi provider già registrati; massimo
@@ -212,77 +180,41 @@ storico, trascrizioni presenti e tentativi provider già registrati; massimo
 alla modifica dei permessi. Il worker ricontrolla consenso e fonte prima della
 richiesta/pubblicazione; non aggirare il controllo con reset SQL di massa.
 
-## Budget AI e protezione dai troncamenti
+## Budget di output dei media
 
-Questi sono i budget di output per richiesta (ragionamento incluso, dove previsto),
-non la finestra di contesto né una spesa fissa. Nei Worker si aggiungono i cap
-persistenti sopra; la tabella non estende tali cap alle chiamate legacy dirette:
+Il budget di output dell'agente è `AGENT_MAX_OUTPUT_TOKENS`. Le conversioni media usano un
+budget proprio, non la finestra di contesto né una spesa fissa:
 
-| Funzione | Primo tentativo | Retry se troncato |
-| --- | ---: | ---: |
-| Dialogo e agenda | 16.384 | 32.768 |
-| Analisi comunicazioni | 8.192 | 16.384 |
-| Memoria personale | 4.096 | 8.192 |
-| Digest | 8.192 | 16.384 |
+- **Immagini**: 16.384 token.
+- **Vocali**: **4.096 + 20 token per secondo**, fino a 32.768. Esempi: 30 s = 4.696;
+  5 min = 10.096; 20 min = 28.096. Senza durata valida (audio storico o canale senza durata)
+  si usano 16.384. La durata Telegram è conservata nell'archivio.
+- `ai_budget.request_content` scarta le risposte troncate e rigenera **una volta** dai messaggi
+  originali, con budget raddoppiato e tetto assoluto di 65.536. Nessun testo parziale o
+  ragionamento viene usato come trascrizione, e nessuna data è ricostruita da testo parziale.
+- Le trascrizioni non vengono tagliate in silenzio: oltre 262.144 caratteri si segnala un errore.
+- Questi margini non garantiscono una trascrizione completa per audio arbitrariamente lunghi:
+  al limite vanno divisi. Il modello scelto deve supportare l'output richiesto.
 
-Per gli audio: **4.096 + 20 token per secondo**, fino a 32.768 al primo
-tentativo. Esempi: 30 s = 4.696; 5 min = 10.096; 20 min = 28.096.
-Senza durata valida si usano 16.384 token. La durata Telegram viene conservata
-anche nell'archivio; audio storici o altri canali senza durata usano il fallback.
-Il retry raddoppia il budget, con tetto assoluto di 65.536 token.
-Questi margini non garantiscono una trascrizione completa per audio arbitrariamente
-lunghi: al limite occorre dividerli. Il modello/provider scelto deve supportare
-i limiti di output richiesti (indipendentemente dalla sua finestra di contesto).
+- `OPENROUTER_AUDIO_MODEL`: `google/gemini-2.5-flash` (input audio, `input_audio` base64;
+  scegli un provider compatibile con OGG/Opus).
+- `OPENROUTER_MODEL`: `google/gemini-2.5-flash`; deve supportare **nativamente** testo e
+  immagini (`image_url`): requisito obbligatorio, non sostituibile con OCR. Genera anche il
+  testo persistente delle immagini; non esiste un modello immagini separato. Se la richiesta
+  visiva fallisce, il fallback non usa le immagini e non crea nulla.
+- Entrambi usano `OPENROUTER_API_KEY` e sono modificabili dalla configurazione amministrativa.
+- Limite per media: 10 MiB. Audio e immagini sono trasmessi ai provider OpenRouter: valgono
+  costi e condizioni di trattamento dati dei provider selezionati.
+- Gli allegati sono archiviati **prima** della conversione. Solo la chat privata del proprietario
+  in `TELEGRAM_CHAT_ID` è accettata dal bot; senza proprietario configurato nessun messaggio lo è.
+  Chat estranee, gruppi e canali sono ignorati prima di download, archiviazione o analisi,
+  senza risposta (gli update sono comunque consumati).
+- Il testo di un'immagine o di un vocale non è mai interpretato come comando.
+- L'estrazione generica PDF/XML resta separata. L'account personale Telegram resta in sola
+  lettura (niente invii né ricevute di lettura), ma scarica vocali e immagini.
 
-Le richieste tramite `ai_budget.request_content` scartano le risposte troncate e
-rigenerano al massimo una volta dai messaggi originali, se il cap output lo
-consente. Nessuna data viene ricostruita da testo parziale,
-nessun reasoning viene usato come risposta finale. Le trascrizioni non vengono
-più tagliate silenziosamente a 16.000 caratteri: oltre 262.144 caratteri si segnala
-un errore. Ragionamento `low`; le istruzioni di risposta concisa restano attive.
-
-Nella chat del bot sono supportati messaggi vocali, audio e foto (anche con
-didascalia). Con fonte/consensi ammessi, OpenRouter trascrive l'audio prima del
-dialogo. Le foto del proprietario possono essere inviate come parti `image_url`
-(data URL base64) al modello principale multimodale, insieme a didascalia,
-identità dell'assistente e sottoinsieme consentito di archivio/memoria/storia.
-Il dialogo persistente corrente recupera contesto con controlli di fonte/consenso;
-non promette di reinviare la foto a ogni turno. Il limite degli ultimi 10 messaggi
-in RAM appartiene solo al vecchio percorso diretto di compatibilità. Nessun tool
-remoto arbitrario: marker Calendar validati localmente non sostituiscono intenti
-proprietario nativi e grant sigillati.
-
-- `OPENROUTER_AUDIO_MODEL`: `google/gemini-2.5-flash` (input audio).
-- `OPENROUTER_MODEL`: `google/gemini-2.5-flash` (testo e immagini nativi).
-- Entrambi usano `OPENROUTER_API_KEY`; `OPENROUTER_MODEL` è il modello principale.
-  Viene usato per tutte le conversazioni, con o senza immagini, e deve supportare
-  **nativamente input testo e immagini** (`image_url`): è un requisito obbligatorio,
-  non sostituibile con OCR. Lo stesso modello genera anche il testo persistente;
-  nessun modello immagini separato.
-  Il prompt visivo è agnostico rispetto al soggetto della foto.
-  Se la richiesta visiva fallisce o non restituisce testo, il fallback elimina le
-  immagini, dichiara che non sono disponibili e non può creare eventi calendario.
-  Non viene mostrato il reasoning interno del provider come risposta.
-- I due modelli sono modificabili anche nella configurazione amministrativa AI.
-- Limite per media: 10 MiB. I vocali Telegram OGG/Opus vengono inviati come
-  `input_audio` base64; scegliere un provider compatibile con tale formato.
-- Audio e immagini vengono trasmessi ai provider OpenRouter: valgono costi e
-  condizioni di trattamento dati dei provider selezionati.
-- Gli allegati sono archiviati prima della conversione media; errori provider
-  seguono retry limitati, blocchi di consenso restano terminali senza recupero
-  esplicito idoneo. Nessun contenuto parziale viene usato come trascrizione.
-  Solo la chat privata del proprietario configurato in `TELEGRAM_CHAT_ID` è
-  accettata dal bot. Senza proprietario configurato nessun messaggio è accettato.
-  Chat estranee, gruppi e canali sono ignorati prima di download, log dei contenuti,
-  archiviazione o analisi AI, senza risposte; gli update vengono comunque consumati.
-- Il testo delle immagini non viene interpretato come comando rapido o nuova regola.
-- Le immagini non vengono inviate al trascrittore audio: il worker vision usa
-  `OPENROUTER_MODEL`. L'estrazione generica PDF/XML resta separata e invariata.
-- L'account personale Telegram resta in sola lettura verso Telegram (niente invii
-  o ricevute di lettura), ma ora scarica vocali e immagini per archivio e conversione.
-
-Per installazioni Docker è necessario ricostruire e ricreare il container per
-caricare il codice aggiornato. Non sono necessarie nuove dipendenze Python.
+Per installazioni Docker occorre ricostruire e ricreare il container per caricare il codice
+aggiornato. Il runtime dell'agente è incorporato nell'immagine (non si scarica all'avvio).
 
 # Configurazione dashboard
 

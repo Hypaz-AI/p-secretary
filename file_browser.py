@@ -11,7 +11,7 @@ import config
 import db
 
 MAX_UPLOAD = 20 * 1024 * 1024
-CONTENT_DIRS = {'email_attachments', 'wa_media', 'tg_files', 'zips', 'uploads'}
+CONTENT_DIRS = {'email_attachments', 'wa_media', 'tg_files', 'zips', 'uploads', 'workspace'}
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 LOCK = threading.Lock()
 

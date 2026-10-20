@@ -155,7 +155,7 @@ ALIASES = {'analysis': 'ai_text', 'ai': 'ai_text', 'media': 'ai_media',
            'zip': 'zip_send', 'invoice': 'extract'}
 LOCAL_EFFECTS = frozenset(('archive', 'extract', 'reconcile', 'task_propose', 'notify', 'zip_send'))
 OWNER_EFFECTS = frozenset(('owner_command', 'owner_dialogue', 'task_apply',
-                           'task_create', 'reminder_create', 'memory_write'))
+                           'task_create', 'reminder_create', 'memory_write', 'email_send'))
 DATA_EFFECTS = frozenset(('ai_text', 'ai_media', 'ai_history'))
 
 
@@ -462,7 +462,9 @@ def _system_allowed(conn, digest, token, *, key=None, scope=None):
     flow = conn.execute("SELECT enabled FROM flow_settings WHERE flow='digest' FOR SHARE").fetchone()
     if not flow or flow[0] is not True or not set(media).issubset(sources):
         return False
-    return all(can_operate(conn, mid, 'ai_text') and (mid not in media or can_operate(conn, mid, 'ai_media'))
+    # can_read_context (non can_operate): le fonti possono essere storiche, ma solo con ai_history.
+    return all(can_read_context(conn, mid, 'ai_text')
+               and (mid not in media or can_read_context(conn, mid, 'ai_media'))
                for mid in sources)
 
 

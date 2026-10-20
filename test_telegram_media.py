@@ -10,6 +10,15 @@ import config
 from connectors import media_text, telegram
 
 
+def completion(content, finish_reason='stop'):
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = json.dumps({
+        'choices': [{'finish_reason': finish_reason,
+                     'message': {'content': content}}]
+    }).encode()
+    return response
+
+
 class MediaTextTests(unittest.TestCase):
     def test_audio_budget_scales_with_duration_and_is_bounded(self):
         self.assertEqual(media_text.audio_token_budget({'duration': 30}), 4696)
@@ -33,7 +42,6 @@ class MediaTextTests(unittest.TestCase):
         self.assertEqual(json.loads(request.call_args.args[0].data)['max_tokens'], 10096)
 
     def test_audio_truncation_retries_with_larger_budget(self):
-        from test_chat_completion import completion
         with patch.object(config, 'OPENROUTER_API_KEY', 'test'), patch(
                 'connectors.media_text.urllib.request.urlopen', side_effect=[
                     completion('inizio', 'length'), completion('trascrizione completa')]) as request:
@@ -136,28 +144,39 @@ class PipelineMediaTests(unittest.TestCase):
         self.assertEqual(attachments[0]['path'], '/tmp/voice.ogg')
         self.assertNotIn('duration', attachments[1])
 
-    def test_analysis_transcribes_only_audio_and_preserves_document_attachments(self):
+    def test_inbox_transcribes_only_audio_and_lists_other_attachments(self):
+        """L'agente riceve la trascrizione della voce e il solo elenco degli altri allegati."""
         import pipeline
-        attachments = [{'filename': 'photo.png', 'content_type': 'image/png'},
+        from agent import turns
+        attachments = [{'id': 1, 'filename': 'photo.png', 'content_type': 'image/png', 'transcript': 'foto'},
                        {'filename': 'voice.ogg', 'content_type': 'audio/ogg'},
-                       {'filename': 'invoice.pdf', 'content_type': 'application/pdf'},
-                       {'filename': 'invoice.xml', 'content_type': 'application/xml'}]
+                       {'id': 3, 'filename': 'invoice.pdf', 'content_type': 'application/pdf'},
+                       {'id': 4, 'filename': 'invoice.xml', 'content_type': 'application/xml'}]
         connection = MagicMock()
         connection.__enter__.return_value.execute.return_value.fetchone.return_value = None
+        connection.__enter__.return_value.execute.return_value.fetchall.return_value = []
+        seen = {}
+
+        class Fake:
+            def run(self, state, system, prompt, scope, timeout):
+                seen['prompt'] = prompt
+                return ''
         with patch.object(pipeline, 'load_message', return_value=(
                 ('telegram', 'sender', 'subject', 'caption', 'source'), attachments)), patch.object(
-                pipeline.flows, 'enabled', return_value=True), patch.object(
+                turns.flows, 'enabled', return_value=True), patch.object(
                 pipeline.policy, 'can_operate', side_effect=lambda conn, mid, effect, **kw:
                     mid == 42 and effect in {'extract', 'ai_text', 'ai_media'}) as grant, patch.object(
                 pipeline.db, '_conn', return_value=connection), patch.object(
-                media_text, 'convert', return_value='spoken') as convert, patch.object(
-                pipeline.brain, 'analyze', return_value={'category': 'errore'}) as analyze:
-            with self.assertRaisesRegex(RuntimeError, 'Analysis unavailable'):
-                pipeline.analyze({'message_id': 42})
+                media_text, 'convert', return_value='spoken') as convert:
+            with self.assertRaisesRegex(RuntimeError, 'Triage incompleto'):
+                turns.inbox_job({'message_id': 42}, runtime=Fake())
         convert.assert_called_once_with(attachments[1])
-        analyze.assert_called_once_with('subject', 'sender',
-            'caption\n\n[Trascrizione vocale]\nspoken', 'telegram', attachments)
-        self.assertEqual({c.args[2] for c in grant.call_args_list}, {'extract', 'ai_text', 'ai_media'})
+        self.assertIn('caption', seen['prompt'])
+        self.assertIn('[Trascrizione vocale]\nspoken', seen['prompt'])
+        self.assertIn('Immagine: testo e descrizione]\nfoto', seen['prompt'])
+        for name in ('photo.png', 'invoice.pdf', 'invoice.xml'):
+            self.assertIn(name, seen['prompt'])
+        self.assertTrue({'extract', 'ai_text', 'ai_media'} <= {c.args[2] for c in grant.call_args_list})
 
 
 class TelegramMediaTests(unittest.TestCase):
@@ -241,14 +260,14 @@ class TelegramMediaTests(unittest.TestCase):
 
 
 class OwnerMediaTests(unittest.TestCase):
+    """Il worker del proprietario: comando slash solo da testo nativo diretto, altrimenti l'agente."""
+
     def setUp(self):
         import db
         self.body = 'caption'
         self.conn = MagicMock(name='owner-worker-connection')
         def execute(sql, *args):
-            if sql.startswith('SELECT plan,response FROM owner_exchanges'):
-                row = None
-            elif sql.startswith('SELECT body FROM telegram_messages'):
+            if sql.startswith('SELECT body FROM telegram_messages'):
                 row = (self.body,)
             else:
                 raise AssertionError('Unexpected worker SQL: ' + sql)
@@ -260,142 +279,51 @@ class OwnerMediaTests(unittest.TestCase):
             mid == 42 and effect in {'owner_command', 'ai_text', 'ai_media'}))
         self.enterContext(patch('policy.metadata_for', return_value=dict(metadata=dict(
             content_origin='direct_text', is_forwarded=False))))
+        self.enterContext(patch('jobs.assert_current'))
         self.enterContext(patch('urllib.request.urlopen', side_effect=AssertionError('HTTP forbidden')))
         self.enterContext(patch('ai_budget.request_content', side_effect=AssertionError('Model forbidden')))
         if db.psycopg is not None:
             self.enterContext(patch.object(db.psycopg, 'connect', side_effect=AssertionError('PostgreSQL forbidden')))
 
-    def test_owner_photo_is_multimodal_and_skips_privileged_commands(self):
+    def test_media_message_never_runs_a_slash_command_and_goes_to_the_agent(self):
         import main
-        with patch('pipeline.load_message', return_value=(('telegram', '', '', 'caption', ''),
-                [{'content_type': 'image/jpeg', 'data': b'jpg'}])), patch.object(
-                media_text, 'convert', return_value='/stop') as convert, patch.object(main, 'handle_user_chat') as chat, patch.object(
-                main, '_handle_user_command') as command:
-            main._owner_job({'message_id': 42, 'text': 'caption', 'media': True})
-        command.assert_not_called()
-        convert.assert_not_called()
-        self.assertEqual('caption', chat.call_args.args[0])
-        self.assertEqual(chat.call_args.kwargs['images'][0]['type'], 'image_url')
-        self.assertEqual(base64.b64decode(chat.call_args.kwargs['images'][0][
-            'image_url']['url'].split(',')[1]), b'jpg')
+        from agent import owner, turns
+        with patch('pipeline.load_message', return_value=(('telegram', '', '', '/stop', ''),
+                [{'content_type': 'image/jpeg', 'data': b'jpg'}])), \
+             patch.object(owner, 'command') as command, patch.object(turns, 'owner_turn') as turn:
+            self.body = '/stop'
+            main._owner_job({'message_id': 42, 'text': '/stop', 'media': True})
+        command.assert_not_called()  # una didascalia o un contenuto media non diventa mai un comando
+        turn.assert_called_once_with(42)
 
-    def test_failed_conversion_does_not_call_main_model(self):
+    def test_native_text_command_is_handled_without_the_agent(self):
         import main
-        self.body = ''
-        with patch('pipeline.load_message', return_value=(('telegram', '', '', '', ''),
-                [{'content_type': 'audio/ogg'}])), patch.object(media_text, 'convert', side_effect=RuntimeError('retry')), patch.object(
-                main, 'handle_user_chat') as chat:
-            with self.assertRaises(RuntimeError):
-                main._owner_job({'message_id': 42, 'text': '', 'media': True})
-        chat.assert_not_called()
-
-    def test_native_text_loads_archive_and_exchange_even_without_media(self):
-        import main
-        self.body = 'Domanda archiviata'
-        with patch('pipeline.load_message', return_value=(
-                ('telegram', 'owner', '', self.body, ''), [])) as load, \
-             patch('owner_dialogue.command', return_value=False) as command, \
-             patch.object(main, 'handle_user_chat') as chat:
+        from agent import owner, turns
+        self.body = '/attivita'
+        with patch('pipeline.load_message', return_value=(('telegram', 'owner', '', self.body, ''), [])), \
+             patch.object(owner, 'command', return_value=True) as command, patch.object(turns, 'owner_turn') as turn:
             main._owner_job(dict(message_id=42, text='Payload non autorevole', media=False))
-        load.assert_called_once_with(42)
         command.assert_called_once_with(self.body, 42)
-        chat.assert_called_once_with(self.body)
-        self.assertTrue(any('SELECT plan,response FROM owner_exchanges' in c.args[0]
-                            for c in self.conn.execute.call_args_list))
-        self.assertIsNone(main._owner_context.message_id)
+        turn.assert_not_called()
 
-
-class VisionChatTests(unittest.TestCase):
-    def test_visual_prompt_is_subject_agnostic(self):
-        import brain
-        visual = brain.CHAT_PROMPT.split('IMMAGINI:', 1)[1]
-        for term in ('volto', 'emozioni', 'espressioni visibili'):
-            self.assertNotIn(term, visual)
-        self.assertIn('senza presumere il soggetto', visual)
-        self.assertIn('senza inventare dettagli', visual)
-
-    def chat_payload(self, images=None, history=None):
-        import brain
-        with patch('db._conn', side_effect=AssertionError('DB forbidden')), patch(
-                'db.communications_for_day', return_value=[]), patch(
-                'db.upcoming_appointments', return_value=[]), patch(
-                'db.personal_memories', return_value=[]), patch(
-                'db.all_rules', return_value=[]), patch(
-                'connectors.gcal.is_active', return_value=False), patch(
-                'brain.remember_user', return_value='nessuna modifica necessaria') as memory, patch(
-                'brain.ai_budget.request_content', return_value='risposta') as request:
-            self.assertEqual(brain.chat_with_user('felice o triste?', history=history, images=images),
-                             'risposta')
-        memory.assert_called_once_with('felice o triste?', [])
-        request.assert_called_once()
-        return request.call_args.args[0]
-
-    def test_current_photo_keeps_caption_identity_context_markers_but_not_unprovenanced_history(self):
-        parts = media_text.image_parts([{'content_type': 'image/png', 'data': b'png'}])
-        with patch('owner_dialogue.filter_history', side_effect=AssertionError('Unprovenanced history')):
-            payload = self.chat_payload(parts, [{'role': 'assistant', 'content': 'UNPROVENANCED_REPLY'}])
-        self.assertEqual(payload['model'], config.OPENROUTER_MODEL)
-        self.assertIn('@@EVENTO@@', payload['messages'][0]['content'])
-        self.assertIn('Il tuo nome', payload['messages'][0]['content'])
-        self.assertIn('ARCHIVIO NON FIDATO', payload['messages'][1]['content'])
-        self.assertNotIn('UNPROVENANCED_REPLY', json.dumps(payload))
-        self.assertEqual(payload['messages'][-1]['content'][0]['text'], 'felice o triste?')
-        self.assertEqual(payload['messages'][-1]['content'][1:], parts)
-
-    def test_unprovenanced_photo_followup_is_omitted_and_plain_text_uses_main_model(self):
-        history = [{'role': 'user', 'content': media_text.image_parts([
-            {'content_type': 'image/jpeg', 'data': b'jpg'}])}]
-        payload = self.chat_payload(history=history)
-        self.assertEqual(payload['model'], config.OPENROUTER_MODEL)
-        self.assertTrue(all(isinstance(message['content'], str) for message in payload['messages']))
-        self.assertNotIn('data:image/jpeg;base64,', json.dumps(payload))
-        self.assertEqual(self.chat_payload()['model'], config.OPENROUTER_MODEL)
-
-    def test_authorized_photo_followup_preserves_media_and_rechecks_native_source(self):
-        parts = media_text.image_parts([{'content_type': 'image/jpeg', 'data': b'jpg'}])
-        history = [dict(role='user', content=[dict(type='text', text='Earlier caption')] + parts,
-                        message_id=41)]
-        with patch('owner_dialogue.filter_history', return_value=history) as filtered, \
-             patch('owner_dialogue.assert_egress_sources') as gate:
-            payload = self.chat_payload(history=history)
-        filtered.assert_called_once_with(history)
-        gate.assert_called_once_with([dict(source_type='message', source_id=41)])
-        self.assertEqual(payload['model'], config.OPENROUTER_MODEL)
-        self.assertEqual(payload['messages'][-2], dict(role='user', content=history[0]['content']))
-        self.assertEqual(payload['messages'][-2]['content'][1:], parts)
-        self.assertEqual(payload['messages'][-1], dict(role='user', content='felice o triste?'))
-
-    def test_failed_vision_falls_back_without_images_reasoning_or_events(self):
-        import brain
-        response = MagicMock()
-        response.__enter__.return_value.read.return_value = json.dumps({'choices': [
-            {'message': {'content': 'Dal testo posso aiutarti.\n@@EVENTO@@ inventato',
-                         'reasoning': 'private reasoning'}}]}).encode()
-        messages = [{'role': 'user', 'content': [{'type': 'text', 'text': 'caption'}] +
-                    media_text.image_parts([{'content_type': 'image/png', 'data': b'png'}])}]
-        with patch('brain.urllib.request.urlopen', side_effect=[OSError('unavailable'), response]) as call:
-            reply = brain._owner_chat_request({'model': config.OPENROUTER_MODEL,
-                                              'messages': messages}, True)
-        fallback = json.loads(call.call_args.args[0].data)
-        self.assertEqual(fallback['model'], config.OPENROUTER_MODEL)
-        self.assertNotIn('image_url', json.dumps(fallback))
-        self.assertIn('caption', fallback['messages'][0]['content'])
-        self.assertIn('Non posso vedere', reply)
-        self.assertNotIn('@@EVENTO@@', reply)
-        self.assertNotIn('private reasoning', reply)
-
-    def test_history_preserves_photo_and_main_handles_calendar(self):
+    def test_plain_text_that_is_not_a_command_goes_to_the_agent(self):
         import main
-        parts = media_text.image_parts([{'content_type': 'image/png', 'data': b'png'}])
-        with patch.object(main, '_chat_history', []), patch(
-                'brain.chat_with_user', return_value='risposta'), patch(
-                'main.gcal.parse_markers', return_value=('risposta', [{'title': 'evento'}])), patch(
-                'main._create_chat_appointments', return_value='salvato') as create, patch(
-                'main.telegram.notify', return_value=True):
-            main.handle_user_chat('caption', images=parts)
-            self.assertEqual(main._chat_history[0]['content'][1:], parts)
-            self.assertEqual(main._chat_history[1]['content'], 'salvato')
-            create.assert_called_once()
+        from agent import owner, turns
+        self.body = 'Domanda archiviata'
+        with patch('pipeline.load_message', return_value=(('telegram', 'owner', '', self.body, ''), [])), \
+             patch.object(owner, 'command', return_value=False) as command, patch.object(turns, 'owner_turn') as turn:
+            main._owner_job(dict(message_id=42, text='Payload non autorevole', media=False))
+        command.assert_called_once_with(self.body, 42)
+        turn.assert_called_once_with(42)
+
+    def test_loss_of_native_authority_is_a_permanent_visible_failure(self):
+        import jobs, main
+        from agent import owner, turns
+        with patch.object(owner, 'authorize', side_effect=PermissionError('gone')), \
+             patch.object(turns, 'owner_turn') as turn:
+            with self.assertRaises(jobs.Permanent):
+                main._owner_job(dict(message_id=42))
+        turn.assert_not_called()
 
 
 if __name__ == '__main__':

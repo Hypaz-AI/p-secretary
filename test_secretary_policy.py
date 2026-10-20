@@ -173,10 +173,19 @@ class AuthorityTests(IsolatedTests):
     def test_no_blanket_remote_send_calendar_zip_or_unknown_grant(self):
         # 'zip' is now the delegated alias of zip_send (LOCAL_EFFECTS): it is
         # tested separately below. Everything else here stays non-delegated.
-        for effect in ('send', 'email_send', 'whatsapp_send', 'calendar', 'pay',
+        for effect in ('send', 'whatsapp_send', 'calendar', 'pay',
                        'delete', 'model-secret@example.invalid'):
             self.assertFalse(self.allowed(effect=effect))
         self.assertNotIn('model-secret', str(self.conn.execute.call_args_list))
+
+    def test_email_send_is_a_native_owner_effect_never_third_party(self):
+        # L'invio di una bozza è autorizzato SOLO dal gesto nativo del proprietario (/invia).
+        self.assertIn('email_send', policy.OWNER_EFFECTS)
+        self.assertTrue(self.allowed(effect='email_send'))
+        for channel, direction in (('email', 'in'), ('whatsapp', 'in'), ('telegram (account)', 'out')):
+            self.assertFalse(self.allowed(native(channel=channel, direction=direction), 'email_send'))
+        self.assertFalse(self.allowed(native(metadata={'is_forwarded': True}), 'email_send'))
+        self.assertFalse(self.allowed(native(metadata={'historical': True}), 'email_send'))
 
     def test_zip_send_is_delegated_local_effect(self):
         # zip_send is delegated: an archived native message may authorize the
@@ -252,112 +261,18 @@ class ReceiptTests(IsolatedTests):
         self.assertEqual(self.conn.execute.call_args.args[1][0], 'blocked')
 
 
-class ReconciliationPolicyTests(IsolatedTests):
-    """Operational policy/lifecycle only; native egress has its own privacy suite."""
+class TaskLifecyclePolicyTests(IsolatedTests):
+    """Il ciclo di vita ricontrolla provenienza e autorità al momento dell'effetto."""
 
     def setUp(self):
         super().setUp()
-        self.enterContext(patch.object(tr.db, '_conn', side_effect=lambda: nullcontext(self.conn)))
-        self.enterContext(patch.object(tr.flows, 'enabled', return_value=True))
-        self.enterContext(patch.object(tr.pipeline, 'load_message', return_value=(
-            ('email', 'third party', 'invoice', 'Invoice paid', 'source'), [])))
-        self.ai = self.enterContext(patch.object(tr.brain, 'reconcile_tasks', return_value={'changes': [
-            dict(task_id=7, operation='complete', changes={}, reason='paid', evidence='Invoice paid',
-                 certainty='certain', unique_match=True)]}))
-        self.enterContext(patch.object(tr.documents, 'attachment_text', return_value=''))
-        self.enterContext(patch.object(tr.media_text, 'message_text', side_effect=lambda body, _: body))
-        self.enterContext(patch.object(tr, '_record', return_value=12))
-        self.apply = self.enterContext(patch.object(tr, 'apply_change', return_value='applied'))
-        self.notify = self.enterContext(patch.object(tr, '_notify'))
-        self.conn.execute.return_value.fetchone.side_effect = [None, ('run',), ('open', 3)]
-        self.conn.execute.return_value.fetchall.return_value = [(7, 'Invoice', None, 3, 1, 's', 's', 'b')]
         self.gate = self.enterContext(patch.object(policy, 'can_operate',
                                     side_effect=lambda conn, mid, effect, **kw: effect != 'task_apply'))
-        # These positional SQL replies describe lifecycle state, not native
-        # origins/consents. Isolate that separate boundary explicitly instead of
-        # accidentally authorizing it through a permissive MagicMock. Real
-        # allows_source/can_read_context stay covered at the provider boundary
-        # in test_reconciliation_task_privacy (offline and optional SQL).
-        self.candidate = self.enterContext(patch.object(tr, '_allows_candidate', return_value=True))
-
-    def test_certain_unique_third_party_evidence_stays_proposal(self):
-        tr.reconcile({'message_id': 42})
-        self.ai.assert_called_once()
-        self.assertEqual(self.candidate.call_count, 2)
-        self.assertEqual(self.candidate.call_args_list[0].args, (self.conn, 7))
-        self.candidate.assert_called_with(self.conn, 7, expected_version=3)
-        self.apply.assert_not_called()
-        self.assertIn('in attesa di conferma', self.notify.call_args.args[2])
-
-    def test_native_owner_policy_can_allow_evidence_gated_auto(self):
-        self.gate.side_effect = None
-        self.gate.return_value = True
-        tr.reconcile({'message_id': 42})
-        self.apply.assert_called_once_with(self.conn, 12)
-
-    def test_historical_replay_worker_stops_before_model_and_effects(self):
-        self.gate.side_effect = lambda conn, mid, effect, **kw: False
-        tr.reconcile({'message_id': 42})
-        self.ai.assert_not_called()
-        self.notify.assert_not_called()
-
-    def test_revocation_during_ai_blocks_commit(self):
-        checks = 0
-        def decide(conn, mid, effect, **kwargs):
-            nonlocal checks
-            if effect == 'reconcile':
-                checks += 1
-                return checks == 1
-            return True
-        self.gate.side_effect = decide
-        tr.reconcile({'message_id': 42})
-        self.ai.assert_called_once()
-        self.assertEqual(checks, 2)
-        self.apply.assert_not_called()
-        self.notify.assert_not_called()
-
-    def test_missing_data_permission_blocks_before_model(self):
-        self.gate.side_effect = lambda conn, mid, effect, **kw: effect != 'ai_text'
-        with self.assertRaises(jobs.Deferred):
-            tr.reconcile({'message_id': 42})
-        self.ai.assert_not_called()
-
-    def test_blocked_candidate_source_is_not_sent_to_model(self):
-        # A permitted trigger does not grant candidate egress. History itself
-        # can be readable with separate consent, unlike operational replay.
-        self.gate.side_effect = None
-        self.gate.return_value = True
-        self.candidate.return_value = False
-        tr.reconcile({'message_id': 42})
-        self.candidate.assert_called_once_with(self.conn, 7)
-        self.gate.assert_any_call(self.conn, 42, 'ai_text')
-        self.ai.assert_not_called()
-        self.apply.assert_not_called()
-        self.notify.assert_not_called()
-
-    def test_candidate_revoked_after_snapshot_defers_before_model_or_effects(self):
-        self.candidate.side_effect = [True, False]
-        with self.assertRaisesRegex(jobs.Deferred, '^Candidate data policy blocked$'):
-            tr.reconcile({'message_id': 42})
-        self.assertEqual(self.candidate.call_count, 2)
-        self.candidate.assert_called_with(self.conn, 7, expected_version=3)
-        self.ai.assert_not_called()
-        self.apply.assert_not_called()
-        self.notify.assert_not_called()
-
-    def test_attached_document_is_not_promoted_to_current_owner_command(self):
-        self.gate.side_effect = None
-        self.gate.return_value = True
-        with patch.object(tr.pipeline, 'load_message', return_value=(
-                ('telegram', 'owner', '', 'Please inspect attachment', 'source'), [])), patch.object(
-                tr.documents, 'attachment_text', return_value='Invoice paid'):
-            tr.reconcile({'message_id': 42})
-        self.apply.assert_not_called()
-        self.assertIn('in attesa di conferma', self.notify.call_args.args[2])
+        self.enterContext(patch.object(jobs, 'assert_current'))
+        self.enterContext(patch.object(jobs, 'execution_context', return_value=None))
 
     def test_execution_rechecks_history_and_authority_on_queued_proposal(self):
-        # Exercise the real apply path, not the reconcile mock.
-        with patch.object(tr, 'apply_change', new=REAL_APPLY), patch.object(tr, '_derived') as derived:
+        with patch.object(tr, '_derived') as derived:
             for effect in ('task_propose', 'task_apply'):
                 self.conn.execute.return_value.fetchone.side_effect = [
                     (7,), ('open', 3, 'Invoice', None), ('complete', {}, 3, 'pending'), (42, '')]
@@ -366,14 +281,16 @@ class ReconciliationPolicyTests(IsolatedTests):
             derived.assert_not_called()
 
     def test_owner_confirmation_checked_by_native_id_not_boolean(self):
-        with patch.object(tr, 'apply_change', new=REAL_APPLY):
-            self.gate.side_effect = lambda *args, **kwargs: False
-            self.assertEqual(tr.apply_change(self.conn, 12, authority_message_id=True), 'blocked')
-            self.assertEqual(self.gate.call_args.args[1], True)
-            self.assertTrue(self.gate.call_args.kwargs['owner_required'])
+        self.gate.side_effect = lambda *args, **kwargs: False
+        self.assertEqual(tr.apply_change(self.conn, 12, authority_message_id=True), 'blocked')
+        self.assertEqual(self.gate.call_args.args[1], True)
+        self.assertTrue(self.gate.call_args.kwargs['owner_required'])
 
-
-REAL_APPLY = tr.apply_change
+    def test_background_job_cannot_use_the_owner_id_of_an_old_payload(self):
+        context = jobs.ExecutionContext(1, 'tok', 'analysis', {'message_id': 42}, float('inf'))
+        with patch.object(jobs, 'execution_context', return_value=context):
+            self.gate.side_effect = lambda *args, **kwargs: True
+            self.assertEqual(tr.apply_change(self.conn, 12, authority_message_id=42), 'blocked')
 
 
 if __name__ == '__main__':

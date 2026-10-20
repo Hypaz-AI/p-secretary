@@ -32,10 +32,6 @@ import uuid
 
 import config
 
-ANALYSIS_TOKENS = 8192
-MEMORY_TOKENS = 4096
-DIGEST_TOKENS = 8192
-CHAT_TOKENS = 16384
 MAX_RETRY_TOKENS = 65536
 VERSION = 'secretary_ai_budget_v1'
 # Migrazioni additive successive a VERSION: un ledger già creato non viene
@@ -64,38 +60,12 @@ CREATE INDEX secretary_ai_usage_scope ON secretary_ai_usage(usage_day,scope);
 
 # Scoped budgets: optional per-scope daily caps. The global cap always applies
 # on top; a scope cap can only further restrict, never raise, the global one.
-# Scope names are server-declared (never model/user input): 'global' (default),
-# 'dialogue' (owner chat turns), 'review' (runtime practice reviews),
-# 'research' (long-running research workers), 'analysis' (message analysis).
-SCOPE_CALLS = {'dialogue': 'AI_BUDGET_DIALOGUE_DAILY_CALLS',
-               'review': 'AI_BUDGET_REVIEW_DAILY_CALLS',
-               'research': 'AI_BUDGET_RESEARCH_DAILY_CALLS',
-               'analysis': 'AI_BUDGET_ANALYSIS_DAILY_CALLS'}
-
-
-def scope_of(payload):
-    """Derive the accounting scope from the system prompt, server-side only.
-
-    The scope is a coarse routing label for budgeting, never an authorization:
-    it grants nothing and is not sent to the provider. Unknown prompts stay in
-    the conservative 'global' scope.
-    """
-    messages = payload.get('messages') if isinstance(payload, dict) else None
-    system = next((m.get('content') for m in messages
-                   if isinstance(m, dict) and m.get('role') == 'system'), '') \
-        if isinstance(messages, list) else ''
-    if not isinstance(system, str):
-        return 'global'
-    for marker, scope in (('Read-only retrieval planner', 'dialogue'),
-                          ('Aggiorna il riepilogo', 'dialogue'),
-                          ('Prepare a local secretary review', 'review'),
-                          ('Confronta la comunicazione corrente', 'analysis'),
-                          ('Riepiloga la giornata', 'analysis'),
-                          ('Estrai la memoria personale', 'dialogue'),
-                          ('Research sub-task', 'research')):
-        if marker in system:
-            return scope
-    return 'global'
+# Scope names are server-declared (never model/user input): 'global' (default:
+# media conversion and other direct calls), 'agent_owner' (turns requested by
+# the owner) and 'agent_inbox' (autonomous triage of incoming messages).
+SCOPE_CALLS = {'agent_owner': 'AI_BUDGET_AGENT_OWNER_DAILY_CALLS',
+               'agent_inbox': 'AI_BUDGET_AGENT_INBOX_DAILY_CALLS'}
+AGENT_SCOPES = frozenset(SCOPE_CALLS)
 
 
 class BudgetExceeded(RuntimeError):
@@ -187,7 +157,7 @@ def _reported(response):
     return prompt, output, total, cost
 
 
-def _reserve(context, limits, count, payload):
+def _reserve(context, limits, count, payload, scope=None):
     # Lazy imports are essential: brain -> ai_budget -> jobs/db -> brain can
     # otherwise cycle during startup. No DB connection is held over HTTP.
     import db
@@ -218,7 +188,7 @@ def _reserve(context, limits, count, payload):
             if (calls >= limits['DAILY_CALLS'] or tokens + count > limits['DAILY_TOKENS']
                     or active >= limits['MAX_INFLIGHT']):
                 raise BudgetExceeded('AI daily or in-flight budget exhausted')
-            scope = scope_of(payload)
+            scope = scope or 'global'
             cap = limits.get('SCOPE_' + scope, 0)
             if cap > 0:
                 scoped = conn.execute('''SELECT count(*) FROM secretary_ai_usage
@@ -263,8 +233,19 @@ def _settle(identity, context, response):
         raise BudgetUnavailable('AI budget settlement unavailable') from None
 
 
+def accounted(payload, *, scope=None):
+    """Contabilita UNA chiamata al provider nel ledger del job corrente (fail-closed).
+
+    Pubblico per il gateway dell'agente: lo scope è dichiarato dal server
+    (agent_owner|agent_inbox), mai dedotto dal testo del modello.
+    """
+    if scope is not None and scope not in AGENT_SCOPES:
+        raise ValueError('Unknown AI scope')
+    return _attempt(payload, scope=scope)
+
+
 @contextmanager
-def _attempt(payload):
+def _attempt(payload, scope=None):
     import jobs
     context = jobs.execution_context()
     if context is None:
@@ -283,7 +264,7 @@ def _attempt(payload):
             raise BudgetExceeded('AI process in-flight budget exhausted')
         _inflight += 1
     try:
-        identity = _reserve(context, limits, count, payload)
+        identity = _reserve(context, limits, count, payload, scope)
         outcome = {'response': None, 'output_ceiling': limits['MAX_OUTPUT_TOKENS']}
         try:
             jobs.assert_current()

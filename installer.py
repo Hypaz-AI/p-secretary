@@ -71,10 +71,6 @@ def provision_database(config_dir, existing, external=None):
 
 
 def valid_preference(key, value):
-    if key in ('SECRETARY_REVIEW_QUIET_START', 'SECRETARY_REVIEW_QUIET_END'):
-        return value.isdecimal() and 0 <= int(value) <= 23
-    if key in ('SECRETARY_REVIEW_MIN_MINUTES', 'SECRETARY_REVIEW_ACK_MINUTES'):
-        return value.isdecimal() and (5 if key == 'SECRETARY_REVIEW_MIN_MINUTES' else 1) <= int(value) <= 10080
     if key == 'TIMEZONE':
         try:
             ZoneInfo(value)
@@ -84,7 +80,9 @@ def valid_preference(key, value):
         return bool(re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', value))
     if key == 'LANGUAGE':
         return bool(re.fullmatch(r'[a-z]{2,3}(?:-[A-Za-z]{2,8})?', value))
-    if key == 'OPENROUTER_MODEL':
+    if key == 'AGENT_WEB_MODEL' and value == '':
+        return True  # vuoto = usa OPENROUTER_MODEL
+    if key in ('OPENROUTER_MODEL', 'AGENT_MODEL', 'AGENT_WEB_MODEL'):
         return bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./:-]*', value))
     return True
 

@@ -225,8 +225,7 @@ class TelegramAccountWorker:
         return [{'filename': name, 'content_type': mime, 'data': data,
                  'duration': getattr(file, 'duration', None)}]
 
-    async def archive(self, message, recovered=False, window=None, *, reconcile=True,
-                      historical=False):
+    async def archive(self, message, recovered=False, window=None, *, historical=False):
         cutoff, end = history_window() if window is None else window
         if not message.date or not cutoff <= message.date < end or message.chat_id is None:
             return False
@@ -277,13 +276,13 @@ class TelegramAccountWorker:
                 'chat_type': chat_type,
                 'sender_name': sender_name, 'chat_name': chat_name}
         attachments = await self.media_attachments(message, source_id)
-        # No inline AI, commands or replies. Runtime recovery also reconciles;
-        # explicit historical imports opt out independently of `recovered`.
+        # Solo archivio: nessuna AI inline, comando o risposta. Gli import storici
+        # sono marcati esplicitamente, indipendentemente da `recovered`.
         await asyncio.to_thread(db.store_message, 'telegram (account)',
                                 sender_label, chat_name or '(Telegram personale)',
                                 message.raw_text or ('[Telegram media]' if message.media else ''), ts=message.date.isoformat(),
                                 source_id=source_id, metadata=meta, attachments=attachments,
-                                update_existing=True, reconcile=reconcile,
+                                update_existing=True,
                                 historical=historical)
         return True
 
@@ -420,7 +419,7 @@ async def import_history(start, end, max_flood_wait=300):
                         if identity in archived:
                             continue
                         if await worker.archive(message, recovered=True, window=(start, end),
-                                                reconcile=False, historical=True):
+                                                historical=True):
                             archived.add(identity)
 
             await retry(scan)

@@ -65,6 +65,37 @@ OPENROUTER_API_KEY = get("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
 OPENROUTER_AUDIO_MODEL = get("OPENROUTER_AUDIO_MODEL", "google/gemini-2.5-flash")
 
+
+def _bounded_int(key, default, low, high):
+    try:
+        value = int(get(key, str(default)))
+    except ValueError:
+        return default
+    return value if low <= value <= high else default
+
+
+# --- Agente (core agentico su Copilot SDK, LLM = OpenRouter) ------------------
+# openrouter/auto sceglie il modello in base alla complessità della richiesta.
+AGENT_MODEL = get("AGENT_MODEL", "openrouter/auto") or "openrouter/auto"
+# Modello che esegue la sola ricerca web (plugin web di OpenRouter).
+AGENT_WEB_MODEL = get("AGENT_WEB_MODEL", "") or OPENROUTER_MODEL
+AGENT_MAX_TOOL_CALLS = _bounded_int("AGENT_MAX_TOOL_CALLS", 30, 1, 200)
+AGENT_OWNER_TIMEOUT = _bounded_int("AGENT_OWNER_TIMEOUT", 240, 30, 1800)
+AGENT_BACKGROUND_TIMEOUT = _bounded_int("AGENT_BACKGROUND_TIMEOUT", 900, 60, 3300)
+AGENT_LLM_TIMEOUT = _bounded_int("AGENT_LLM_TIMEOUT", 180, 20, 600)
+AGENT_MAX_OUTPUT_TOKENS = _bounded_int("AGENT_MAX_OUTPUT_TOKENS", 16384, 1024, 65536)
+# Lotto massimo di messaggi in ingresso valutati insieme dall'agente.
+AGENT_INBOX_BATCH = _bounded_int("AGENT_INBOX_BATCH", 8, 1, 25)
+# Tetto di notifiche Telegram autonome (urgenze) per giorno: argine al rumore.
+AGENT_NOTIFY_MAX_PER_DAY = _bounded_int("AGENT_NOTIFY_MAX_PER_DAY", 5, 0, 100)
+# Le risposte dell'assistente più vecchie di così tanti minuti non rientrano nel contesto:
+# la provenienza dei loro dati non è registrata e i consensi possono essere cambiati.
+AGENT_HISTORY_RESPONSE_MINUTES = _bounded_int("AGENT_HISTORY_RESPONSE_MINUTES", 20, 0, 240)
+AGENT_DB_SCHEMA = get("AGENT_DB_SCHEMA", "agent") or "agent"
+# Ruolo PostgreSQL di sola lettura (vedi deploy/agent_ro.sql); se assente la
+# validazione AST resta l'unica barriera e l'app lo segnala all'avvio.
+AGENT_DB_ROLE = get("AGENT_DB_ROLE", "agent_ro")
+
 # --- Email ----------------------------------------------------
 # Preset per provider: (host IMAP, porta IMAP, host SMTP, porta SMTP, auth)
 # auth = "basic" (password / password per app) oppure "oauth2" (Microsoft).
@@ -143,35 +174,18 @@ for _i in range(1, 5):
 # --- Riassunto giornaliero ---------------------------------------
 # Ora locale (HH:MM) a cui inviare il digest delle ultime 24 ore
 DIGEST_TIME = get("DIGEST_TIME", "21:00")
-# Politica di notifica in tempo reale:
-#   "mai"   -> nessuna notifica ordinaria immediata (resta il digest)
-#   "alta"  -> solo priorità alta tra le notifiche ordinarie
-#   "media"/"bassa" -> avvisa subito anche le cose meno importanti
-# Gravità alta o urgent=true valutate dall'AI scavalcano SEMPRE la soglia, anche mai.
-NOTIFY_PRIORITY_THRESHOLD = get("NOTIFY_PRIORITY_THRESHOLD", "media").lower()
-
 # --- Varie ----------------------------------------------------
 POLL_INTERVAL = int(get("POLL_INTERVAL", "300"))
 TIMEZONE = get("TIMEZONE", "Europe/Rome")
 LANGUAGE = get("LANGUAGE", "it")
 
-# --- Segretario: modalità operativa e quiet hours globali -----
+# --- Segretario: modalità operativa -----
 # SECRETARY_MODE: "observe" (solo proposte/bozze, nessun invio a terzi) oppure
 # "active" (permette gli invii esplicitamente approvati dal proprietario).
 # Default: observe. Valori non riconosciuti ricadono su observe (fail-safe).
 SECRETARY_MODE = get("SECRETARY_MODE", "observe").lower()
 if SECRETARY_MODE not in ("observe", "active"):
     SECRETARY_MODE = "observe"
-# Contesto per task nella riconciliazione: caratteri del body sorgente
-# inclusi nel prompt AI per ogni task candidato (RECONCILE_CONTEXT_CHARS).
-# Il trim riduce token/latenza; la validazione delle citazioni resta sul
-# body completo, quindi una citazione troncata resta comunque substring.
-try:
-    RECONCILE_CONTEXT_CHARS = int(get("RECONCILE_CONTEXT_CHARS", "1200"))
-except ValueError:
-    RECONCILE_CONTEXT_CHARS = 1200
-if not 200 <= RECONCILE_CONTEXT_CHARS <= 20000:
-    RECONCILE_CONTEXT_CHARS = 1200
 # Retention dell'audit degli effetti (EFFECT_AUDIT_RETENTION_DAYS giorni).
 # 0 disattiva. Le ricevute (effect_receipts) restano immutabili: qui si
 # pota solo il registro bulk dei reason-code di policy.
@@ -181,17 +195,6 @@ except ValueError:
     EFFECT_AUDIT_RETENTION_DAYS = 30
 if not 0 <= EFFECT_AUDIT_RETENTION_DAYS <= 3650:
     EFFECT_AUDIT_RETENTION_DAYS = 30
-# Quiet hours GLOBALI (ora locale, 0-23): durante la fascia le notifiche
-# ordinarie non urgenti vengono rinviate all'uscita della fascia stessa.
-# Le emergenze (urgent=true o gravità alta) restano immediate.
-# Inizio=fine disattiva la fascia silenziosa.
-try:
-    QUIET_HOURS_START = int(get("QUIET_HOURS_START", "22"))
-    QUIET_HOURS_END = int(get("QUIET_HOURS_END", "8"))
-except ValueError:
-    QUIET_HOURS_START, QUIET_HOURS_END = 22, 8
-if not (0 <= QUIET_HOURS_START <= 23 and 0 <= QUIET_HOURS_END <= 23):
-    QUIET_HOURS_START, QUIET_HOURS_END = 22, 8
 
 
 def _tz():
@@ -210,17 +213,3 @@ STATE_FILE = DATA_DIR / "state.json"
 APPOINTMENTS_FILE = DATA_DIR / "appointments.json"
 NOTES_FILE = DATA_DIR / "notes.json"
 LOG_FILE = DATA_DIR / "secretary.log"
-
-# Priorità ordinate: una notifica parte solo se >= soglia
-_PRIORITY_ORDER = {"bassa": 0, "media": 1, "alta": 2}
-
-
-def priority_at_least(priority: str, threshold: str) -> bool:
-    """True se `priority` merita una notifica immediata secondo la soglia.
-
-    threshold="mai" disabilita le notifiche ordinarie; le emergenze sono
-    gestite separatamente da main.process_message.
-    """
-    if (threshold or "").strip().lower() == "mai":
-        return False
-    return _PRIORITY_ORDER.get(priority, 0) >= _PRIORITY_ORDER.get(threshold, 1)

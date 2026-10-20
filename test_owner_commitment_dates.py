@@ -14,8 +14,7 @@ TASK = dict(id=7, version=3, title='Contratto', deadline=None,
 def change(text, fields, operation='create'):
     return dict(operation=operation, task_id=None if operation == 'create' else 7,
                 changes=dict(title='Contratto', **fields) if operation == 'create' else fields,
-                evidence=text, kind='task', owner_request=True,
-                certainty='certain', unique_match=True)
+                evidence=text)
 
 
 class DateGroundingTests(unittest.TestCase):
@@ -25,9 +24,10 @@ class DateGroundingTests(unittest.TestCase):
         self.addCleanup(timezone_patch.stop)
 
     def prepare(self, text, fields, *, anchor=ANCHOR, operation='create'):
-        result = dict(changes=[change(text, fields, operation)], clarification='')
-        with patch.object(oc, 'extract', return_value=result):
-            return oc.prepare(text, [], anchor, tasks=[TASK] if operation != 'create' else [])
+        """Stesso confine di validazione del server: build_change sul testo del proprietario."""
+        item = change(text, fields, operation)
+        return [oc.build_change(text, anchor, [TASK] if operation != 'create' else [],
+                                item['operation'], item['task_id'], item['changes'], item['evidence'])]
 
     def test_supported_relative_dates_use_original_local_calendar(self):
         for reference, expected in (
@@ -91,15 +91,17 @@ class DateGroundingTests(unittest.TestCase):
     def test_independent_items_use_own_evidence_not_entire_message(self):
         first = 'Devo inviare oggi.'
         second = 'Devo pagare domani.'
-        items = [change(first, {'owner_deadline_date': '2026-01-01'}),
-                 change(second, {'owner_deadline_date': '2026-01-02'})]
-        items[1]['changes']['title'] = 'Pagamento'
         for separator in (' ', '\n', '; '):
             # A semicolon is part of the first evidence sentence in this guard.
-            items[0]['evidence'] = first if separator != '; ' else first + ';'
-            with self.subTest(separator=separator), patch.object(
-                    oc, 'extract', return_value=dict(changes=items, clarification='')):
-                self.assertEqual(len(oc.prepare(first + separator + second, [], ANCHOR, tasks=[])), 2)
+            evidence = first if separator != '; ' else first + ';'
+            text = first + separator + second
+            with self.subTest(separator=separator):
+                one = oc.build_change(text, ANCHOR, [], 'create', None,
+                                      dict(title='Contratto', owner_deadline_date='2026-01-01'), evidence)
+                two = oc.build_change(text, ANCHOR, [], 'create', None,
+                                      dict(title='Pagamento', owner_deadline_date='2026-01-02'), second)
+                self.assertEqual((one['changes']['owner_deadline_date'], two['changes']['owner_deadline_date']),
+                                 ('2026-01-01', '2026-01-02'))
 
     def test_weekdays_and_other_unsupported_expressions_remain_model_dependent(self):
         for reference in ('venerdì', 'la prossima settimana', 'tra due giorni'):

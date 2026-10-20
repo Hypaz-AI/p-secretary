@@ -1,130 +1,104 @@
-# Pi Secretary · spazio personale sotto controllo
+# Pi Secretary · un agente per le tue comunicazioni
 
-Documenti, ricerca, memoria, attività e responsabilità sono il centro
-dell’interfaccia; **fatture e ZIP sono opzionali**, non il profilo obbligatorio.
-La dashboard aggiunge quattro pannelli autenticati:
+Segretario personale per Linux (Raspberry Pi incluso): raccoglie email, WhatsApp e
+Telegram, archivia tutto su PostgreSQL e **lascia che sia un agente a ragionare**.
+Non esistono pipeline di classificazione, schemi di piano o flussi fissi: quando
+scrivi al bot, o quando arriva un messaggio, un agente ([GitHub Copilot SDK](https://github.com/github/copilot-sdk),
+LLM via **OpenRouter**, `openrouter/auto` di default) decide cosa guardare e cosa
+fare usando strumenti tipizzati:
 
-- **Cosa seguo per te**: pratiche, prossima azione, attese, revisioni,
-  responsabilità e proposte. Sospensione/revoca usa la versione letta (CAS),
-  registra una ricevuta e revoca le approvazioni collegate. Nessuna riattivazione
-  implicita o nuova delega dal browser.
-- **Documenti e ricerca**: catalogo e ricerca lessicale italiana con citazioni,
-  testo estratto, stato parziale/storico e apertura della fonte DB. Non è una
-  ricerca semantica; un file caricato genericamente non viene indicizzato da solo.
-- **Permessi AI**: consenso esplicito per email/Telegram/WhatsApp × testo/media,
-  più **storico come contesto di sola lettura**, negato in assenza di una scelta.
-  Telegram comprende bot e account personale: non esiste granularità per
-  chat/account. Lo storico richiede anche testo e, per documenti/media, media;
-  non autorizza comandi o azioni successive. Abilitare un flusso o inserire una
-  chiave **non dà consenso**. Revocare non ritira dati già trasmessi.
-- **Esiti**: ricevute locali, revisioni/bozze e collegamenti suggeriti, distinti
-  da consegne esterne. Un’approvazione lega payload esatto, versione e scadenza;
-  **non invia nulla**, non prova un successo e non è un permesso generico.
+| Strumento | Cosa permette |
+|---|---|
+| `db_schema`, `db_query` | query SQL **libere in sola lettura** sulle viste `agent.*` (messaggi, allegati, documenti, attività, appuntamenti, note, regole, fatture, dialoghi) |
+| `read_message`, `attachment_text` | testo completo di un messaggio, testo estratto/trascritto di un allegato |
+| `fs_list/find/read/write/mkdir` | file in `/data` (lettura) e nella cartella **`workspace/`** (scrittura, visibile nella pagina «Archivio e file» della dashboard) |
+| `mail_accounts/search/read` | ricerca e lettura **dal vivo** delle caselle email (IMAP, sola lettura) |
+| `web_search` | ricerca sul web (plugin web di OpenRouter), senza budget dedicato |
+| `task_change`, `tasks_close_bulk`, `note_save`, `note_forget` | scritture sulle tue attività e note, solo da una **tua frase esatta** e con ricevuta |
+| `calendar_propose`, `email_propose` | **proposte**: l'evento nasce locale (`/conferma ID` per sincronizzarlo), la bozza email aspetta il tuo `/invia ID` |
+| `triage`, `task_from_message`, `notify_urgent`, `archive_invoice` | solo nella posta in arrivo: registrano l'esito, avvisano **solo per vere emergenze** (tetto giornaliero), archiviano fatture |
 
-Pratiche/responsabilità sono viste limitate a 24 elementi per raccolta; catalogo
-e revisioni a 20. I pannelli segretario si aggiornano manualmente per non cambiare
-il payload durante una decisione; i contatori operativi restano automatici.
-Fatture/ZIP inattivi restano chiusi in **Consulta storico fatture e ZIP**, sempre
-accessibile; i flussi esistenti sono gli unici interruttori persistenti.
+**Tre modi di lavorare**, stesso agente, strumenti diversi:
 
-**Stato di integrazione:** il servizio è un **segretario di revisione limitato**,
-già collegato al bootstrap/runtime, non un esecutore di workflow arbitrari.
-`db.init()` applica le migrazioni additive, incluse execution e ai_budget, prima
-dei flussi; `main()` avvia nove worker persistenti: analysis, media, reconcile,
-action, owner, knowledge, research, secretary_review e secretary_email_execution.
-Indicizzazione, osservazioni, revisioni dovute e backlog sono integrati. Ogni
-worker tratta un job alla volta; le attività periodiche hanno un solo thread vivo
-per nome. Lease di 15 minuti, heartbeat di 30 secondi, limite esecuzione di un'ora
-e massimo otto tentativi per errori ordinari non significano resend illimitati.
-La dashboard non migra il DB né avvia worker alla richiesta: schema/modulo assente
-è segnalato, non trasformato in una falsa vista vuota o in un consenso.
-Vedere [contratti e limiti](CONFIGURATION.md#integrazione-dashboard-del-segretario)
-e il [piano architetturale](SECRETARY_ARCHITECTURE_PLAN.md): **il piano non è una
-checklist di funzionalità tutte completate**.
+- **Dialogo** — scrivi al bot in linguaggio naturale («quante fatture ho ricevuto a
+  settembre?», «chiudi tutto tranne la call con Omar», «cerca nelle mail il
+  preventivo del fornitore e scrivimi un riepilogo in `workspace/`»). I comandi
+  slash restano come gesti espliciti: `/conferma`, `/annulla`, `/invia`, `/scarta`,
+  `/fatto`, `/task`, `/attivita`, `/appuntamenti`, `/note`, `/regole`, `/fatture`.
+- **Posta in arrivo** — per ogni messaggio (anche a lotti) l'agente decide se è
+  rilevante, lo riassume, estrae al più attività con citazione esatta e **non
+  disturba** salvo emergenze reali (`AGENT_NOTIFY_MAX_PER_DAY`, default 5).
+- **Riepilogo serale** — a `DIGEST_TIME` l'agente scrive il recap delle ultime 24 ore
+  e il piano delle successive 48; il server sigilla testo e fonti prima dell'invio.
 
-Nuovo profilo capabilities: fatture/ZIP disattivati. Upgrade legacy: flag
-espliciti preservati, mancanti compatibili col profilo legacy; provenienza
-sconosciuta trattata in pausa per le funzionalità opzionali. Verificare i flussi
-prima di riattivare: nessuna riscrittura delle deleghe o inferenza dallo storico.
-Quiet hours supportate solo per notifiche delle revisioni (`22–08`, configurabili),
-non globali. Modalità globale observe/active e tetto monetario AI sono pianificati;
-i cap Worker sono reali ma non limiti monetari: default **200 chiamate/giorno,
-500000 token riservati/addebitati al giorno UTC, due richieste in volo, 65536 token
-massimi di output per richiesta**. Ogni retry consuma una nuova riserva senza
-rimborso; ledger/DB/lease non disponibili bloccano le richieste Worker. Le chiamate
-dirette/legacy e il digest periodico fuori dai job non hanno questo budget
-persistente. Non è una garanzia che ogni percorso AI legacy sia protetto.
+## Cosa NON decide mai il modello
 
-## Controlli proprietario e provenienza
+Il modello **non è autorità**: lo è la provenienza nativa verificata dal server.
 
-I nuovi piani proprietario di pratiche/responsabilità sono v2: il server conserva
-le fonti native di **tutti gli input esportati**, inclusi snapshot e storia
-(`input_sources`, `input_versions`), con piani applicati e ricevute immutabili.
-Le letture derivate seguono anche revisioni runtime precedenti; fonti
-mancanti/cicliche/non verificabili non autorizzano invio al modello. I vecchi
-piani v1 non diventano prova di consenso. Il resolver condiviso owner/riconciliazione
-task segue origini e tutte le evidenze applicate delle attività, non solo
-l'ultima: revocare una fonte applicata blocca quel contesto; proposte non applicate
-non contribuiscono. Questo **non completa** la provenienza degli input modello
-dei vecchi piani attività/memoria o il modello di conflitti della memoria.
+- **Chi sei**: solo il testo nativo, diretto, non inoltrato, in chat privata dal bot
+  vale come tuo ordine. Email, inoltri, storico, altre chat e contenuti degli
+  allegati sono **dati non fidati**: possono informare una risposta, mai comandare.
+- **Cosa legge**: i consensi per canale (testo / media / storico) sono incorporati
+  nelle viste `agent.*` e rivalutati **a ogni query**; revocarne uno nasconde subito
+  i dati, anche a una sessione già aperta. Default: tutto negato.
+- **Come scrive**: strumenti tipizzati, argomenti validati, ricevuta idempotente
+  nella stessa transazione dell'effetto; ogni scrittura sul tuo conto richiede una tua
+  frase esatta (citazione verificata dal server sul messaggio archiviato).
+- **Effetti verso l'esterno**: un tentativo è registrato **prima** dell'I/O; un esito
+  incerto non viene mai rinviato alla cieca; «accettato» non significa «consegnato».
+  Calendar = grant sigillato su payload e calendario di destinazione; email = bozza +
+  tuo `/invia` + modalità `SECRETARY_MODE=active`.
+- **Sicurezza SQL**: una sola `SELECT` per volta, solo relazioni `agent.*`, funzioni
+  consentite, transazione READ ONLY con timeout, cursore con tetto di righe e
+  `SET LOCAL ROLE` a un ruolo `agent_ro` che vede **solo** quelle viste. L'app lo crea da
+  sola al primo avvio (DB locale); con un DB esterno senza `CREATEROLE` il DBA esegue due
+  istruzioni una tantum ([`deploy/agent_ro.sql`](deploy/agent_ro.sql)).
+- **La chiave OpenRouter non entra mai nel runtime dell'agente**: ogni richiesta passa
+  da un gateway locale (loopback, bearer monouso per turno) che applica il ledger
+  di budget (`AI_BUDGET_*`), limita l'output e legge costo/token reali.
 
-- **Accetta collegamento**: POST `/api/secretary/runtime/links/<id>/accept`, solo
-  `expected_version` della proposta mostrata. Fonte, revisione e ambito sono
-  ricontrollati; avanza la pratica, invalida approvazioni dipendenti e accoda una
-  revisione. Non concede una delega né collega qualsiasi risultato di ricerca.
-- **Presa in carico**: POST
-  `/api/secretary/runtime/practices/<id>/acknowledge`, `expected_version` della
-  pratica e `attention_hash` mostrato. Silenzia l'attenzione invariata, non chiude
-  la pratica né autorizza effetti; notifiche superate/riconosciute sono fermate
-  dai controlli prima dell'invio. Entrambi i controlli richiedono login/CSRF/origine
-  e identità proprietario costruita dal backend, mai autorità dal JSON.
-- **Riprova media bloccati dal consenso**, dalla fonte corrente aperta: POST
-  `/api/media/retry-blocked`, `message_id,expected_channel`. Occorrono entrambi
-  i consensi testo/media; solo fonti correnti idonee, non storico o tentativi
-  provider già registrati. Massimo 20 allegati/richiesta e tre reset/allegato.
-  Concedere il consenso non recupera automaticamente i job bloccati.
-- **Email di solo testo**: prepara con POST `/api/secretary/emails`, controlla
-  GET `/api/secretary/emails/<id>`, approva il payload esatto e poi scegli
-  separatamente POST `/api/secretary/emails/<id>/dispatch`. Mittente configurato
-  esplicito, oggetto fisso **Messaggio approvato**, destinatario/testo, versione,
-  scadenza e ricevuta sono vincolati. Approvare non accoda/invia; allegati e thread
-  non supportati. GET `/api/secretary/execution` mostra esiti limitati, non prova
-  consegna/lettura. La ricevuta UI resta solo nel DOM. Dopo un tentativo persistito,
-  timeout/crash/esito incerto non vengono reinviati alla cieca: serve riconciliare.
+L'AI può sbagliare e i contenuti analizzati vengono inviati al provider: valuta
+privacy e costi. Non è un sistema di emergenza.
 
-Calendar usa grant **v3**: testo proprietario nativo corrente, evento/stato,
-ID Calendar esplicito configurato, fuso e tempi di creazione risolti
-(inizio/fine/durata/promemoria) sono sigillati e ricontrollati prima dell'I/O.
-Grant scaduti o legacy senza target sono negati; replay non rinnova il consenso
-né lo ricollega a un nuovo calendario/fuso. Serve nuova autorizzazione corrente.
-`CALENDAR_EXTERNAL_AUTO`/`CALENDAR_TRUSTED_SENDERS` non abilitano più auto-creazione
-per etichetta mittente. Anche notifiche/risposte/ZIP del pipeline persistono il
-tentativo prima dell'invio: attempted/uncertain richiedono riconciliazione, non
-resend cieco. Segnare spam/newsletter come letti è solo comportamento del
-classificatore privato legacy, non dell'ingest attuale.
+## La dashboard
 
-## Roadmap ancora aperta
+Rete locale, login dedicato, CSRF e same-origin. Pagine: **Panoramica** (flussi,
+traffico, salute dei connettori), **Agente** (esecuzioni recenti, strumenti usati,
+bozze email; nessun prompt né risposta del modello), **Permessi AI** (consensi e
+budget AI con barre di saturazione, recupero dei media bloccati), **Impostazioni**
+(integrazioni e modelli) e **Archivio e file** (dati, fatture, `workspace/`).
+La dashboard non decide né invia nulla per conto dell'agente: bozze e
+sincronizzazioni passano dal tuo gesto su Telegram.
 
-Restano: workflow/dipendenze arbitrari (parzialmente coperti dal worker research,
-read-only); provenienza completa degli input dei vecchi piani attività/memoria;
-collegamento generale di evidenze esistenti alle pratiche dal retrieval;
-condizioni di stop eseguibili (il testo salvato non è un motore di regole);
-Calendar update/disponibilità/drift; allegati e invii email in thread;
-tetto monetario/modalità e quiet hours globali; erase/export privacy coordinati;
-prova completa di backup ripristinato, validazione in produzione e valutazione
-semantica/qualitativa. La memoria tipizzata (replace-on-conflict per topic) è
-integrata.
-L'integrazione limitata non dichiara il piano completato. Risultati correnti della
-suite completa saranno aggiunti dal run principale: questa modifica documentale
-non esegue test o terminale e non legge dati utente.
+## Stato e limiti
 
-# Dialogo continuo con la segretaria
+- `main()` avvia sei worker durevoli: `analysis` (posta in arrivo), `owner`
+  (dialogo), `digest`, `action` (unico punto con effetti esterni), `media`,
+  `knowledge` (estrazione documenti). Lease di 15 minuti, heartbeat di 30 secondi,
+  massimo otto tentativi con backoff.
+- L'agente lavora a **sessioni effimere**: ogni turno ricostruisce il contesto dal DB
+  e la sessione viene cancellata, così nessun testo di terzi resta nella cronologia
+  del runtime. Nel dialogo le risposte precedenti dell'assistente rientrano solo
+  per `AGENT_HISTORY_RESPONSE_MINUTES` (default 20): oltre quel tempo l'agente
+  rilegge i dati con gli strumenti.
+- Non c'è esecuzione di workflow arbitrari, shell, né accesso ad altro filesystem
+  che `/data`. Il runtime parte in modalità `empty` e rifiuta ogni permesso che non
+  sia uno strumento dell'agente.
+- Restano aperti: aggiornamento/disponibilità Calendar e drift remoto, email in
+  thread e con allegati, erase nei backup, prova di ripristino completa e
+  valutazione qualitativa dell'agente sul tuo archivio.
 
-La chat naturale Telegram del proprietario usa uno storico persistente, un
-riepilogo progressivo e il recupero mirato dei vecchi dialoghi. Note personali,
-decisioni e procedure restano distinte da attività, scadenze e appuntamenti.
-I nuovi schemi vengono creati con migrazioni additive al normale avvio.
-Architettura, promemoria, garanzie di retry e limiti: [OWNER_DIALOGUE.md](OWNER_DIALOGUE.md).
+Dettaglio dei flussi: [AGENT_FLOWS.md](AGENT_FLOWS.md). Baseline per chi sviluppa:
+[AGENTS.md](AGENTS.md). Configurazione: [CONFIGURATION.md](CONFIGURATION.md).
+Operatività: [OPERATIONS.md](OPERATIONS.md).
+
+## Nuove installazioni e aggiornamenti
+
+Fatture e ZIP sono opzionali e partono disattivati. Un aggiornamento da una versione
+precedente conserva i flag espliciti e **non** concede consensi AI. Le tabelle del vecchio
+segretario (pratiche, responsabilità, revisioni, esecuzione email) non vengono più
+usate: restano nel DB finché non le rimuovi tu con
+[`deploy/drop_legacy_tables.sql`](deploy/drop_legacy_tables.sql), da eseguire solo dopo un backup.
 
 # Importazione storica una tantum
 
@@ -194,85 +168,48 @@ configurazione. Attende fino a 120 secondi con Compose `--wait`.
 Non certifica i connettori: dashboard distingue configurazione, interruttore
 enabled e salute osservata dai worker. `configured` non significa ready.
 
-# Pi Secretary
+## Riepilogo serale e promemoria
 
-## Digest giornaliero e piano delle prossime 48 ore
+A `DIGEST_TIME`, nel `TIMEZONE` configurato, l'agente scrive il recap delle ultime
+24 ore e il piano delle successive 48, anche senza nuovi messaggi (un job durevole
+`digest:AAAA-MM-GG`: ripeterlo o riavviare non crea copie). Le scadenze personali
+(`/task`, date-only → promemoria alle 09:00 locali; orario preciso → alla scadenza,
+oppure l'orario richiesto) sono aggiunte in una sezione **deterministica**, quindi
+compaiono anche se il modello le omette.
 
-A `DIGEST_TIME`, nel `TIMEZONE` configurato, il bot invia il recap delle ultime
-24 ore e un piano delle successive 48 ore, anche in assenza di nuovi messaggi.
-Il planner locale consulta agenda interna, Google Calendar quando disponibile e
-attività aperte pertinenti: arretrate, in scadenza entro 48 ore e senza scadenza,
-incluse quelle nate da comunicazioni più vecchie. Il testo AI usa solo il
-sottoinsieme ammesso dai controlli di fonte: non promette copertura completa né
-una verifica generale di disponibilità/conflitti Calendar.
+- Il recap usa solo i dati che i tuoi consensi rendono leggibili; senza fonti
+  consentite il testo è neutro e **non si chiama il modello**.
+- Creare un'attività, anche con `/task`, **non autorizza Calendar**: gli eventi
+  derivati restano proposte locali (`/conferma ID`).
+- Il testo è sigillato con i messaggi che il modello ha potuto leggere: se prima
+  dell'invio un consenso viene revocato, l'invio si ferma e il lavoro si ripete.
+- Accodato/accettato non significa consegnato; un invio incerto richiede
+  riconciliazione, non un reinvio automatico.
 
-- Il planner delle attività esterne preesistenti può proporre eventi locali di
-  15 minuti con popup 30 minuti prima e promemoria 24 ore prima (subito se già
-  entro le 24 ore). Gli arretrati non cambiano scadenza. Le attività proprietario
-  usano invece promemoria espliciti o, per default, alle 09:00 locali per sole
-  date e alla scadenza per orari precisi: non inventano un orario di deadline.
-- Eventi e promemoria hanno chiavi persistenti: ripetere il digest o riavviare
-  non crea nuove copie. Gli appuntamenti già associati al messaggio sono mantenuti.
-- Creare un task, anche con `/task`, **non autorizza Calendar**. Gli eventuali
-  eventi derivati restano proposte locali, da autorizzare separatamente con
-  `/conferma ID`; le attività proprietario non entrano nel vecchio planner
-  automatico delle scadenze. Nessuna auto-creazione per etichetta mittente.
-- Per attività senza scadenza l'AI può suggerire prossimi passi, senza inventare
-  date o dichiarare appuntamenti salvati; non certifica assenza di conflitti.
-- `/attivita` elenca le attività aperte; `/fatto ID` le chiude. I promemoria ancora
-  in coda verificano che l'attività sia aperta prima di inviarla.
+## Attività e promemoria
 
-Il flusso dashboard `digest` deve essere attivo. I dati inviati al modello sono
-filtrati secondo le fonti ammesse: non tutto l'archivio/Calendar remoto viene
-esportato all'AI. Il recap o fallback è accodato come notifica persistente;
-accodato/accettato non significa consegnato. Un invio attempted/uncertain richiede
-riconciliazione, non un reinvio automatico. La generazione periodica del digest
-fuori dai job non ha il cap AI persistente Worker.
-
-## Aggiornamento delle attività dalle nuove comunicazioni
-
-I nuovi input correnti acquisiti dai flussi attivi possono essere confrontati con
-le attività aperte, inclusi messaggi Telegram personali e WhatsApp inviati, solo
-con fonti/consensi ammessi. La valutazione avviene in una coda persistente
-separata, con tentativi limitati in caso di errore.
-
-- Completamenti e modifiche del titolo automatici richiedono testo proprietario
-  nativo corrente, evidenza esplicita/certa e collegamento univoco all'attività.
-  Comunicazioni esterne e messaggi personali/WhatsApp inviati restano evidenza
-  per proposte, non autorità per applicare la modifica.
-- Dubbi, corrispondenze multiple, annullamenti, cambi di scadenza e deduzioni
-  esclusivamente visive richiedono conferma via bot, anche con soglia notifiche `mai`.
-- `/proposte` elenca le richieste pendenti; `/conferma_attivita ID` applica una
-  proposta e `/rifiuta_attivita ID` la respinge. Gli ID sono quelli delle proposte,
-  distinti dagli ID delle attività e degli appuntamenti.
-- Ogni modifica conserva evidenza e versione. Una proposta superata da modifiche
-  all'attività o al messaggio sorgente non viene applicata.
-- `/fatto ID` usa lo stesso percorso: chiude l'attività e ritira i promemoria e
-  aggiorna gli eventi derivati localmente. Una cancellazione Calendar remota
-  richiede un nuovo grant esplicito `/annulla ID`: chiudere il task non basta.
-  Gli appuntamenti indipendenti del messaggio originale non sono cancellati.
-- Gli import storici espliciti restano archivio, senza riconciliazione automatica
-  anche se recuperati nuovamente dai connettori. Questo vincolo di provenienza
-  vale per gli import effettuati dopo l'aggiornamento, non per vecchie righe già importate.
-
-Le migrazioni additive sono eseguite al prossimo avvio del servizio. Nessuna
-nuova credenziale o variabile `.env` è necessaria. La valutazione usa OpenRouter
-e può aumentare il consumo AI in proporzione ai messaggi e alle attività aperte.
+`/task titolo | 2026-11-03T10:00+01:00` (scadenza facoltativa), `/attivita`, `/fatto ID`
+funzionano senza modello. In dialogo l'agente può creare, modificare, completare o
+annullare attività, anche in blocco («chiudi tutto tranne…»), **solo** se la richiesta
+è una tua frase esatta nel messaggio corrente; le email non possono modificare le tue
+attività (solo proporne di nuove con citazione esatta, senza notifiche). Ogni modifica
+è versionata, con evidenza e ripulitura di promemoria/eventi derivati. Una cancellazione
+Calendar remota richiede un nuovo grant esplicito `/annulla ID`.
 
 ## AI: immagini native e audio separato
 
 `OPENROUTER_MODEL` **DEVE supportare nativamente input testo e immagini**
-(`image_url`); il default è `google/gemini-2.5-flash`. Le foto del proprietario
-possono essere inviate al modello principale, con didascalia e contesto ammesso,
-solo dopo i controlli di fonte/consenso. Vocali e immagini supportati acquisiti
+(`image_url`); il default è `google/gemini-2.5-flash`. Serve a descrivere le immagini
+e a trascrivere i media archiviati; **non** è il modello dell'agente (vedi `AGENT_MODEL`).
+Vocali e immagini supportati acquisiti
 da Telegram (bot/account) e WhatsApp possono essere convertiti in testo tramite
 la coda persistente `media` se la fonte nativa corrente consente testo e media.
 I vocali usano `OPENROUTER_AUDIO_MODEL`; le immagini usano il modello principale
 per estrarre testo visibile e una descrizione visiva strutturata, non semplici
 stringhe base64 né i token visivi interni del provider.
 Il risultato è salvato in PostgreSQL, tabella `media_transcripts`, collegata
-all'allegato, e riutilizzato da analisi/contesto del dialogo con i relativi gate;
-il digest attuale non carica trascrizioni.
+all'allegato, e l'agente lo legge dalla vista `agent.documents` (sempre dopo il consenso media);
+il digest non carica trascrizioni salvo che l'agente le apra con `attachment_text`.
 Originali e didascalie restano invariati. Sono inclusi messaggi inviati/ricevuti,
 recupero e import storico **nell'archivio/coda, non nel permesso a convertire**.
 Anche i media archiviati con byte/file possono essere accodati dalla migrazione:

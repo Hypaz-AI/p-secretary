@@ -53,22 +53,16 @@ INTERACTIVE = {
     'TELEGRAM_CHAT_ID': 'Autorizzazione proprietario: setup_telegram.py nel terminale; non modificabile dal web.',
 }
 
-# SECRETARY_MODE, QUIET_HOURS_START/END and AI_BUDGET_DAILY_COST now have real
-# runtime consumers (quiet_hours.sends_allowed/notification_ready, execution
-# third-party send gate, ai_budget._limits monetary cap) and are therefore
-# editable: the container restart applies them atomically.
+# SECRETARY_MODE e AI_BUDGET_DAILY_COST hanno consumatori reali (agent.outbox.sends_allowed,
+# ai_budget._limits): sono quindi modificabili e il riavvio del container li applica.
 SECRETARY_FIELDS = {
-    'SECRETARY_MODE': 'Modalità operativa: observe = solo proposte e bozze, nessun invio a terzi; active = consente gli invii esplicitamente approvati dal proprietario. Non è un interruttore di sicurezza: policy e approvazioni restano attive.',
-    'QUIET_HOURS_START': 'Ora locale 0–23 di inizio della fascia silenziosa globale; default 22. Le notifiche ordinarie non urgenti vengono rinviate, mai scartate. Inizio=fine disattiva la fascia.',
-    'QUIET_HOURS_END': 'Ora locale 0–23 di fine fascia silenziosa globale; default 8. Le emergenze (urgent o gravità alta) passano sempre subito.',
-    'RECONCILE_CONTEXT_CHARS': 'Caratteri del contesto sorgente per attività nel prompt di riconciliazione (200–20000); default 1200. Riduce token/latenza; la validazione delle citazioni resta sul testo completo.',
+    'SECRETARY_MODE': 'Modalità operativa: observe = solo bozze, nessun invio di email a terzi; active = consente di inviare le bozze che approvi tu con /invia. Non è un interruttore di sicurezza: policy e approvazioni restano attive.',
     'EFFECT_AUDIT_RETENTION_DAYS': 'Giorni di retention del registro di audit delle policy (0–3650); default 30, 0 disattiva. Le ricevute degli effetti restano immutabili: si pota solo il registro bulk dei reason-code.',
 }
-REVIEW_FIELDS = {
-    'SECRETARY_REVIEW_QUIET_START': 'Ora locale 0–23 di inizio silenzio per le sole notifiche di revisione; default 22.',
-    'SECRETARY_REVIEW_QUIET_END': 'Ora locale 0–23 di fine silenzio revisioni; default 8. Inizio=fine disattiva questa fascia.',
-    'SECRETARY_REVIEW_MIN_MINUTES': 'Intervallo minimo delle revisioni (5–10080 minuti), default 60; non un budget monetario.',
-    'SECRETARY_REVIEW_ACK_MINUTES': 'Attesa minima per riproporre contenuto di revisione invariato (1–10080 minuti), default 1440.',
+AGENT_FIELDS = {
+    'AGENT_MODEL': 'Modello OpenRouter dell\u2019agente (tool calling obbligatorio). Default openrouter/auto: OpenRouter sceglie il modello per ogni richiesta.',
+    'AGENT_WEB_MODEL': 'Modello OpenRouter che esegue la ricerca web dell\u2019agente (plugin web); vuoto usa OPENROUTER_MODEL.',
+    'AGENT_NOTIFY_MAX_PER_DAY': 'Massimo notifiche urgenti inviate dall\u2019agente per giorno locale (0–100); default 5. Le emergenze verso di te non superano mai questo tetto.',
 }
 BUDGET_FIELDS = {
     'AI_BUDGET_DAILY_CALLS': 'Tetto tentativi HTTP AI per giorno UTC nei Worker; default 200. Ogni retry conta.',
@@ -83,33 +77,12 @@ def _budget_supported():
     return importlib.util.find_spec('ai_budget') is not None
 
 
-def _review_runtime_supported():
-    return importlib.util.find_spec('secretary_runtime') is not None
-
-
-def secretary_support():
-    review_supported = _review_runtime_supported()
-    budget_supported = _budget_supported()
-    return {'features': [
-        dict(id='secretary_mode', supported=True, status='supported',
-             description='SECRETARY_MODE observe/active applicato da execution e quiet_hours: observe mantiene solo proposte/bozze, active consente gli invii esplicitamente approvati.'),
-        dict(id='quiet_hours', supported=review_supported,
-             status='supported' if review_supported else 'planned',
-             description='Quiet hours globali (QUIET_HOURS_START/END, 22–08) rinviano le notifiche ordinarie; revisioni con fascia separata SECRETARY_REVIEW_QUIET_START/END. Le emergenze passano sempre.'),
-           dict(id='ai_daily_budget', supported=budget_supported,
-               status='supported' if budget_supported else 'planned',
-            description='Tetti reali chiamate/token e concorrenza nei Worker via ai_budget; tetto monetario opzionale AI_BUDGET_DAILY_COST. Chiamate dirette legacy escluse.'),
-        dict(id='output_token_budget', supported=True, status='supported',
-             description='Budget output per richiesta e un retry su troncamento; non un limite di spesa.'),
-    ]}
-
-
 def field_metadata(key):
     """Public, static UI hints: never derive defaults/help from saved credentials."""
     descriptions = {
         'AGENT_NAME': 'Nome con cui si presenta l’assistente.',
         'OPENROUTER_API_KEY': 'Chiave da openrouter.ai/keys; controllare credito e limiti di spesa.',
-        'OPENROUTER_MODEL': 'Modello principale OpenRouter: DEVE supportare nativamente input testo e immagini (image_url).',
+        'OPENROUTER_MODEL': 'Modello OpenRouter per descrivere le immagini e leggere i media archiviati: DEVE supportare nativamente input testo e immagini (image_url). Non è il modello dell\u2019agente (vedi AGENT_MODEL).',
         'OPENROUTER_AUDIO_MODEL': 'Modello OpenRouter che trascrive gli audio Telegram in testo.',
         'DATABASE_URL': 'URI PostgreSQL con credenziali percent-encoded. Verifica web solo host pubblici senza query; DB privati e opzioni TLS dal terminale. Nessuna migrazione automatica.',
         'TELEGRAM_BOT_TOKEN': 'Token BotFather per dialogo e report; non legge l’account personale. Un nuovo bot richiede autorizzazione da terminale.',
@@ -131,7 +104,6 @@ def field_metadata(key):
         'TIMEZONE': 'Fuso IANA per appuntamenti e riepilogo, ad esempio Europe/Rome (gestisce l’ora legale).',
         'LANGUAGE': 'Lingua dell’assistente, ad esempio it per italiano o en per inglese.',
         'DIGEST_TIME': 'Ora locale HH:MM del riepilogo delle ultime 24 ore e del piano delle prossime 48 ore dalle attività aperte; richiede il bot Telegram.',
-        'NOTIFY_PRIORITY_THRESHOLD': 'Notifiche ordinarie: mai = solo digest; alta = solo priorità alta; media/bassa includono priorità inferiori. Le emergenze AI scavalcano sempre la soglia, anche mai.',
         'POLL_INTERVAL': 'Secondi tra i controlli email; 300 corrisponde a 5 minuti.',
         'INVOICE_DIR': 'Cartella fatture: <entità>/<aaaa-mm>/<nome>.pdf; vuoto usa il percorso predefinito.',
         'DATA_DIR': 'Cartella dati persistenti per appuntamenti e note; vuoto usa il percorso predefinito.',
@@ -144,21 +116,15 @@ def field_metadata(key):
         'WA_CHROMIUM_PATH': 'Percorso del Chromium di sistema usato dal ponte WhatsApp.',
     }
     result = {'type': 'password' if secret(key) else 'text',
-              'description': SECRETARY_FIELDS.get(key, REVIEW_FIELDS.get(key, BUDGET_FIELDS.get(key, descriptions.get(key, ''))))}
+              'description': SECRETARY_FIELDS.get(key, AGENT_FIELDS.get(key, BUDGET_FIELDS.get(key, descriptions.get(key, ''))))}
     if key in SECRETARY_FIELDS:
         result.update(supported=True, status='supported')
     if key == 'SECRETARY_MODE':
         result.update(type='select', options=['observe', 'active'])
-    if key in ('QUIET_HOURS_START', 'QUIET_HOURS_END'):
-        result.update(type='number', min=0, max=23, step=1, supported=True)
-    if key == 'RECONCILE_CONTEXT_CHARS':
-        result.update(type='number', min=200, max=20000, step=100, supported=True)
     if key == 'EFFECT_AUDIT_RETENTION_DAYS':
         result.update(type='number', min=0, max=3650, step=1, supported=True)
-    if key in REVIEW_FIELDS:
-        result.update(type='number', min=0 if key.endswith(('_START', '_END')) else 5 if key.endswith('_MIN_MINUTES') else 1,
-                      max=23 if key.endswith(('_START', '_END')) else 10080, step=1,
-                      supported=_review_runtime_supported())
+    if key == 'AGENT_NOTIFY_MAX_PER_DAY':
+        result.update(type='number', min=0, max=100, step=1, supported=True)
     if key in BUDGET_FIELDS:
         result.update(type='number', min=1,
                       max=65536 if key == 'AI_BUDGET_MAX_OUTPUT_TOKENS' else 2147483647,
@@ -193,8 +159,6 @@ def field_metadata(key):
         }[invoice[1]]
     if key in ('GCAL_ENABLED', 'WHATSAPP_ENABLED', 'TELEGRAM_USER_ENABLED', 'DASHBOARD_COOKIE_SECURE'):
         result.update(type='select', options=['true', 'false'])
-    if key == 'NOTIFY_PRIORITY_THRESHOLD':
-        result.update(type='select', options=['mai', 'alta', 'media', 'bassa'])
     if key.endswith(('_PORT', '_LIMIT', '_INTERVAL', '_DURATION')) or key == 'TELEGRAM_API_ID':
         result.update(type='number', min=1, max=65535, step=1)
         if key == 'TELEGRAM_API_ID':
@@ -210,15 +174,14 @@ def schema():
     groups = {
         'AI · limiti dei Worker (chiamate, token, concorrenza)': [key for key in BUDGET_FIELDS if key != 'AI_BUDGET_DAILY_COST'],
         'AI · tetto di spesa in denaro (opzionale)': ['AI_BUDGET_DAILY_COST'],
-        'Nome assistente e modello AI': ['AGENT_NAME', 'OPENROUTER_API_KEY', 'OPENROUTER_MODEL',
-                  'OPENROUTER_AUDIO_MODEL'],
+        'Nome assistente e modelli AI': ['AGENT_NAME', 'OPENROUTER_API_KEY', 'AGENT_MODEL', 'AGENT_WEB_MODEL',
+                  'AGENT_NOTIFY_MAX_PER_DAY', 'OPENROUTER_MODEL', 'OPENROUTER_AUDIO_MODEL'],
         'Database': ['DATABASE_URL'],
         'Telegram e WhatsApp': ['TELEGRAM_BOT_TOKEN', *INTERACTIVE,
             'TELEGRAM_USER_DIALOG_LIMIT', 'TELEGRAM_USER_MESSAGE_LIMIT', 'TELEGRAM_USER_RECOVERY_INTERVAL'],
         'Calendar': ['GCAL_ENABLED', 'GCAL_CALENDAR_ID', 'GCAL_EVENT_DURATION', 'GCAL_SERVICE_ACCOUNT_JSON'],
-        'Preferenze': ['TIMEZONE', 'LANGUAGE', 'DIGEST_TIME', 'NOTIFY_PRIORITY_THRESHOLD', 'POLL_INTERVAL'],
-        'Segretario · modalità e quiet hours': list(SECRETARY_FIELDS),
-        'Segretario · notifiche di revisione': list(REVIEW_FIELDS),
+        'Preferenze': ['TIMEZONE', 'LANGUAGE', 'DIGEST_TIME', 'POLL_INTERVAL'],
+        'Segretario · modalità e retention': list(SECRETARY_FIELDS),
         'Deployment (sola lettura)': sorted(DEPLOYMENT),
     }
     for i in range(1, 51):
@@ -238,8 +201,6 @@ def secret(key):
 
 
 def readonly(key):
-    if key in REVIEW_FIELDS and not _review_runtime_supported():
-        return 'Modulo secretary_runtime non installato; impostazione non applicabile.'
     if key in BUDGET_FIELDS and not _budget_supported():
         return 'Modulo ai_budget non installato; impostazione non applicabile.'
     if key in DEPLOYMENT or key in config.DEPLOYMENT_ENV_KEYS:
@@ -394,10 +355,8 @@ def validate(changes, values):
                 raise ValueError('Tetto di spesa non valido: usare un importo decimale, ad esempio 5.00') from None
             if not daily_cost.is_finite() or daily_cost < 0 or daily_cost > Decimal('1e9'):
                 raise ValueError('Tetto di spesa fuori intervallo (0 – 1e9); 0 disattiva il tetto monetario')
-        if key in ('QUIET_HOURS_START', 'QUIET_HOURS_END') and (not value.isdecimal() or not 0 <= int(value) <= 23):
-            raise ValueError('Ora quiet hours fuori intervallo 0–23')
-        if key == 'RECONCILE_CONTEXT_CHARS' and (not value.isdecimal() or not 200 <= int(value) <= 20000):
-            raise ValueError('Contesto riconciliazione fuori intervallo 200–20000')
+        if key == 'AGENT_NOTIFY_MAX_PER_DAY' and (not value.isdecimal() or not 0 <= int(value) <= 100):
+            raise ValueError('Tetto notifiche fuori intervallo 0–100')
         if key == 'EFFECT_AUDIT_RETENTION_DAYS' and (not value.isdecimal() or not 0 <= int(value) <= 3650):
             raise ValueError('Retention audit fuori intervallo 0–3650')
         if key == 'SECRETARY_MODE' and value not in ('observe', 'active'):
@@ -412,8 +371,6 @@ def validate(changes, values):
         if key.endswith(('_PORT', '_LIMIT', '_INTERVAL', '_DURATION')) or key == 'POLL_INTERVAL':
             if not value.isdecimal() or not 1 <= int(value) <= 65535:
                 raise ValueError('Intero fuori intervallo: ' + key)
-        if key == 'NOTIFY_PRIORITY_THRESHOLD' and value not in ('mai', 'bassa', 'media', 'alta'):
-            raise ValueError('Soglia non valida')
         if re.fullmatch(r'INVOICE_ENTITY[1-4]_NAME', key) and value and not re.fullmatch(r'[A-Za-z0-9_-]+', value):
             raise ValueError('Nome cartella entità non valido')
     if 'DATABASE_URL' in changes:

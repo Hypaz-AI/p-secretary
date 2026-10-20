@@ -115,22 +115,30 @@ class MediaArchiveTests(unittest.TestCase):
         self.assertEqual(attachments[0]['id'], 8)
         self.assertEqual(attachments[0]['transcript'], 'Descrizione')
 
-    def test_whatsapp_analysis_reads_persisted_voice_and_image(self):
+    def test_whatsapp_inbox_turn_reads_persisted_voice_and_image(self):
+        """L'agente riceve la voce trascritta e il testo dell'immagine già persistiti, dopo i consensi."""
+        from agent import turns
         self.conn.execute.return_value.fetchone.return_value = None
+        self.conn.execute.return_value.fetchall.return_value = []
         attachments = [dict(id=8, content_type='audio/ogg', transcript='voce'),
                        dict(id=9, content_type='image/png', transcript='scadenza 20 ottobre')]
+        seen = {}
+
+        class Fake:
+            def run(self, state, system, prompt, scope, timeout):
+                seen.update(prompt=prompt, scope=scope)
+                return ''
         with patch.object(pipeline, 'load_message', return_value=(
                 ('whatsapp', 'sender', 'subject', 'caption', 'source'), attachments)), patch(
             'flows.enabled', return_value=True), patch.object(
-            pipeline.policy, 'can_operate', return_value=True) as allowed, patch(
-            'brain.analyze', return_value={'category': 'errore'}) as analyze:
-            with self.assertRaisesRegex(RuntimeError, 'Analysis unavailable'):
-                pipeline.analyze({'message_id': 42})
-        self.assertIn('voce', analyze.call_args.args[2])
-        self.assertIn('scadenza 20 ottobre', analyze.call_args.args[2])
-        self.assertEqual([c.args for c in allowed.call_args_list],
-                 [(self.conn, 42, effect) for effect in
-                  ('extract', 'ai_text', 'ai_media', 'ai_text', 'ai_media')])
+            pipeline.policy, 'can_operate', return_value=True) as allowed:
+            with self.assertRaisesRegex(RuntimeError, 'Triage incompleto'):
+                turns.inbox_job({'message_id': 42}, runtime=Fake())
+        self.assertIn('voce', seen['prompt'])
+        self.assertIn('scadenza 20 ottobre', seen['prompt'])
+        self.assertEqual(seen['scope'], 'agent_inbox')
+        self.assertEqual([c.args for c in allowed.call_args_list][:3],
+                         [(self.conn, 42, effect) for effect in ('extract', 'ai_text', 'ai_media')])
 
     def test_migration_backfills_existing_media_without_provider_calls(self):
         self.conn.execute.return_value.fetchone.return_value = None

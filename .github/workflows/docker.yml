@@ -13,11 +13,12 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - name: Explicit dashboard, execution and AI budget security contracts
+      - name: Explicit agent, dashboard and AI budget security contracts
         run: |
           env -i PATH="$PATH" HOME="$RUNNER_TEMP" \
             PI_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
-            python -m unittest -v test_secretary_dashboard test_secretary_execution test_secretary_budget
+            python -m unittest -v test_agent_sqlguard test_agent_fsbox test_agent_gateway test_agent_owner \
+              test_dashboard_api test_secretary_budget test_secretary_policy
       - name: Full offline discovery (no deployment dotenv or inherited credentials)
         run: |
           env -i PATH="$PATH" HOME="$RUNNER_TEMP" \

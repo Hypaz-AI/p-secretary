@@ -22,9 +22,8 @@ class OwnerReminderTests(unittest.TestCase):
         network = patch('urllib.request.urlopen', side_effect=AssertionError('Network forbidden'))
         network.start()
         self.addCleanup(network.stop)
-        # Scheduling/labels are isolated from practice reviews and receipt SQL.
-        self.enterContext(patch('secretary.due_reviews'))
-        self.enterContext(patch('secretary_runtime.backlog'))
+        # Scheduling/labels are isolated from receipt SQL and agent retention.
+        self.enterContext(patch('agent.schema.prune'))
         self.enterContext(patch('capabilities.enabled', return_value=False))
         self.enterContext(patch('policy.can_operate', side_effect=lambda conn, mid, effect, **kw:
             effect == 'notify' and mid == 42))
@@ -214,14 +213,9 @@ class OwnerReminderTests(unittest.TestCase):
         self.assertIn('owner_origin_message IS NULL', sql)
         self.assertIn('owner_remind_at IS NULL', sql)
 
-    def test_existing_manual_completion_path_fences_owner_delivery(self):
-        self.conn.execute.return_value.fetchone.return_value = ('open', 3)
-        with patch('task_reconciliation.apply_change', return_value='applied') as apply:
-            self.assertTrue(tr.close_task(self.conn, 7))
-        change = apply.call_args.args[1]
-        self.assertEqual(change['expected_version'], 3)
-        self.assertEqual(change['operation'], 'complete')
-        # A worker may already have claimed v3 before completion committed.
+    def test_stale_owner_delivery_is_fenced_after_completion(self):
+        # A worker may already have claimed v3 before completion committed:
+        # the task is no longer open at the version, so nothing is sent.
         self.conn.execute.return_value.fetchone.return_value = None
         with patch('connectors.telegram.notify') as notify:
             pipeline.action(self.payload(datetime.now(timezone.utc) - timedelta(minutes=1)))
@@ -281,46 +275,28 @@ class OwnerReminderTests(unittest.TestCase):
         self.assertIn('owner_remind_at <= horizon.until', sql)
 
     def test_attivita_labels_date_only_default_and_past_date(self):
+        from agent import owner
         self.conn.execute.return_value.fetchall.return_value = [
-            (7, 'Pagare fattura', None, None, date(2000, 1, 1), None, 42)]
-        with patch('task_reconciliation.owner_commands', return_value=False), \
-             patch('connectors.telegram.notify', return_value=True) as notify:
-            self.assertTrue(pipeline.owner_commands('/attivita'))
-        text = notify.call_args.args[0]
-        for label in ('2000-01-01', 'solo data', 'default 09:00 locale', 'arretrata', 'fonte #42'):
+            (7, 'Pagare fattura', None, date(2000, 1, 1), None)]
+        text = owner._effect(self.conn, 42, '/attivita', '', None)
+        for label in ('#7 Pagare fattura', '2000-01-01', 'solo data', 'default 09:00 locale', 'arretrata'):
             self.assertIn(label, text)
 
     def test_digest_surfaces_date_default_even_if_ai_omits_task(self):
         task = dict(self.task, owner_deadline_date=date(2000, 1, 1))
-        self.conn.execute.return_value.fetchall.return_value = []
-        # No attachments; enabled digest flow; no existing sealed notification.
-        self.conn.execute.return_value.fetchone.side_effect = [None, (True,), None]
-        with patch('digest.datetime') as clock, \
-             patch('config.TELEGRAM_CHAT_ID', '7'), \
-             patch('policy.can_operate', side_effect=lambda conn, mid, effect, **kw:
-                   mid == 42 and effect == 'ai_text') as grant, \
-             patch('db.pending_tasks', return_value=[task]), \
-             patch('digest.plan_pending_tasks'), patch('db.appointments_between', return_value=[]), \
-             patch('brain.summarize_day', return_value='Recap') as summary, \
-             patch('jobs.enqueue', return_value=(1,)) as enqueue:
-            clock.now.return_value = self.now
-            self.assertTrue(digest.send_daily_digest())
-        enqueue.assert_called_once()
-        payload = enqueue.call_args.args[3]
-        self.assertEqual(payload['system'], 'digest')
-        self.assertFalse(payload['html'])
-        text = payload['text']
-        for label in ('#7', '2000-01-01', 'solo data', 'default 09:00 locale', 'arretrata'):
-            self.assertIn(label, text)
-        summary.assert_called_once()
-        self.assertIn('solo data', summary.call_args.kwargs['tasks'][0]['title'])
-        self.assertEqual([c.args[1:] for c in grant.call_args_list], [(42, 'ai_text')] * 3)
-        seals = [c.args[1] for c in self.conn.execute.call_args_list
-                 if 'INSERT INTO system_notifications' in c.args[0]]
-        self.assertEqual(len(seals), 1)
-        self.assertEqual(seals[0][0], payload['system_authorization'])
-        self.assertEqual(seals[0][2], '7')
-        self.assertEqual(seals[0][-2:], ([42], []))
+        queued = {}
+        with patch('flows.enabled', return_value=True), \
+             patch('db.pending_tasks', return_value=[task]), patch('db.appointments_between', return_value=[]), \
+             patch('digest.plan_pending_tasks'), patch('digest.witnesses', return_value=([42], [])), \
+             patch('agent.turns.digest_text', return_value=('Recap', [])), \
+             patch('digest._seal_sources', return_value=([42], [])), \
+             patch('digest._queue_notification', side_effect=lambda conn, day, text, sources, media:
+                   queued.update(day=day, text=text, sources=sources, media=media)):
+            digest.run({'day': '2099-01-01'})
+        # Anche se il modello omette l'attività, la sezione deterministica la riporta.
+        for label in ('Recap', '#7', '2000-01-01', 'solo data', 'default 09:00 locale', 'arretrata'):
+            self.assertIn(label, queued['text'])
+        self.assertEqual((queued['day'], queued['sources'], queued['media']), ('2099-01-01', [42], []))
         self.assertIsNone(task['deadline'])
 
 

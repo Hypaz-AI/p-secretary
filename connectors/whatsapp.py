@@ -89,6 +89,29 @@ function rememberChat(chat) {
 function cutoff() {
   return Math.max(Number(process.env.WA_HISTORY_CUTOFF || 0), 0);
 }
+// I media vanno SEMPRE salvati: un fallimento non deve passare in silenzio né essere definitivo.
+// downloadMedia() risolve anche con undefined quando il file non è (ancora) disponibile.
+const MEDIA_ATTEMPTS = 3;
+const MEDIA_ENTRY_RETRIES = 6;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function fetchMedia(msg) {
+  let reason = 'download_failed';
+  for (let attempt = 0; attempt < MEDIA_ATTEMPTS; attempt++) {
+    if (attempt) await sleep(1500 * attempt);
+    try {
+      const media = await msg.downloadMedia();
+      if (media && media.data) return media;
+      reason = 'unavailable';
+    } catch (e) {reason = 'download_failed';}
+  }
+  const error = new Error(reason);
+  error.reason = reason;
+  throw error;
+}
+function mediaFailure(entry, reason) {
+  entry.media_error = reason;
+  entry.media_attempts = (entry.media_attempts || 0) + 1;
+}
 async function archive(msg, recovered_cached=false) {
   if (AUTH_ONLY || !SPOOL) return;
   const id = msg.id && (msg.id._serialized || msg.id.id);
@@ -96,16 +119,19 @@ async function archive(msg, recovered_cached=false) {
       (HISTORY_IMPORT && msg.timestamp >= Number(process.env.WA_HISTORY_END))) return;
   if (INFLIGHT.has(id)) return;
   const finalPath = path.join(SPOOL, Buffer.from(id).toString('hex')+'.json');
+  let previous = null;
   if (fs.existsSync(finalPath)) {
-    const previous = JSON.parse(fs.readFileSync(finalPath,'utf8'));
-    if (previous.enriched && previous.names_version === 2) return;
+    previous = JSON.parse(fs.readFileSync(finalPath,'utf8'));
+    const mediaPending = previous.media_error && (previous.media_attempts || 0) < MEDIA_ENTRY_RETRIES;
+    if (previous.enriched && previous.names_version === 2 && !mediaPending) return;
   }
   INFLIGHT.add(id);
   try {
   const entry = {id, timestamp:msg.timestamp, chat_id:msg.fromMe?msg.to:msg.from,
     author:msg.author || msg.from, from:msg.from, from_name:msg.from,
     author_name:null, from_me:!!msg.fromMe, text:msg.body || '', attachments:[], recovered_cached,
-    enriched:false, version:require('crypto').randomUUID()};
+    enriched:false, version:require('crypto').randomUUID(),
+    media_attempts:previous && previous.media_attempts || 0};
   if (HISTORY_IMPORT) entry.self = client.info.wid._serialized;
   const dest = path.join(SPOOL, Buffer.from(id).toString('hex')+'.json');
   const persist = () => {fs.writeFileSync(dest+'.tmp', JSON.stringify(entry));fs.renameSync(dest+'.tmp', dest);};
@@ -131,15 +157,28 @@ async function archive(msg, recovered_cached=false) {
   }
   if (group) entry.chat_name_rank = named(entry.from_name) ? 3 : 0;
   entry.names_version = 2;
-  if(msg.hasMedia && MEDIA_DIR) {
-    try {
-      const media=await msg.downloadMedia();
-      const safe=(id+'_'+(media.filename||'file')).replace(/[^\w.-]/g,'_');
-      const target=path.join(MEDIA_DIR,safe);
-      fs.writeFileSync(target,Buffer.from(media.data,'base64'));
-      entry.attachments.push({filename:media.filename||safe,content_type:media.mimetype,path:target,
-        duration:msg.duration || msg._data?.duration || null});
-    } catch(e) {entry.media_error=true;if(HISTORY_IMPORT) throw e;}
+  if (msg.hasMedia) {
+    entry.has_media = true;
+    entry.media_type = typeof msg.type === 'string' ? msg.type : null;
+    if (!MEDIA_DIR) mediaFailure(entry, 'storage_unavailable');
+    else {
+      try {
+        const media = await fetchMedia(msg);
+        const bytes = Buffer.from(media.data, 'base64');
+        if (!bytes.length) {const empty = new Error('empty'); empty.reason = 'empty'; throw empty;}
+        const safe=(id+'_'+(media.filename||'file')).replace(/[^\w.-]/g,'_');
+        const target=path.join(MEDIA_DIR,safe);
+        try {
+          fs.writeFileSync(target+'.tmp',bytes);fs.renameSync(target+'.tmp',target);
+        } catch(e) {const failed = new Error('write_failed'); failed.reason = 'write_failed'; throw failed;}
+        entry.attachments.push({filename:media.filename||safe,content_type:media.mimetype,path:target,
+          duration:msg.duration || msg._data?.duration || null});
+        entry.media_error = false;
+      } catch(e) {
+        mediaFailure(entry, e.reason || 'download_failed');
+        if(HISTORY_IMPORT) throw e;
+      }
+    }
   }
   entry.enriched=true;persist();
   } finally { INFLIGHT.delete(id); }
@@ -273,6 +312,28 @@ rl.on('line', async (line) => {
   } catch (e) { /* ignora */ }
 });
 """
+
+
+MEDIA_ERRORS = frozenset(('download_failed', 'unavailable', 'empty', 'write_failed', 'storage_unavailable'))
+
+
+def media_metadata(entry):
+  """Stato del media dal ponte, solo valori noti: mai testo arbitrario nei metadati nativi.
+
+  `has_media` dice che il messaggio aveva un allegato; `media_error` è False quando è
+  stato salvato (cancella un errore precedente al merge) oppure il motivo del fallimento.
+  Un fallimento non è definitivo: il recupero periodico del ponte riprova.
+  """
+  if entry.get('has_media') is not True:
+    return {}
+  error = entry.get('media_error')
+  result = {'has_media': True,
+            'media_error': error if error in MEDIA_ERRORS else (True if error else False)}
+  if isinstance(entry.get('media_type'), str) and 0 < len(entry['media_type']) <= 40:
+    result['media_type'] = entry['media_type']
+  if result['media_error'] and entry.get('attachments'):
+    result['media_error'] = False  # un allegato c'è: il successo prevale sul flag
+  return result
 
 
 def bridge_path():
@@ -486,6 +547,7 @@ def import_history(start, end, timeout=600):
                 'author_name': m.get('author_name'),
                 **{key: m[key] for key in ('chat_name_rank', 'author_name_rank',
                   'chat_aliases', 'author_aliases', 'names_version') if key in m},
+                **media_metadata(m),
                 'direction': 'out' if m.get('from_me') else 'in',
                 'recovered': True})
         count += 1
@@ -564,9 +626,6 @@ class WhatsAppBridge:
     def start(self) -> bool:
         if not config.WHATSAPP_ENABLED:
             return False
-        import os
-        from pathlib import Path
-
         session_dir = config.DATA_DIR / "wa_session"
         session_dir.mkdir(parents=True, exist_ok=True)
         media_dir = config.DATA_DIR / "wa_media"
@@ -718,6 +777,7 @@ class WhatsAppBridge:
                       'author_aliases', 'names_version'):
             if key in m:
               m['metadata'][key] = m[key]
+          m['metadata'].update(media_metadata(m))
           msgs.append(m)
         except (ValueError, KeyError, OSError, TypeError, OverflowError):
           quarantine(path)

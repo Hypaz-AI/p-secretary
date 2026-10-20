@@ -82,7 +82,8 @@ class PostgresJobsTests(unittest.TestCase):
         self.assertIsNotNone(row[4])
         # Terminal failure is never re-claimed, even after the backoff window.
         self.conn.execute("UPDATE work_jobs SET available_at=now()-interval '1 hour'")
-        self.assertIsNone(jobs.claim('action'))
+        with patch('db._conn',side_effect=lambda:nullcontext(self.conn)):
+            self.assertIsNone(jobs.claim('action'))
 
     def test_worker_permanent_exception_fails_job_not_defer(self):
         # Worker.run must route Permanent to finish(permanent=True): the job
@@ -92,9 +93,10 @@ class PostgresJobsTests(unittest.TestCase):
             jobs.enqueue(self.conn,'action','loop:1',{'type':'notify'})
         from contextlib import nullcontext
         with patch('db._conn',side_effect=lambda:nullcontext(self.conn)):
-            worker = jobs.Worker('action', lambda payload: (_ for _ in ()).throw(
-                jobs.Permanent('Effect policy denied')))
-            worker.stop_event.set()  # One claim iteration only.
+            def deny(payload):
+                worker.stop_event.set()  # One claim iteration only (set after the claim).
+                raise jobs.Permanent('Effect policy denied')
+            worker = jobs.Worker('action', deny)
             worker.run()
         row = self.conn.execute('SELECT status,error,failure_reason FROM work_jobs '
                                 "WHERE key='loop:1'").fetchone()

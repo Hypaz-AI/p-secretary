@@ -41,11 +41,6 @@ API_ROOT = "https://www.googleapis.com/calendar/v3"
 # Accesso limitato ai calendari condivisi tramite ACL.
 SCOPES = "https://www.googleapis.com/auth/calendar"
 
-# marker che l'AI del dialogo può lasciare per fissare un appuntamento:
-#   @@EVENTO@@ titolo | YYYY-MM-DD HH:MM | luogo | note   (luogo/note opzionali)
-_MARKER = re.compile(r"^[ \t]*@@EVENTO@@[ \t]*(.*?)[ \t]*$\n?",
-                     re.IGNORECASE | re.MULTILINE)
-
 _DT_FORMATS = ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
                "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S")
 
@@ -474,40 +469,3 @@ def validate_event(event: dict) -> dict:
             raise ValueError(f"{key}: testo richiesto")
         result[key] = event.get(key) or ""
     return result
-
-
-def parse_markers(text: str) -> tuple[str, list]:
-    """Estrae i marker @@EVENTO@@ lasciati dall'AI nella risposta del dialogo.
-
-    Ogni riga-marker diventa {'title','dt','location','notes'} — oppure
-    {'error': ...} se incompleta o con data non valida. Ritorna
-    (testo senza le righe-marker, lista di eventi).
-    """
-    if not _MARKER.search(text):
-        return text, []
-    events = []
-
-    def _grab(match):
-        payload = match.group(1).strip()
-        parts = [p.strip() for p in payload.split("|")]
-        extras = parts[4:]
-        parts = parts[:4]
-        parts += [""] * (4 - len(parts))
-        title, dt, location, notes = parts
-        event = {"title": title, "dt": dt, "location": location, "notes": notes}
-        for key, value in zip(("duration_min", "reminder_minutes"), extras):
-            if value:
-                event[key] = value
-        if len(extras) > 2:
-            event["error"] = "troppi campi nel marker"
-        if not title:
-            event["error"] = "titolo mancante"
-        elif not dt:
-            event["error"] = "data/ora mancante (formato YYYY-MM-DD HH:MM)"
-        elif _parse_local_dt(dt) is None:
-            event["error"] = f"data non valida: '{dt}' (usa YYYY-MM-DD HH:MM)"
-        events.append(event)
-        return ""
-
-    clean = _MARKER.sub(_grab, text).strip()
-    return clean, events

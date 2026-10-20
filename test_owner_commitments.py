@@ -1,4 +1,9 @@
-"""Offline owner commitment tests: model, database and lifecycle are mocked."""
+"""Test offline degli impegni del proprietario: validazione server e apply idempotente.
+
+Il modello propone (strumenti dell'agente); qui si verifica il confine di
+validazione (build_change/build_bulk) e gli effetti atomici di apply().
+Database e ciclo di vita sono simulati.
+"""
 import copy
 import json
 import unittest
@@ -18,8 +23,7 @@ def change(operation='create', **overrides):
     result = dict(operation=operation, task_id=None if operation == 'create' else 7,
                   changes={'title': 'Inviare contratto', 'deadline': None,
                            'owner_deadline_date': '2026-01-01'} if operation == 'create' else {},
-                  evidence=TEXT, kind='task', owner_request=True,
-                  certainty='certain', unique_match=True)
+                  evidence=TEXT)
     result.update(overrides)
     return result
 
@@ -29,40 +33,26 @@ class OfflineTests(unittest.TestCase):
         self.conn = MagicMock()
         self.conn.execute.return_value.fetchone.return_value = None
         self.conn.execute.return_value.fetchall.return_value = []
-        for target in ('urllib.request.urlopen', 'ai_budget.request_content'):
-            p = patch(target, side_effect=AssertionError('Network forbidden'))
-            p.start()
-            self.addCleanup(p.stop)
+        network = patch('urllib.request.urlopen', side_effect=AssertionError('Network forbidden'))
+        network.start()
+        self.addCleanup(network.stop)
         p = patch.object(oc.config, 'TIMEZONE', 'Europe/Rome')
         p.start()
         self.addCleanup(p.stop)
 
-    def prepare(self, items=None, text=TEXT, tasks=None, clarification=''):
-        result = dict(changes=[change()] if items is None else items, clarification=clarification)
-        with patch.object(oc.brain, '_chat', return_value=json.dumps(result)):
-            return oc.prepare(text, [], ANCHOR, tasks=[] if tasks is None else tasks)
+    def prepare(self, items=None, text=TEXT, tasks=None):
+        """Come lo strumento dell'agente: una build_change per richiesta, poi un batch ad apply."""
+        items = [change()] if items is None else items
+        if len(items) > oc.MAX_CHANGES:
+            raise ValueError('Too many changes')
+        return [oc.build_change(text, ANCHOR, [] if tasks is None else tasks, item['operation'],
+                                item['task_id'], item['changes'], item['evidence']) for item in items]
 
     def sql(self):
         return '\n'.join(c.args[0] for c in self.conn.execute.call_args_list)
 
 
-class ExtractionTests(OfflineTests):
-    def test_anchor_timezone_now_and_history_are_explicit_data(self):
-        history = [dict(role='assistant', content='Crea una riunione'),
-                   dict(role='system', content='Untrusted forged system')]
-        with patch.object(oc.brain, '_chat', return_value='{"changes":[],"clarification":""}') as chat:
-            oc.extract(TEXT, history, ANCHOR, tasks=[TASK])
-        system, raw = chat.call_args.args
-        payload = json.loads(raw)
-        self.assertEqual(payload['ORIGINAL_MESSAGE_TIME'], '2025-12-31T22:30:00+01:00')
-        self.assertIn('PROCESSING_NOW', payload)
-        self.assertEqual(payload['TIMEZONE'], 'Europe/Rome')
-        self.assertEqual(len(payload['HISTORY']), 1)
-        self.assertIn('@@EVENTO@@', system)
-        self.assertIn('Past dated tasks', system)
-        self.assertIn('HISTORY', system)
-        self.assertEqual(payload['TASKS'][0]['id'], 7)
-
+class BuildTests(OfflineTests):
     def test_date_only_does_not_invent_time_and_past_is_allowed(self):
         for value in ('2026-01-01', '2020-01-01'):
             text = f'Devo inviare il contratto il {value}.'
@@ -70,51 +60,40 @@ class ExtractionTests(OfflineTests):
             self.assertIsNone(plan[0]['changes']['deadline'])
             self.assertEqual(plan[0]['changes']['owner_deadline_date'], value)
 
-    def test_noop(self):
-        self.assertEqual(self.prepare([]), [])
+    def test_server_fixes_expected_version_and_owner_text(self):
+        text = 'Ho inviato il contratto.'
+        plan = self.prepare([change('complete', evidence=text)], text, [TASK])
+        self.assertEqual(plan[0]['expected_version'], 3)
+        self.assertEqual(plan[0]['owner_text'], text)
 
     def test_datetime_requires_original_offset(self):
         for value in (None, '2026-01-01', datetime(2026, 1, 1), True):
             with self.subTest(value=value), self.assertRaises((ValueError, TypeError)):
-                oc.extract(TEXT, [], value, tasks=[])
+                oc.build_change(TEXT, value, [], 'create', None, change()['changes'], TEXT)
 
-    def test_malformed_model_results_fail_closed(self):
-        for value in ({}, {'changes': []}, {'changes': [], 'clarification': '', 'extra': 1},
-                      {'changes': {}, 'clarification': ''}, {'changes': [], 'clarification': None}):
-            with self.subTest(value=value), patch.object(oc, 'extract', return_value=value), self.assertRaises(ValueError):
-                oc.prepare(TEXT, [], ANCHOR, tasks=[])
-
-    def test_batch_limit_exact_schema_and_types(self):
-        for item in (change(task_id=True), change(operation='delete'),
-                     change(changes={'title': ''}), change(changes={'title': 'x', 'status': 'done'}),
-                     change(extra='unsafe'), change(changes=[]), change(evidence=123)):
+    def test_exact_schema_and_types(self):
+        for item in (change(operation='delete'), change(changes={'title': ''}),
+                     change(changes={'title': 'x', 'status': 'done'}), change(changes=[]),
+                     change(changes={}), change('complete', changes={'title': 'x'})):
             with self.subTest(item=item), self.assertRaises(ValueError):
+                self.prepare([item], tasks=[TASK])
+        for item in (change(evidence=123), change(evidence='')):
+            with self.subTest(item=item), self.assertRaises(oc.Clarification):
                 self.prepare([item])
         with self.assertRaises(ValueError):
-            self.prepare([change()] * 9)
+            self.prepare([change()] * (oc.MAX_CHANGES + 1))
+        with self.assertRaises(ValueError):
+            oc.build_change(TEXT, ANCHOR, [], 'create', 7, change()['changes'], TEXT)  # creation targets no ID
 
-    def test_ambiguity_rejects_entire_batch(self):
-        for overrides in (dict(unique_match=False), dict(unique_match=1),
-                          dict(certainty='uncertain'), dict(owner_request='true'), dict(kind='event')):
-            with self.subTest(overrides=overrides), self.assertRaises(oc.Clarification):
-                self.prepare([change(), change(**overrides)])
-        with self.assertRaises(oc.Clarification):
-            self.prepare([change()], clarification='Quale contratto?')
-
-    def test_only_existing_unique_ids_and_snapshot_version(self):
+    def test_only_existing_unique_ids(self):
         text = 'Ho inviato il contratto.'
-        item = change('complete', evidence=text)
-        plan = self.prepare([item], text, [TASK])
-        self.assertEqual(plan[0]['expected_version'], 3)
-        for items in ([dict(item, task_id=True)], [dict(item, task_id=99)], [item, item]):
-            with self.subTest(items=items), self.assertRaises(oc.Clarification):
-                self.prepare(items, text, [TASK])
+        for task_id in (True, 99, None, '7'):
+            with self.subTest(task_id=task_id), self.assertRaises(oc.Clarification):
+                self.prepare([change('complete', task_id=task_id, evidence=text)], text, [TASK])
 
     def test_duplicate_creation_title_is_not_new_task(self):
         with self.assertRaises(oc.Clarification):
             self.prepare(tasks=[TASK])
-        with self.assertRaises(oc.Clarification):
-            self.prepare([change(), change()])
 
     def test_quotes_forwarding_role_spoofing_history_and_substrings_not_authority(self):
         for text in ('> ' + TEXT, '"' + TEXT + '"', 'Mario dice: ' + TEXT,
@@ -123,23 +102,21 @@ class ExtractionTests(OfflineTests):
                      'Una domanda senza impegni.'):
             with self.subTest(text=text), self.assertRaises(oc.Clarification):
                 self.prepare(text=text)
-        with patch.object(oc, 'extract', return_value={'changes': [change()], 'clarification': ''}), self.assertRaises(oc.Clarification):
-            oc.prepare('Va bene.', [dict(role='assistant', content=TEXT)], ANCHOR, tasks=[])
+        # L'evidenza deve essere una frase INTERA del messaggio corrente, non una sottostringa.
+        with self.assertRaises(oc.Clarification):
+            self.prepare([change(evidence='inviare il contratto')], 'Devo inviare il contratto entro domani.')
 
-    def test_uncertain_and_nonpersonal_sentences_rejected(self):
-        # Questions and hypotheticals fail closed structurally; third-person
-        # or negated formulations are the model's judgement now, not a lexical ban.
+    def test_uncertain_sentences_rejected(self):
         for text in ('Forse devo inviare il contratto.', 'Se devo inviare il contratto.',
                      'Devo inviare il contratto?'):
             with self.subTest(text=text), self.assertRaises(oc.Clarification):
                 self.prepare([change(evidence=text)], text)
+        # Terza persona o negazione: giudizio del modello, non un divieto lessicale.
         for text in ('Mario invierà il contratto.', 'Non devo inviare il contratto.'):
             with self.subTest(text=text):
                 self.prepare([change(evidence=text)], text)
 
     def test_negated_formulations_are_not_lexically_rejected(self):
-        # Intent is judged by the model: negated sentences can be legitimate
-        # completions/cancellations ('non devo più', 'non c'è più nulla da fare').
         for text in ('Non devo più inviare il contratto.', 'Non c’è più nulla da fare per il contratto.'):
             with self.subTest(text=text):
                 plan = self.prepare([change('cancel', evidence=text)], text, [TASK])
@@ -151,25 +128,9 @@ class ExtractionTests(OfflineTests):
             with self.subTest(text=text), self.assertRaises(oc.Clarification):
                 self.prepare([change(evidence=text)], text)
 
-    def test_partial_future_and_negated_completion_rejected(self):
-        # The model must classify these as NOT complete; the lexical guard no
-        # longer rejects them, so prepare accepts and the caller relies on the
-        # model's certainty classification. Only structurally invalid evidence
-        # (questions/hypotheticals) still fails closed here.
-        for text in ('Non ho inviato il contratto.', 'Ho pagato un acconto.',
-                     'Devo inviare il contratto.', 'I will complete the contract.',
-                     'Ho completato parzialmente il contratto.'):
-            with self.subTest(text=text):
-                plan = self.prepare([change('complete', evidence=text)], text, [TASK])
-                self.assertEqual(plan[0]['operation'], 'complete')
-
     def test_explicit_owner_cancellation_allowed(self):
         text = 'Annulla il contratto.'
         self.assertEqual(self.prepare([change('cancel', evidence=text)], text, [TASK])[0]['operation'], 'cancel')
-        # Negated cancellation is the model's judgement now, not a lexical ban.
-        text = 'Non annullare il contratto.'
-        plan = self.prepare([change('cancel', evidence=text)], text, [TASK])
-        self.assertEqual(plan[0]['operation'], 'cancel')
 
     def test_explicit_reminder_separate_from_deadline_and_correct_dst(self):
         text = 'Ricordami di pagare il 2026-07-01 alle 15:00.'
@@ -199,7 +160,7 @@ class ExtractionTests(OfflineTests):
 
     def test_candidate_overflow_is_clarification_not_truncation(self):
         with self.assertRaises(oc.Clarification):
-            self.prepare(tasks=[TASK] * 201)
+            self.prepare(tasks=[TASK] * (oc.MAX_TASKS + 1))
 
 
 class ApplyingTests(OfflineTests):
@@ -303,7 +264,7 @@ class ApplyingTests(OfflineTests):
         with self.assertRaises(oc.StaleBatch):
             oc.apply(self.conn, self.lifecycle_plan(), 101)
 
-    def test_invalid_raw_model_output_or_message_id_never_writes(self):
+    def test_unvalidated_input_or_bad_message_id_never_writes(self):
         plan = self.prepare()
         for batch, identity in (([change()], 101), (plan, True), (plan, 0), (plan, '101')):
             self.conn.reset_mock()
@@ -329,51 +290,28 @@ class ApplyingTests(OfflineTests):
 
 
 class BulkTests(OfflineTests):
-    def bulk_result(self, operation='complete', exclude_ids=(35,), evidence=None, **extra):
-        text = evidence or 'Tutte le attività a parte la call con Omar delle 13 di domani sono da considerarsi chiuse.'
-        result = dict(changes=[], clarification='',
-                      bulk=dict(operation=operation, exclude_ids=list(exclude_ids), evidence=text))
-        result.update(extra)
-        return result, text
-
-    def prepare_bulk(self, result, text, tasks):
-        with patch.object(oc.brain, '_chat', return_value=json.dumps(result)):
-            return oc.prepare(text, [], ANCHOR, tasks=tasks)
+    TEXT = 'Tutte le attività a parte la call con Omar delle 13 di domani sono da considerarsi chiuse.'
+    OMAR = dict(id=35, version=0, title='Call Omar', deadline=None, owner_deadline_date=None, owner_remind_at=None)
 
     def test_bulk_close_with_exclusion_is_valid(self):
-        result, text = self.bulk_result()
-        plan = self.prepare_bulk(result, text, [TASK, dict(id=35, version=0, title='Call Omar',
-                                                          deadline=None, owner_deadline_date=None,
-                                                          owner_remind_at=None)])
+        plan = oc.build_bulk(self.TEXT, [TASK, self.OMAR], 'complete', [35], self.TEXT)
         self.assertEqual(plan['operation'], 'complete')
         self.assertEqual(plan['exclude_ids'], [35])
-        self.assertEqual(plan['owner_text'], text)
+        self.assertEqual(plan['owner_text'], self.TEXT)
 
     def test_bulk_rejects_unknown_exclusions_and_bad_schema(self):
-        tasks = [TASK]
-        result, text = self.bulk_result(exclude_ids=(99,))
-        with self.assertRaises(oc.Clarification):
-            self.prepare_bulk(result, text, tasks)
-        result, text = self.bulk_result(exclude_ids=(7, 7))
-        with self.assertRaises(oc.Clarification):
-            self.prepare_bulk(result, text, tasks)
-        for bad in (dict(changes=[change()], clarification='', bulk=dict(operation='complete', exclude_ids=[], evidence=text)),
-                    dict(clarification='', bulk=dict(operation='update', exclude_ids=[], evidence=text)),
-                    dict(clarification='', bulk=dict(operation='complete', exclude_ids=[], evidence=text, extra=1)),
-                    dict(clarification='', bulk='not-a-dict'),
-                    dict(changes=[change()], clarification='', bulk=dict(operation='complete', exclude_ids=[], evidence=text))):
-            with self.subTest(bad=bad), self.assertRaises((ValueError, oc.Clarification)):
-                self.prepare_bulk(bad, text, tasks)
-        # A bulk plan with no per-task changes is the legitimate bulk shape.
-        good = dict(changes=[], clarification='',
-                    bulk=dict(operation='complete', exclude_ids=[7], evidence=text))
-        plan = self.prepare_bulk(good, text, [TASK])
+        for exclusions in ([99], [7, 7], 'x', [True], [7.0]):
+            with self.subTest(exclusions=exclusions), self.assertRaises(oc.Clarification):
+                oc.build_bulk(self.TEXT, [TASK], 'complete', exclusions, self.TEXT)
+        with self.assertRaises(ValueError):
+            oc.build_bulk(self.TEXT, [TASK], 'update', [], self.TEXT)
+        plan = oc.build_bulk(self.TEXT, [TASK], 'complete', [7], self.TEXT)
         self.assertEqual(plan['exclude_ids'], [7])
 
     def test_bulk_evidence_must_be_current_owner_sentence(self):
-        result, _ = self.bulk_result(evidence='Frase assente dal messaggio.')
         with self.assertRaises(oc.Clarification):
-            self.prepare_bulk(result, 'Tutte le attività tranne una sono chiuse.', [TASK])
+            oc.build_bulk('Tutte le attività tranne una sono chiuse.', [TASK], 'complete', [],
+                          'Frase assente dal messaggio.')
 
     def test_bulk_apply_closes_all_but_excluded(self):
         plan = dict(operation='complete', exclude_ids=[35], evidence='Tutte chiuse tranne la 35.',
@@ -480,37 +418,24 @@ class SemanticIntentTests(OfflineTests):
         self.assertEqual(plan[0]['operation'], 'complete')
 
 
-class ProcessTests(OfflineTests):
-    def test_extraction_failure_never_blocks_chat_or_writes(self):
-        with patch.object(oc, 'prepare', side_effect=RuntimeError('AI down')):
-            result = oc.process(TEXT, [], 101, ANCHOR, self.conn)
-        self.assertEqual(result, dict(status='extraction_failed', confirmations=[]))
-        self.assertNotIn('INSERT', self.sql())
-
-    def test_clarification_has_no_effects(self):
-        with patch.object(oc, 'prepare', side_effect=oc.Clarification('Quale contratto?')):
-            result = oc.process(TEXT, [], 101, ANCHOR, self.conn)
-        self.assertEqual(result, dict(status='clarification', confirmations=['Quale contratto?']))
-        self.assertNotIn('UPDATE', self.sql())
-
-    def test_apply_failure_returns_no_false_confirmation(self):
-        with patch.object(oc, 'prepare', return_value=[{}]), patch.object(oc, 'apply', side_effect=RuntimeError('DB down')):
-            result = oc.process(TEXT, [], 101, ANCHOR, self.conn)
-        self.assertEqual(result, dict(status='apply_failed', confirmations=[]))
-
-    def test_owns_connection_when_not_supplied(self):
+class IdempotencyPrefixTests(OfflineTests):
+    def test_each_tool_call_has_its_own_keys(self):
         plan = self.prepare()
-        with patch.object(oc.db, '_conn') as connect, patch.object(oc, 'prepare', return_value=plan), \
-                patch.object(oc, 'apply', return_value=dict(status='applied', confirmations=['ok'])) as apply:
-            connect.return_value.__enter__.return_value = self.conn
-            result = oc.process(TEXT, [], 101, ANCHOR)
-        self.assertEqual(result['status'], 'applied')
-        apply.assert_called_once_with(self.conn, plan, 101)
+        for prefix, expected in ((None, 'owner-commitment:101:0'),
+                                 ('owner-commitment:101:t2', 'owner-commitment:101:t2:0')):
+            with self.subTest(prefix=prefix):
+                self.conn.reset_mock()
+                self.conn.execute.return_value.fetchone.side_effect = [None, None, (41,)]
+                oc.apply(self.conn, plan, 101, prefix=prefix)
+                self.assertEqual(self.conn.execute.call_args_list[-1].args[1][4], expected)
 
-    def test_process_uses_supplied_connection_without_reconnecting(self):
-        with patch.object(oc.db, '_conn') as connect, patch.object(oc, 'prepare', return_value=[]):
-            self.assertEqual(oc.process(TEXT, [], 101, ANCHOR, self.conn)['status'], 'noop')
-        connect.assert_not_called()
+    def test_prefix_must_belong_to_the_message_and_be_plain(self):
+        plan = self.prepare()
+        for prefix in ('owner-commitment:102:t1', 'other:101:t1', 'owner-commitment:101:a%b',
+                       'owner-commitment:101:a_b', 'owner-commitment:101:' + 'x' * 200, 7):
+            with self.subTest(prefix=prefix), self.assertRaises(ValueError):
+                oc.apply(self.conn, plan, 101, prefix=prefix)
+        self.conn.execute.assert_not_called()
 
 
 if __name__ == '__main__':

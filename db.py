@@ -4,7 +4,6 @@ Tutto il 'contesto' del segretario vive qui: ogni comunicazione analizzata,
 ogni regola che l'utente insegna, ogni fattura salvata. Lo schema viene
 creato automaticamente al primo avvio (CREATE TABLE IF NOT EXISTS).
 """
-import json
 from datetime import datetime
 
 import config
@@ -12,7 +11,6 @@ import message_store
 
 try:
     import psycopg
-    from psycopg import sql as pg_sql
 except ImportError:  # il servizio parte comunque, solo senza memoria
     psycopg = None
 
@@ -122,39 +120,35 @@ def init(approved_reset: bool = False) -> int:
             task_reconciliation.migrate(conn)
             from connectors import media_archive
             media_archive.migrate(conn)
-            import owner_dialogue
-            owner_dialogue.migrate(conn)
+            from agent import owner as agent_owner
+            agent_owner.migrate(conn)
             import capabilities
             capabilities.migrate(conn, legacy=legacy)
             import policy
             policy.migrate(conn)
-            import secretary
-            secretary.migrate(conn)
             import knowledge
             knowledge.migrate(conn)
-            import secretary_runtime
-            secretary_runtime.migrate(conn)
+            import privacy
+            privacy.migrate(conn)
             migrate_notes(conn)
             migrate_typed_notes(conn)
-            import research
-            research.migrate(conn)
-            import owner_instructions
-            owner_instructions.migrate(conn)
-            import execution
-            execution.migrate(conn)
             import ai_budget
             ai_budget.migrate(conn)
+            from agent import schema as agent_schema
+            agent_schema.migrate(conn, config.AGENT_DB_SCHEMA)
+            # Ruolo di sola lettura dell'agente: creato qui se l'utente applicativo può
+            # (DB locale del compose), altrimenti lo segnala main() e lo crea il DBA.
+            agent_schema.ensure_readonly_role(conn, config.AGENT_DB_SCHEMA, config.AGENT_DB_ROLE)
             return result
 
 
 # ------------------------------------------------------- comunicazioni ----
 def store_message(channel, sender, subject, body, ts=None, source_id=None,
-                  metadata=None, attachments=None, update_existing=False, reconcile=False,
-                  historical=False):
+                  metadata=None, attachments=None, update_existing=False, historical=False):
     with _conn() as conn:
         return message_store.store(conn, channel, sender, subject, body, ts,
                                    source_id, metadata, attachments, update_existing,
-                                   reconcile=reconcile, **({'historical': True} if historical else {}))
+                                   **({'historical': True} if historical else {}))
 
 
 def log_communication(channel, sender, subject, body, verdict, notified,

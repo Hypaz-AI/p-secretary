@@ -97,6 +97,46 @@ class KnowledgePostgresTests(unittest.TestCase):
             (mid, fields.get('filename', 'preventivo.xml'), fields.get('mime', 'application/xml'),
              fields.get('path'), content, json.dumps({'api_key': 'never-export', 'duration': 3}))).fetchone()[0]
 
+    ENTRY = """e.id,e.source_type,CASE WHEN e.source_type='document' THEN e.occurrence_id ELSE e.message_id END,
+        r.revision,e.channel,e.title,e.ts,e.acquired_at,e.historical,e.status,e.source_ref,e.active"""
+
+    def hit(self, row):
+        entry, kind, source, revision, channel, title, date, acquired, historical, status, ref, active = row[:12]
+        result = dict(entry_id=entry, source_type=kind, source_id=source, revision=revision, channel=channel,
+                      title=title, date=date.isoformat() if date else None,
+                      acquired_at=acquired.isoformat() if acquired else None,
+                      historical=historical, status=status, source=ref, current=active,
+                      citation=f'{kind}:{source}@{revision}')
+        if len(row) > 12:
+            result['text'] = row[12]
+        return result
+
+    def search(self, query, channel=None, limit=8):
+        """Lettura diretta dell'indice (la stessa che l'agente fa con SQL su agent.documents)."""
+        rows = self.conn.execute(f"""SELECT {self.ENTRY} FROM knowledge_entries e
+            JOIN knowledge_runs r ON r.id=e.run_id
+            WHERE e.active AND e.search_vector @@ websearch_to_tsquery('italian',%s)
+              AND (%s::text IS NULL OR e.channel=%s)
+            ORDER BY e.ts DESC NULLS LAST,e.id DESC LIMIT %s""", (query, channel, channel, limit)).fetchall()
+        return [self.hit(row) for row in rows]
+
+    def opened(self, source_type, identity):
+        where = {'message': "e.source_type='message' AND e.message_id=%s AND e.active",
+                 'document': "e.source_type='document' AND e.occurrence_id=%s", 'entry': 'e.id=%s'}[source_type]
+        row = self.conn.execute(f"""SELECT {self.ENTRY},e.text FROM knowledge_entries e
+            JOIN knowledge_runs r ON r.id=e.run_id WHERE {where} ORDER BY e.id DESC LIMIT 1""",
+            (identity,)).fetchone()
+        result = self.hit(row)
+        if source_type == 'message':
+            result['documents'] = [self.hit(r) for r in self.conn.execute(f"""SELECT {self.ENTRY}
+                FROM knowledge_entries e JOIN knowledge_runs r ON r.id=e.run_id
+                WHERE e.message_id=%s AND r.revision=%s AND e.source_type='document' ORDER BY e.id""",
+                (identity, result['revision'])).fetchall()]
+        return result
+
+    def documents(self):
+        return self.conn.execute("SELECT count(*) FROM knowledge_entries WHERE active AND source_type='document'").fetchone()[0]
+
     def index(self, mid):
         receipt = k.enqueue(self.conn, mid)
         return k.index_message(dict(message_id=mid, revision=receipt['revision']))
@@ -111,19 +151,19 @@ class KnowledgePostgresTests(unittest.TestCase):
         self.assertEqual(self.conn.execute('SELECT count(*) FROM work_jobs').fetchone()[0], 0)
         self.assertEqual(self.conn.execute('SELECT reset_rows FROM schema_migrations WHERE version=%s',
                                           (k.VERSION,)).fetchone(), (0,))
-        self.assertEqual(k.snapshot()['stats']['contents'], 0)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM knowledge_documents').fetchone()[0], 0)
 
     def test_cross_channel_italian_search_citations_dates_history_and_filters(self):
         ids = [self.message(c, historical=True) for c in ('email', 'whatsapp', 'telegram (account)')]
         for mid in ids:
             self.assertEqual(self.index(mid)['status'], 'indexed')
-        hits = k.search('riparazioni')  # Italian stemming, not substring matching.
+        hits = self.search('riparazioni')  # Italian stemming, not substring matching.
         self.assertEqual({r['source_id'] for r in hits}, set(ids))
         self.assertTrue(all(r['historical'] for r in hits))
         self.assertTrue(all(r['date'].startswith('2020-01-02') for r in hits))
         self.assertTrue(all(r['citation'] and r['revision'] and r['acquired_at'] for r in hits))
-        self.assertEqual(len(k.search('caldaia', channel='whatsapp')), 1)
-        self.assertEqual(k.search('caldaia', channel="email' OR true --"), [])
+        self.assertEqual(len(self.search('caldaia', channel='whatsapp')), 1)
+        self.assertEqual(self.search('caldaia', channel="email' OR true --"), [])
         self.assertNotIn('never-export', str(hits))
 
     def test_hash_content_dedup_keeps_distinct_occurrences_paths_and_selected_metadata(self):
@@ -139,32 +179,31 @@ class KnowledgePostgresTests(unittest.TestCase):
         extract.assert_called_once()  # Cross-message persistent extraction reuse.
         self.assertEqual(self.conn.execute('SELECT count(*) FROM knowledge_documents').fetchone(), (1,))
         self.assertEqual(self.conn.execute('SELECT count(*) FROM knowledge_occurrences').fetchone(), (2,))
-        hits = k.search('termosifoni')
+        hits = self.search('termosifoni')
         self.assertEqual(len(hits), 2)
         self.assertEqual(len({h['source_id'] for h in hits}), 2)
         self.assertEqual(len({h['source']['sha256'] for h in hits}), 1)
         self.assertEqual(path.read_bytes(), content)
         self.assertNotIn(str(path), str(hits))
-        self.assertNotIn('never-export', str(k.snapshot()))
         self.assertEqual(self.conn.execute('SELECT metadata FROM knowledge_occurrences ORDER BY id').fetchall(),
                          [({'duration': 3},), ({'duration': 3},)])
 
     def test_retry_edit_and_old_entry_provenance(self):
         mid = self.message(body='Zirconio vecchio')
         self.index(mid)
-        old = k.search('zirconio')[0]
+        old = self.search('zirconio')[0]
         before = self.conn.execute('SELECT count(*) FROM knowledge_entries').fetchone()
         self.assertEqual(self.index(mid)['status'], 'duplicate')
         self.assertEqual(self.conn.execute('SELECT count(*) FROM knowledge_entries').fetchone(), before)
         self.conn.execute("UPDATE email_messages SET body='Titanio nuovo' WHERE id=%s", (mid,))
         self.index(mid)
-        self.assertEqual(k.search('zirconio'), [])
-        self.assertEqual(len(k.search('titanio')), 1)
-        opened = k.open_source('entry', old['entry_id'])
+        self.assertEqual(self.search('zirconio'), [])
+        self.assertEqual(len(self.search('titanio')), 1)
+        opened = self.opened('entry', old['entry_id'])
         self.assertIn('vecchio', opened['text'])
         self.assertFalse(opened['current'])
         self.assertEqual(opened['citation'], old['citation'])
-        self.assertEqual(k.open_source('message', mid)['text'], 'Titanio nuovo')
+        self.assertEqual(self.opened('message', mid)['text'], 'Titanio nuovo')
 
     def test_body_reversion_reactivates_correct_revision(self):
         mid = self.message(body='Zirconio prima')
@@ -175,8 +214,8 @@ class KnowledgePostgresTests(unittest.TestCase):
         self.conn.execute("UPDATE email_messages SET body='Zirconio prima' WHERE id=%s", (mid,))
         self.assertTrue(k.enqueue(self.conn, mid)['queued'])
         k.index_message({'message_id': mid})
-        self.assertEqual(len(k.search('zirconio')), 1)
-        self.assertEqual(k.search('titanio'), [])
+        self.assertEqual(len(self.search('zirconio')), 1)
+        self.assertEqual(self.search('titanio'), [])
 
     def test_same_attachment_identity_new_transcript_creates_new_revision(self):
         mid = self.message('telegram (account)')
@@ -186,13 +225,13 @@ class KnowledgePostgresTests(unittest.TestCase):
         self.conn.execute("INSERT INTO media_transcripts VALUES (%s,'audio','Accordo smeraldo','fixture',now())", (aid,))
         second = self.index(mid)
         self.assertNotEqual(first['revision'], second['revision'])
-        old = k.search('smeraldo')[0]
+        old = self.search('smeraldo')[0]
         self.conn.execute("UPDATE media_transcripts SET text='Accordo rubino' WHERE attachment_id=%s", (aid,))
         third = self.index(mid)
         self.assertNotEqual(second['revision'], third['revision'])
-        self.assertEqual(k.search('smeraldo'), [])
-        self.assertEqual(len(k.search('rubino')), 1)
-        self.assertIn('smeraldo', k.open_source('document', old['source_id'])['text'])
+        self.assertEqual(self.search('smeraldo'), [])
+        self.assertEqual(len(self.search('rubino')), 1)
+        self.assertIn('smeraldo', self.opened('document', old['source_id'])['text'])
         self.assertEqual(self.conn.execute('SELECT count(*) FROM knowledge_documents').fetchone(), (1,))
 
     def test_same_attachment_identity_new_bytea_changes_revision_and_content(self):
@@ -202,8 +241,8 @@ class KnowledgePostgresTests(unittest.TestCase):
         self.conn.execute("UPDATE attachments SET data=%s WHERE id=%s", (b'<a>Titanio</a>', aid))
         second = self.index(mid)
         self.assertNotEqual(first['revision'], second['revision'])
-        self.assertEqual(k.search('zirconio'), [])
-        self.assertEqual(len(k.search('titanio')), 1)
+        self.assertEqual(self.search('zirconio'), [])
+        self.assertEqual(len(self.search('titanio')), 1)
         self.assertEqual(self.conn.execute('SELECT count(*) FROM knowledge_documents').fetchone(), (2,))
 
     def test_path_repair_changes_enqueue_key_without_moving_original(self):
@@ -215,7 +254,7 @@ class KnowledgePostgresTests(unittest.TestCase):
         path.write_bytes(b'<a>Preventivo smeraldo</a>')
         second = self.index(mid)
         self.assertNotEqual(first['revision'], second['revision'])
-        self.assertEqual(len(k.search('smeraldo')), 1)
+        self.assertEqual(len(self.search('smeraldo')), 1)
         self.assertTrue(path.is_file())
 
     def test_failed_empty_blocked_and_unsupported_states_are_explicit(self):
@@ -225,46 +264,12 @@ class KnowledgePostgresTests(unittest.TestCase):
         self.attachment(mid, None, path='/etc/passwd')
         self.attachment(mid, b'<a/>', filename='empty.xml')
         self.assertEqual(self.index(mid)['status'], 'partial')
-        opened = k.open_source('message', mid)
+        opened = self.opened('message', mid)
         statuses = {d['status'] for d in opened['documents']}
         self.assertEqual(statuses, {'failed', 'unsupported', 'blocked', 'empty'})
         self.assertIn('extraction_failed', str(opened))
         self.assertNotIn('/etc/passwd', str(opened))
-        self.assertEqual(len(k.snapshot()['documents']), 4)
-
-    def test_notes_and_optional_practices_are_live_cited_and_never_raw_json(self):
-        note = self.conn.execute("INSERT INTO notes(text) VALUES ('Preferenza smeraldo') RETURNING id").fetchone()[0]
-        self.conn.execute('''CREATE TABLE practices (id BIGSERIAL PRIMARY KEY,title TEXT,
-            objective TEXT,status TEXT,version INTEGER,created_at TIMESTAMPTZ,metadata JSONB);
-            INSERT INTO practices(title,objective,status,version,created_at,metadata)
-            VALUES ('Casa','Riparazione smeraldo','active',3,now(),'{"api_key":"never-export"}')''')
-        hits = k.search('smeraldo')
-        self.assertEqual({h['source_type'] for h in hits}, {'note', 'practice'})
-        self.assertEqual(k.open_source('practice', 1)['revision'], '3')
-        self.assertNotIn('never-export', str(hits))
-        self.conn.execute("UPDATE notes SET text='Preferenza rubino' WHERE id=%s", (note,))
-        self.assertEqual(len(k.search('smeraldo')), 1)
-        self.assertIn('rubino', k.open_source('note', note)['text'])
-        self.conn.execute('DELETE FROM notes WHERE id=%s', (note,))
-        self.assertEqual(k.open_source('note', note)['status'], 'not_found')
-        self.assertEqual(k.search('smeraldo', channel='email'), [])
-
-    def test_secretary_practice_adapter_selects_text_not_delegations_or_metadata(self):
-        self.conn.execute('''CREATE TABLE secretary_practices (
-            id BIGSERIAL PRIMARY KEY,objective TEXT,state TEXT,version BIGINT,
-            next_action TEXT,waiting_for TEXT,blocked_reason TEXT,completion_criteria TEXT,
-            updated_at TIMESTAMPTZ,scope JSONB);
-            INSERT INTO secretary_practices VALUES (1,'Riparazione smeraldo','active',4,
-            'Controllare preventivo','','','Conferma ricevuta',now(),'{"token":"never-export"}')''')
-        hits = k.search('smeraldo')
-        self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]['source_type'], 'practice')
-        self.assertEqual(hits[0]['status'], 'active')
-        self.assertEqual(hits[0]['revision'], '4')
-        self.assertEqual(hits[0]['source']['table'], 'secretary_practices')
-        opened = k.open_source('practice', 1)
-        self.assertIn('Controllare', opened['text'])
-        self.assertNotIn('never-export', str(opened))
+        self.assertEqual(self.documents(), 4)
 
     def test_database_url_guard_rejects_implicit_or_non_test_database(self):
         for url in ('dbname=production', 'host=/tmp', 'service=deployment dbname=example_test'):
@@ -293,7 +298,7 @@ class KnowledgePostgresTests(unittest.TestCase):
             self.assertEqual(kind, 'knowledge')
             self.assertTrue(payload['archive_only'])
             k.index_message(payload)
-        self.assertTrue(all(h['historical'] for h in k.search('caldaia')))
+        self.assertTrue(all(h['historical'] for h in self.search('caldaia')))
         self.assertEqual(self.conn.execute('SELECT count(*) FROM tasks').fetchone(), (0,))
         self.assertEqual(self.conn.execute('SELECT count(*) FROM message_analysis').fetchone(), (0,))
 
@@ -330,7 +335,7 @@ class KnowledgePostgresTests(unittest.TestCase):
             self.assertEqual(k.index_message({'message_id': mid})['status'], 'stale')
         self.assertEqual(self.conn.execute('SELECT count(*) FROM knowledge_entries').fetchone(), (0,))
         self.assertEqual(k.index_message({'message_id': mid})['status'], 'indexed')
-        self.assertEqual(len(k.search('rubino')), 1)
+        self.assertEqual(len(self.search('rubino')), 1)
 
     def test_optional_transcript_table_missing_attachment_caps_and_context_budget(self):
         self.conn.execute('DROP TABLE media_transcripts')
@@ -340,10 +345,9 @@ class KnowledgePostgresTests(unittest.TestCase):
         result = self.index(mid)
         self.assertEqual(result['omitted_attachments'], 2)
         self.assertEqual(result['status'], 'partial')
-        self.assertLessEqual(len(k.open_source('message', mid)['text']), k.MAX_TEXT)
-        self.assertLessEqual(k.context('smeraldo', 12)['text_chars'], k.MAX_CONTEXT)
-        self.assertEqual(len(k.search('smeraldo', limit=1)), 1)
-        self.assertEqual(len(k.snapshot(limit=2)['documents']), 2)
+        self.assertLessEqual(len(self.opened('message', mid)['text']), k.MAX_TEXT)
+        self.assertEqual(len(self.search('smeraldo', limit=1)), 1)
+        self.assertEqual(self.documents(), k.MAX_ATTACHMENTS)
 
     def test_extractor_version_and_removed_attachment_are_reindexed(self):
         mid = self.message()
@@ -355,7 +359,7 @@ class KnowledgePostgresTests(unittest.TestCase):
             self.assertEqual(self.conn.execute('SELECT count(*) FROM knowledge_extractions').fetchone(), (2,))
             self.conn.execute('DELETE FROM attachments WHERE id=%s', (aid,))
             self.index(mid)
-        self.assertEqual(k.search('smeraldo'), [])
+        self.assertEqual(self.search('smeraldo'), [])
         self.assertEqual(self.conn.execute('SELECT count(*) FROM knowledge_occurrences').fetchone(), (2,))
 
 

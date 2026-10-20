@@ -34,14 +34,14 @@ class Capability:
 
 
 REGISTRY = MappingProxyType({
-    'extraction': Capability(('extract_text', 'analyze_communication')),
-    'search': Capability(('search_sources', 'open_source')),
-    'cataloguing': Capability(('catalogue_document',)),
-    'drafts': Capability(('prepare_draft',)),
-    'memory': Capability(('propose_memory_changes',)),
-    'tasks': Capability(('propose_task_changes',)),
-    'calendar': Capability(('propose_event',)),
-    'invoices': Capability(('classify_invoice', 'archive_invoice'),
+    'extraction': Capability(('read_message', 'attachment_text', 'triage')),
+    'search': Capability(('db_query', 'fs_find', 'mail_search', 'web_search')),
+    'cataloguing': Capability(('attachment_text',)),
+    'drafts': Capability(('email_propose',)),
+    'memory': Capability(('note_save', 'note_forget')),
+    'tasks': Capability(('task_change', 'tasks_close_bulk', 'task_from_message')),
+    'calendar': Capability(('calendar_propose',)),
+    'invoices': Capability(('archive_invoice',),
                           ('invoice_document', 'configured_storage'), optional=True),
     'monthly_zip': Capability(('prepare_monthly_zip', 'propose_zip_delivery'),
                              ('archived_invoices', 'delivery_authorization'), optional=True),

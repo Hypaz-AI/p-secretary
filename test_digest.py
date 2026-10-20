@@ -1,11 +1,9 @@
-"""Regressioni offline per recap e pianificazione persistente a 48 ore."""
-import json
+"""Regressioni offline del riepilogo serale (job durevole) e della pianificazione a 48 ore."""
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-import brain
 import db
 import digest
 import jobs
@@ -25,40 +23,81 @@ class DigestTests(unittest.TestCase):
     def task(self, deadline=None, source=None):
         return dict(id=7, title='Inviare documenti', deadline=deadline, source_message=source)
 
-    def test_empty_day_still_queues_plan_and_uses_exact_48_hours_at_dst(self):
+    def test_empty_day_uses_neutral_text_without_calling_the_agent_and_exact_48_hours(self):
         self.conn.execute.return_value.fetchall.return_value = []
-        # Enabled digest flow; no previously sealed notification for this day.
-        self.conn.execute.return_value.fetchone.side_effect = [(True,), None]
-        with patch('digest.datetime') as clock, \
-             patch('config.TELEGRAM_CHAT_ID', '7'), \
+        queued = {}
+        with patch('flows.enabled', return_value=True), \
+             patch('digest.datetime') as clock, \
              patch('db.pending_tasks', return_value=[]) as pending, \
              patch('digest.plan_pending_tasks') as plan, \
+             patch('digest.witnesses', return_value=([], [])), \
              patch('db.appointments_between', return_value=[]) as agenda, \
-             patch('brain.summarize_day') as summarize, \
-             patch('jobs.enqueue', return_value=(1,)) as enqueue:
+             patch('agent.turns.digest_text') as agent, \
+             patch('digest._seal_sources', return_value=([], [])), \
+             patch('digest._queue_notification', side_effect=lambda conn, day, text, sources, media:
+                   queued.update(day=day, text=text)):
             clock.now.return_value = self.now
-            self.assertTrue(digest.send_daily_digest())
+            clock.strptime = datetime.strptime
+            digest.run({'day': '2099-10-24'})
         end = pending.call_args.args[0]
         self.assertEqual((end.astimezone(timezone.utc) - self.now.astimezone(timezone.utc)).total_seconds(), 48 * 3600)
         self.assertNotEqual(end.utcoffset(), self.now.utcoffset())
         plan.assert_called_once_with([], self.now, end)
         agenda.assert_called_once_with(self.now, end)
-        summarize.assert_not_called()  # No consented native input: local recap only.
+        agent.assert_not_called()  # nessuna fonte consentita: niente chiamata al modello
+        self.assertIn(digest.NO_SOURCE_TEXT, queued['text'])
+        self.assertIn(end.strftime('%d/%m %H:%M'), queued['text'])
+
+    def test_agent_text_is_sealed_with_window_and_read_sources(self):
+        self.conn.execute.return_value.fetchall.return_value = []
+        captured = {}
+        with patch('flows.enabled', return_value=True), \
+             patch('db.pending_tasks', return_value=[]), patch('db.appointments_between', return_value=[]), \
+             patch('digest.plan_pending_tasks'), \
+             patch('digest.witnesses', side_effect=[([1, 2], [2]), ([1, 3], [])]), \
+             patch('agent.turns.digest_text', return_value=('Riepilogo del giorno', [9])) as agent, \
+             patch('digest._seal_sources', return_value=([1, 2, 3, 9], [2])) as seal, \
+             patch('digest._queue_notification', side_effect=lambda conn, day, text, sources, media:
+                   captured.update(text=text, sources=sources, media=media)):
+            digest.run({'day': '2099-10-24'})
+        agent.assert_called_once()
+        before, after, touched = seal.call_args.args[1:]
+        self.assertEqual((before, after, touched), (([1, 2], [2]), ([1, 3], []), [9]))
+        self.assertIn('Riepilogo del giorno', captured['text'])
+        self.assertEqual((captured['sources'], captured['media']), ([1, 2, 3, 9], [2]))
+
+    def test_invalid_job_payload_fails_permanently_and_paused_flow_defers(self):
+        for payload in (None, {}, {'day': 'oggi'}, {'day': '2099-13-40'}, {'day': 7}):
+            with self.subTest(payload=payload), self.assertRaises((jobs.Permanent, ValueError)):
+                digest.run(payload)
+        with patch('flows.enabled', return_value=False), self.assertRaises(jobs.Deferred):
+            digest.run({'day': '2099-10-24'})
+
+    def test_enqueue_is_idempotent_per_day_and_never_sends(self):
+        with patch('jobs.submit') as submit:
+            digest.enqueue_digest(self.now)
+        submit.assert_called_once_with('digest', 'digest:2099-10-24', {'day': '2099-10-24'})
+
+    def test_scheduler_enqueues_once_at_the_configured_time(self):
+        state = {}
+        with patch('flows.enabled', return_value=True), patch('flows.mark'), \
+             patch('jobs.cursor', return_value=None), patch('jobs.set_cursor') as cursor, \
+             patch('digest.enqueue_digest', return_value=True) as enqueue, \
+             patch('digest._parse_digest_time', return_value=(21, 0)), \
+             patch('digest.datetime') as clock:
+            clock.now.return_value = self.now.replace(hour=20)
+            self.assertFalse(digest.maybe_send_digest(state))
+            enqueue.assert_not_called()
+            clock.now.return_value = self.now
+            self.assertTrue(digest.maybe_send_digest(state))
         enqueue.assert_called_once()
-        payload = enqueue.call_args.args[3]
-        self.assertIn('Nessuna fonte autorizzata per il riepilogo AI.', payload['text'])
-        self.assertIn(end.strftime('%d/%m %H:%M'), payload['text'])
-        self.assertFalse(payload['html'])
-        self.assertEqual((payload['type'], payload['system'], payload['flow']),
-                         ('notify', 'digest', 'digest'))
-        self.assertEqual(payload['digest_day'], self.now.strftime('%Y-%m-%d'))
-        seals = [c.args[1] for c in self.conn.execute.call_args_list
-                 if 'INSERT INTO system_notifications' in c.args[0]]
-        self.assertEqual(len(seals), 1)
-        self.assertEqual(seals[0][:5], (payload['system_authorization'], payload['digest_day'],
-                                      '7', enqueue.call_args.args[2], 1))
-        self.assertEqual(json.loads(seals[0][5]), dict(text=payload['text'], html=False, recipient='7'))
-        self.assertEqual(seals[0][-2:], ([], []))
+        cursor.assert_called_once_with('last_digest_day', '2099-10-24')
+        with patch('flows.enabled', return_value=True), patch('flows.mark'), \
+             patch('jobs.cursor', side_effect=lambda key, default=None: '2099-10-24' if key == 'last_digest_day' else None), \
+             patch('digest.enqueue_digest') as enqueue, patch('digest.datetime') as clock:
+            clock.now.return_value = self.now
+            self.assertFalse(digest.maybe_send_digest(state))
+        enqueue.assert_not_called()
 
     def test_digest_without_valid_recipient_never_queues_notification(self):
         for recipient in (None, '', '-7', 'invalid'):
@@ -126,30 +165,6 @@ class DigestTests(unittest.TestCase):
             digest.plan_pending_tasks([self.task()], self.now, self.until)
         save.assert_not_called()
         self.assertEqual(self.conn.execute.call_args.args[1][0], self.now)
-
-    def test_remote_agenda_filtered_and_local_proposals_preserved(self):
-        local = [dict(dt=(self.now + timedelta(hours=1)).isoformat(), title='Proposta', sync_state='proposal')]
-        remote = [dict(dt=(self.now + timedelta(hours=h)).isoformat(), title=str(h)) for h in (2, 60)]
-        with patch('db.appointments_between', return_value=local), \
-             patch('connectors.gcal.is_active', return_value=True), \
-             patch('connectors.gcal.upcoming_events', return_value=remote):
-            agenda = digest.planning_agenda(self.now, self.until)
-        self.assertEqual([a['title'] for a in agenda], ['Proposta', '2'])
-
-    def test_ai_receives_old_pending_tasks_and_fallback_keeps_plan(self):
-        task = self.task(self.now - timedelta(days=5))
-        appointment = dict(id=8, dt='2099-10-25 10:00', title='Visita', sync_state='proposal')
-        for failure in (False, True):
-            with self.subTest(failure=failure), \
-                 patch('brain._chat', side_effect=RuntimeError('offline') if failure else None,
-                       return_value='Recap') as chat:
-                text = brain.summarize_day([], [appointment], tasks=[task],
-                                           planning_start=self.now, planning_end=self.until)
-            self.assertIn('#7 Inviare documenti', chat.call_args.args[1])
-            self.assertIn('proposal', chat.call_args.args[1])
-            if failure:
-                self.assertIn('Visita', text)
-                self.assertIn('#7 Inviare documenti', text)
 
 
 if __name__ == '__main__':

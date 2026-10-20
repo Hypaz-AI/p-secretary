@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import subprocess
 import unittest
 from unittest.mock import patch
 import uuid
@@ -140,10 +139,6 @@ class MediaConsentPostgresTests(unittest.TestCase):
         media_archive.migrate(self.conn)
         policy.migrate(self.conn)
         knowledge.migrate(self.conn)
-        import secretary
-        import secretary_runtime
-        secretary.migrate(self.conn)
-        secretary_runtime.migrate(self.conn)
         self.enterContext(patch.object(db, '_conn', self.connection))
         self.enterContext(patch.object(config, 'OPENROUTER_API_KEY', 'offline-test'))
         self.convert = self.enterContext(patch.object(media_text, 'convert', return_value='Voce smeraldo recuperata'))
@@ -198,6 +193,9 @@ class MediaConsentPostgresTests(unittest.TestCase):
                 json=dict(channel=channel, effect=effect, allowed=allowed, expected_version=version))
             self.assertEqual(response.status_code, 200)
 
+    def indexed(self, word):
+        return self.scalar("SELECT count(*) FROM knowledge_entries WHERE active AND text ILIKE %s", ('%' + word + '%',))
+
     def retry(self, mid, channel='telegram (account)'):
         return self.client.post(PATH, json=dict(message_id=mid, expected_channel=channel), headers=self.headers)
 
@@ -208,7 +206,7 @@ class MediaConsentPostgresTests(unittest.TestCase):
         self.assertEqual(blocked[:3], ('blocked', 'media_consent_required', 1))
         self.convert.assert_not_called()
         knowledge.index_message(dict(message_id=mid))
-        self.assertEqual(knowledge.search('smeraldo'), [])
+        self.assertEqual(self.indexed('smeraldo'), 0)
         before = self.conn.execute('SELECT * FROM work_jobs ORDER BY id').fetchall()
         self.grant()
         self.assertEqual(self.conn.execute('SELECT * FROM work_jobs ORDER BY id').fetchall(), before)
@@ -231,7 +229,7 @@ class MediaConsentPostgresTests(unittest.TestCase):
                          'Voce smeraldo recuperata')
         self.assertEqual(self.scalar('SELECT body FROM telegram_messages WHERE id=%s', (mid,)), 'Caption originale')
         knowledge.index_message(dict(message_id=mid))
-        self.assertTrue(knowledge.search('smeraldo'))
+        self.assertEqual(self.indexed('smeraldo'), 1)
         self.assertEqual(self.scalar("SELECT count(*) FROM effect_audit WHERE message_id=%s AND reason='media_consent_retry'", (mid,)), 1)
         audits = self.conn.execute('SELECT effect,reason FROM effect_audit').fetchall()
         self.assertNotIn('Caption', str(audits))
@@ -442,71 +440,6 @@ class MediaConsentPostgresTests(unittest.TestCase):
         self.run_media()
         self.assertEqual(self.state(aid)[0], 'blocked')
         self.convert.assert_not_called()
-
-
-MEDIA_UI_SCENARIO = r'''
-async function mediaRecovery() {
-  context.confirm = () => true;
-  const hit = {source_type: 'message', source_id: 7, entry_id: 901,
-    citation: 'message:7@revision', channel: 'telegram (account)'};
-  const source = {...hit, status: 'indexed', text: 'Native caption',
-    current: true, historical: false, ...options.source};
-  await searchedSource(hit, '/api/knowledge/open/entry/901', source);
-  const retry = element('source-documents').querySelector('button');
-  if (options.denied) {assert.equal(retry, null); return;}
-  assert.ok(retry, 'Missing explicit media recovery control');
-  assert.equal(requests.length, 0, 'Opening a source must never retry');
-  const status = element('source-documents').children.at(-1);
-  const pending = retry.onclick();
-  assert.equal(retry.disabled, true);
-  const request = take('/api/media/retry-blocked');
-  assert.equal(request.init.method, 'POST');
-  assert.equal(request.init.headers['X-CSRF-Token'], 'synthetic-session');
-  assert.deepEqual(JSON.parse(request.init.body), {message_id:7, expected_channel:'telegram (account)'});
-  if (options.stale) {
-    await logout();
-    await login();
-    const before = domState(), oldText = status.textContent;
-    finish(request, options.outcome, {queued:1});
-    await pending;
-    assert.deepEqual(domState(), before);
-    assert.equal(status.textContent, oldText);
-  } else {
-    finish(request, options.outcome, {queued:options.queued});
-    await pending;
-    assert.equal(retry.disabled, false);
-    assert.ok(status.textContent.includes(options.outcome === 'success'
-      ? options.queued ? 'media accodati' : 'Nessun media recuperabile'
-      : 'verifica entrambi i consensi'));
-  }
-}
-'''
-
-
-class MediaConsentWebTests(unittest.TestCase):
-    def scenario(self, **options):
-        from test_web_session_safety import NODE_HARNESS, node_env
-        harness = NODE_HARNESS.replace('(async () => {', MEDIA_UI_SCENARIO + '\n(async () => {', 1)
-        harness = harness.replace("if (scenario === 'sources') await sources();",
-            "if (scenario === 'media') await mediaRecovery(); else if (scenario === 'sources') await sources();")
-        result = subprocess.run(['node', '--unhandled-rejections=strict', '-e', harness],
-            input=json.dumps(dict(script=(ROOT / 'web/app.js').read_text(), scenario='media', options=options)),
-            cwd=ROOT, env=node_env(), text=True, capture_output=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_explicit_per_native_source_action_and_no_source_open_replay(self):
-        for queued in (0, 1):
-            self.scenario(outcome='success', queued=queued)
-        self.scenario(outcome='unavailable')
-
-    def test_history_stale_revision_and_unsupported_sources_have_no_button(self):
-        for source in (dict(historical=True), dict(current=False), dict(channel='email'),
-                       dict(source_type='document'), dict(source_id=2 ** 53)):
-            self.scenario(source=source, denied=True)
-
-    def test_retry_continuations_are_session_fenced(self):
-        for outcome in ('success', 'unavailable', 'network', 'unauthorized'):
-            self.scenario(outcome=outcome, queued=1, stale=True)
 
 
 if __name__ == '__main__':

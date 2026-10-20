@@ -6,6 +6,11 @@ Flask>=3.1,<4
 waitress>=3,<4
 psycopg[binary]>=3.2,<4
 pypdf>=6,<7
+# Agente: Copilot SDK (il runtime è fissato dalla versione dell'SDK), validazione
+# degli argomenti degli strumenti e guardia AST delle query SQL in sola lettura.
+github-copilot-sdk==1.0.23
+pydantic>=2.11,<3
+pglast>=7,<9
 
 # Solo se vuoi abilitare WhatsApp:
 #   sudo apt install nodejs npm

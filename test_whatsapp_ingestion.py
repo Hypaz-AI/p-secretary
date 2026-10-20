@@ -118,15 +118,14 @@ class IngestionTests(unittest.TestCase):
         process.assert_called_once()
         self.assertEqual(self.bridge.fetch_new_messages(), [])
 
-    @patch('main.brain.chat_with_user', side_effect=AssertionError('AI dialogue forbidden'))
+    @patch('main.process_message')
     @patch('main.db.log_communication')
     @patch('main.db.communication_seen', return_value=False)
-    def test_outgoing_archived_no_dialogue(self, seen, log, chat):
+    def test_outgoing_archived_without_any_agent_work(self, seen, log, process):
         self.put(from_me=True)
         main.check_whatsapp({}, self.bridge)
         self.assertEqual(log.call_args.kwargs['source_id'], 'a')
-        chat.assert_not_called()
-        self.assertFalse(main._is_from_user('whatsapp', 'owner', True))
+        process.assert_not_called()  # niente job di analisi/dialogo per i propri messaggi in uscita
 
     @patch('main.process_message')
     @patch('main.db.communication_seen', return_value=True)
@@ -167,7 +166,7 @@ const fs = {mkdirSync(){},existsSync:p=>p in files,writeFileSync:(p,v)=>files[p]
 const context = {Buffer, process:{on(){}, env:{WA_SPOOL_DIR:'/spool',
  WA_MEDIA_DIR:'/media', WA_HISTORY_CUTOFF:'100'},stdin:{}},
  console:{log:v=>emitted.push(JSON.parse(v))},
- setTimeout:()=>({unref(){}}),setInterval:()=>({unref(){}}),
+ setTimeout:fn=>{if(typeof fn==='function')Promise.resolve().then(fn);return {unref(){}};},setInterval:()=>({unref(){}}),
  require:n=> n==='whatsapp-web.js'?{Client,LocalAuth:class{}}:
  n==='fs'?fs:n==='path'?require('path'):n==='crypto'?require('crypto'):
  n==='readline'?{createInterface:()=>({on(){}})}:{} };
@@ -226,6 +225,104 @@ vm.runInContext(JSON.parse(require('fs').readFileSync(0,'utf8')), context);
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('PASS', result.stdout)
+
+    def run_node(self, harness):
+        result = subprocess.run(['node', '-e', harness], input=json.dumps(NODE_BRIDGE),
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('PASS', result.stdout)
+
+    def test_node_media_is_retried_tracked_and_never_silently_lost(self):
+        self.run_node(r"""
+const vm = require('vm');
+let files = {}, events = {}, emitted = [], downloads = {}, failWrite = false;
+class Client {
+ constructor() { this.info = {wid:{_serialized:'self'}}; }
+ on(k, fn) {events[k] = fn;}
+ initialize() {return Promise.resolve();}
+}
+const data = Buffer.from('contenuto').toString('base64');
+function message(id, behaviour) {return {id:{_serialized:id, id}, timestamp:200, from:'p@c.us', fromMe:false,
+ body:'', hasMedia:true, type:'document', getChat:async()=>({name:'Anna'}), getContact:async()=>({name:'Anna'}),
+ downloadMedia: async () => {downloads[id]=(downloads[id]||0)+1; return behaviour(downloads[id]);}};}
+const fs = {mkdirSync(){},existsSync:p=>p in files,writeFileSync:(p,v)=>{
+   if (failWrite && p.includes('/media/')) throw Error('disk full'); files[p]=v;},
+ readFileSync:p=>files[p],renameSync:(a,b)=>{files[b]=files[a];delete files[a];}};
+const context = {Buffer, process:{on(){}, env:{WA_SPOOL_DIR:'/spool', WA_MEDIA_DIR:'/media', WA_HISTORY_CUTOFF:'100'},stdin:{}},
+ console:{log:v=>emitted.push(JSON.parse(v))},
+ setTimeout:fn=>{if(typeof fn==='function')Promise.resolve().then(fn);return {unref(){}};},setInterval:()=>({unref(){}}),
+ require:n=> n==='whatsapp-web.js'?{Client,LocalAuth:class{}}:
+ n==='fs'?fs:n==='path'?require('path'):n==='crypto'?require('crypto'):
+ n==='readline'?{createInterface:()=>({on(){}})}:{} };
+vm.createContext(context);
+vm.runInContext(JSON.parse(require('fs').readFileSync(0,'utf8')), context);
+const read = id => JSON.parse(files['/spool/'+Buffer.from(id).toString('hex')+'.json']);
+const ok = {data, mimetype:'application/pdf', filename:'fattura.pdf'};
+(async()=>{
+ // Il ponte riprova: undefined due volte, poi il file arriva.
+ await events.message_create(message('late', n => n < 3 ? undefined : ok));
+ let m = read('late');
+ if (downloads.late !== 3 || m.attachments.length !== 1 || m.media_error !== false || m.has_media !== true || m.media_type !== 'document')
+   throw Error('retry did not recover the media: ' + JSON.stringify(m));
+ if (!files['/media/late_fattura.pdf'] || Object.keys(files).some(p => p.endsWith('.tmp'))) throw Error('media not stored atomically');
+ // Mai disponibile: nessun allegato, motivo tracciato, messaggio comunque archiviato.
+ await events.message_create(message('never', () => undefined));
+ m = read('never');
+ if (m.attachments.length || m.media_error !== 'unavailable' || !m.enriched || m.has_media !== true) throw Error('unavailable not tracked');
+ // Errore di rete, contenuto vuoto, disco pieno: ognuno con il proprio motivo.
+ await events.message_create(message('boom', () => {throw Error('private media URL');}));
+ if (read('boom').media_error !== 'download_failed') throw Error('download error not tracked');
+ await events.message_create(message('empty', () => ({data:'=', mimetype:'x', filename:'e'})));  // base64 senza byte
+ if (read('empty').media_error !== 'empty') throw Error('empty not tracked');
+ await events.message_create(message('blank', () => ({data:'', mimetype:'x', filename:'e'})));
+ if (read('blank').media_error !== 'unavailable' || downloads.blank !== 3) throw Error('blank data must be retried as unavailable');
+ failWrite = true;
+ await events.message_create(message('disk', () => ok));
+ failWrite = false;
+ if (read('disk').media_error !== 'write_failed' || read('disk').attachments.length) throw Error('write failure not tracked');
+ // Il motivo non contiene mai il testo dell'errore del browser/libreria.
+ if (JSON.stringify(read('boom')).includes('private media URL')) throw Error('error text leaked');
+ // Un'entry con media fallito non è definitiva: al giro successivo ci riprova e il successo cancella l'errore.
+ files['/spool/'+Buffer.from('retry').toString('hex')+'.json'] = JSON.stringify({id:'retry', enriched:true, names_version:2,
+   media_error:'unavailable', media_attempts:1, attachments:[]});
+ await events.message_create(message('retry', () => ok));
+ m = read('retry');
+ if (m.attachments.length !== 1 || m.media_error !== false) throw Error('pending media entry was treated as final');
+ // Dopo troppi tentativi smette di insistere (il file resta com'è).
+ const exhausted = JSON.stringify({id:'tired', enriched:true, names_version:2, media_error:'unavailable', media_attempts:6, attachments:[]});
+ files['/spool/'+Buffer.from('tired').toString('hex')+'.json'] = exhausted;
+ await events.message_create(message('tired', () => ok));
+ if (files['/spool/'+Buffer.from('tired').toString('hex')+'.json'] !== exhausted || downloads.tired) throw Error('retries not bounded');
+ // Senza cartella media il fallimento è esplicito, non un messaggio senza traccia.
+ console.log('PASS');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+""")
+
+    def test_media_state_is_forwarded_as_closed_vocabulary_in_native_metadata(self):
+        from connectors.whatsapp import media_metadata
+        self.assertEqual(media_metadata({'text': 'solo testo'}), {})
+        self.assertEqual(media_metadata({'has_media': True, 'media_error': False, 'media_type': 'image',
+                                         'attachments': [{'filename': 'a'}]}),
+                         {'has_media': True, 'media_error': False, 'media_type': 'image'})
+        for reason in ('download_failed', 'unavailable', 'empty', 'write_failed', 'storage_unavailable'):
+            self.assertEqual(media_metadata({'has_media': True, 'media_error': reason, 'attachments': []})['media_error'], reason)
+        # Testo arbitrario del ponte non entra mai nei metadati; un allegato presente prevale sul flag.
+        self.assertIs(media_metadata({'has_media': True, 'media_error': 'private URL https://x', 'attachments': []})['media_error'], True)
+        self.assertIs(media_metadata({'has_media': True, 'media_error': 'unavailable', 'attachments': [{'filename': 'a'}]})['media_error'], False)
+        self.assertEqual(media_metadata({'has_media': 'yes', 'media_error': True}), {})
+        self.assertNotIn('media_type', media_metadata({'has_media': True, 'media_type': 'x' * 41, 'attachments': []}))
+
+    def test_spooled_media_status_reaches_the_stored_message_and_success_clears_the_error(self):
+        import message_store
+        self.put(has_media=True, media_error='unavailable', media_type='document', attachments=[])
+        self.assertTrue(self.bridge.fetch_new_messages())
+        found = self.bridge.fetch_new_messages()[0]
+        self.assertEqual((found['metadata']['has_media'], found['metadata']['media_error'],
+                          found['metadata']['media_type']), (True, 'unavailable', 'document'))
+        # Il merge dei metadati WhatsApp: il successo (False) sovrascrive l'errore precedente.
+        merged = message_store.merge_whatsapp_metadata({'has_media': True, 'media_error': 'unavailable'},
+                                                       {'has_media': True, 'media_error': False})
+        self.assertIs(merged['media_error'], False)
 
 
 if __name__ == '__main__':

@@ -93,7 +93,8 @@ const context = vm.createContext({
     return request.promise;
   },
   // Never run the production refresh timer or expose real browser/network APIs.
-  setInterval() {}
+  setInterval() {},
+  confirm: () => true
 });
 const run = code => vm.runInContext(code, context);
 const checkpoint = () => new Promise(resolve => setImmediate(resolve));
@@ -112,28 +113,18 @@ function domState() {
     children: item.children.map(describe)});
   return [...elements].map(([id, item]) => [id, describe(item)]);
 }
-const privateIds = ['practices', 'responsibilities', 'approvals',
-  'secretary-receipts', 'secretary-decisions', 'email-practice', 'email-executions',
-  'email-account'];
+const privateIds = ['agent-runs', 'agent-emails'];
 function snapshot(marker) {
-  return {
-    practices: [{id: 11, version: 2, state: 'active', objective: `${marker} practice`}],
-    responsibilities: [{id: 22, version: 1, state: 'active', objective: `${marker} duty`,
-      scope: {topic: marker, channels: ['email']}, allowed_actions: [], stop_condition: marker}],
-    approvals: [{id: 33, practice_id: 11, version: 1, state: 'pending',
-      effective_state: 'pending', payload_hash: marker, expires_at: '2099-01-01T00:00:00Z',
-      payload: {channel: 'email', text: `${marker} approval`}}],
-    receipts: [{receipt: `${marker} receipt`}], decisions: [{event: `${marker} decision`}],
-    wakeups: [{practice_id: 11, reason: `${marker} wakeup`}], links: [], truncated: {}
-  };
+  return {model: 'openrouter/auto', readonly_role: true, sends_allowed: false, limits: {},
+    runs: [{id: 11, kind: 'owner', state: 'done', tool_calls: 2, error: `${marker} run`,
+      model: 'openrouter/auto', started_at: '2099-01-01T00:00:00Z', finished_at: null}],
+    emails: [{id: 5, account: `${marker}@example.invalid`, recipient: 'to@example.invalid',
+      subject: `${marker} subject`, body: `${marker} body`, state: 'proposed',
+      created_at: '2099-01-01T00:00:00Z', decided_at: null, sent_at: null}]};
 }
-function execution(marker) {
-  const address = `${marker}@example.invalid`;
-  return {subject: `${marker} subject`, accounts: [{account_address: address}],
-    proposals: [{approval_id: 33, expected_version: 1, state: 'pending',
-      dispatch_state: 'not_requested', account_address: address, subject: `${marker} subject`,
-      expires_at: '2099-01-01T00:00:00Z', payload: {recipient: address,
-        text: `${marker} email`, channel: 'email', documents: []}}]};
+function detail(marker) {
+  return {run_id: 11, calls: [{seq: 1, tool: 'db_query', args: `${marker} args`, ok: true,
+    summary: `${marker} summary`, duration_ms: 12, at: '2099-01-01T00:00:00Z'}]};
 }
 function finish(request, outcome, body) {
   if (outcome === 'network') request.reject(Error('Synthetic network failure'));
@@ -143,18 +134,13 @@ function finish(request, outcome, body) {
   else if (outcome === 'unavailable') respond(request, {error: 'Schema non disponibile'}, 503);
   else {assert.equal(outcome, 'success'); respond(request, body);}
 }
-async function beginLoad(marker) {
-  const loading = run('loadSecretary()');
-  respond(take('/api/secretary'), snapshot(marker));
-  await checkpoint();
-  return {loading, request: take('/api/secretary/execution')};
-}
 async function logout() {
   const leaving = element('logout').onclick();
   respond(take('/api/logout'), {});
   await leaving;
   assert.equal(element('dashboard').hidden, true);
-  for (const id of privateIds) assert.equal(element(id).textContent, '', id);
+  for (const id of [...privateIds, 'agent-calls']) assert.equal(element(id).textContent, '', id);
+  assert.equal(element('agent-detail').hidden, true);
 }
 async function login() {
   // Use the real API/session helpers without unrelated workspace loaders.
@@ -166,111 +152,124 @@ async function login() {
 }
 function assertCurrent() {
   for (const id of privateIds) assert.ok(element(id).textContent.includes('CURRENT_PRIVATE'), id);
-  assert.equal(element('email-prepare').disabled, false);
-  assert.equal(element('secretary-refresh').disabled, false);
+  assert.equal(element('agent-refresh').disabled, false);
+  assert.ok(element('agent-status').textContent.includes('Solo metadati'));
 }
 
-async function searchedSource(hit, expectedPath, source) {
-  element('knowledge-query').value = 'revision';
-  const form = new Element('form'); form.append(new Element('button'));
-  const searching = element('knowledge-search').onsubmit({preventDefault() {}, target: form});
-  respond(take('/api/knowledge/search?q=revision&limit=20'), {results: [hit]});
-  await searching;
-  const button = element('knowledge-results').querySelector('button');
-  const opening = button.onclick();
-  assert.equal(button.disabled, true);
-  respond(take(expectedPath), source);
-  await opening;
-  assert.equal(element('source-text').textContent, source.text);
-  assert.ok(element('source-meta').textContent.includes(source.citation));
-  assert.equal(element('knowledge-source').hidden, false);
-  assert.equal(button.disabled, false);
-}
-async function sources() {
-  const document = {source_type: 'document', source_id: 404, entry_id: 904,
-    citation: 'document:404@old-revision', title: 'Old attachment occurrence'};
-  if (options.kind === 'message') {
-    // The native message ID now refers to a newer revision; only entry 901
-    // still identifies the text/citation that this search returned.
-    const hit = {source_type: 'message', source_id: 7, entry_id: 901,
-      citation: 'message:7@old-revision', snippet: 'old searched text'};
-    await searchedSource(hit, '/api/knowledge/open/entry/901', {...hit,
-      status: 'indexed', text: 'old searched text', documents: [document]});
-    // Attachments returned by that exact message retain their occurrence IDs.
-    const opening = element('source-documents').querySelector('button').onclick();
-    respond(take('/api/knowledge/open/document/404'), {...document,
-      status: 'indexed', text: 'old attachment text'});
-    await opening;
-    assert.equal(element('source-text').textContent, 'old attachment text');
-    assert.ok(element('source-meta').textContent.includes(document.citation));
-  } else if (options.kind === 'document') {
-    await searchedSource(document, '/api/knowledge/open/document/404', {...document,
-      status: 'indexed', text: 'exact occurrence, not an attachment/blob ID'});
+async function currentLoad() {
+  const loading = run('loadAgent()');
+  assert.equal(element('agent-refresh').disabled, true);
+  finish(take('/api/agent'), options.outcome, snapshot('CURRENT_PRIVATE'));
+  await loading;
+  if (options.outcome === 'unauthorized') {
+    assert.equal(element('dashboard').hidden, true);
+    for (const id of privateIds) assert.equal(element(id).textContent, '', id);
+    assert.ok(!element('agent-status').textContent.includes('Solo metadati'));
+  } else if (options.outcome === 'success') {
+    assertCurrent();
+    // Un invio non è mai offerto dalla dashboard: la decisione passa da Telegram.
+    assert.ok(element('agent-emails').textContent.includes('/invia 5'));
+    assert.equal(element('agent-send').textContent.includes('disabilitato'), true);
   } else {
-    // Unversioned secretary message links, runtime entries, and live optional
-    // sources must retain the existing routing when no searched revision exists.
-    for (const source_type of ['message', 'entry', 'note', 'practice']) {
-      const hit = {source_type, source_id: 17, citation: `${source_type}:17@live`};
-      await searchedSource(hit, `/api/knowledge/open/${source_type}/17`, {...hit,
-        status: 'indexed', text: `${source_type} source`});
-    }
+    for (const id of privateIds) assert.equal(element(id).textContent.includes('CURRENT_PRIVATE'), false, id);
+    assert.equal(element('agent-refresh').disabled, false);
+    assert.ok(element('agent-status').textContent.includes('non disponibile'));
   }
 }
 async function staleLoad() {
-  let old;
-  if (options.stage === 'execution') old = await beginLoad('OLD_PRIVATE');
-  else {
-    old = {loading: run('loadSecretary()'), request: take('/api/secretary')};
-  }
+  const old = {loading: run('loadAgent()'), request: take('/api/agent')};
   await logout();
-  let currentLoad, currentRequest;
+  let current;
   if (options.session !== 'logged_out') {
     await login();
-    currentLoad = run('loadSecretary()');
-    currentRequest = take('/api/secretary');
+    current = {loading: run('loadAgent()'), request: take('/api/agent')};
     if (options.session === 'new_rendered') {
-      respond(currentRequest, snapshot('CURRENT_PRIVATE'));
-      await checkpoint();
-      respond(take('/api/secretary/execution'), execution('CURRENT_PRIVATE'));
-      await currentLoad;
+      respond(current.request, snapshot('CURRENT_PRIVATE'));
+      await current.loading;
       assertCurrent();
     }
   }
   // A stale continuation must not change ANY current DOM/control state,
   // including catches/finally and the refresh button of a newer pending load.
   const before = domState();
-  finish(old.request, options.outcome, options.stage === 'execution'
-    ? execution('OLD_PRIVATE') : snapshot('OLD_PRIVATE'));
+  finish(old.request, options.outcome, snapshot('OLD_PRIVATE'));
   await old.loading;
   await checkpoint();
-  assert.deepEqual(domState(), before, 'Stale secretary continuation changed the DOM');
+  assert.deepEqual(domState(), before, 'Stale agent continuation changed the DOM');
   if (options.session === 'new_pending') {
-    respond(currentRequest, snapshot('CURRENT_PRIVATE'));
-    await checkpoint();
-    respond(take('/api/secretary/execution'), execution('CURRENT_PRIVATE'));
-    await currentLoad;
+    respond(current.request, snapshot('CURRENT_PRIVATE'));
+    await current.loading;
     assertCurrent();
   }
 }
-async function currentLoad() {
-  const {loading, request} = await beginLoad('CURRENT_PRIVATE');
-  finish(request, options.outcome, execution('CURRENT_PRIVATE'));
-  await loading;
-  if (options.outcome === 'unauthorized') {
-    assert.equal(element('dashboard').hidden, true);
-    for (const id of privateIds) assert.equal(element(id).textContent, '', id);
-    assert.equal(element('email-prepare').disabled, true);
-    assert.ok(!element('secretary-status').textContent.includes('Snapshot manuale'));
-  } else if (options.outcome === 'success') assertCurrent();
-  else {
-    for (const id of privateIds.slice(0, 6)) {
-      assert.ok(element(id).textContent.includes('CURRENT_PRIVATE'), id);
-    }
-    assert.ok(element('email-executions').textContent.includes('Schema non disponibile'));
-    assert.equal(element('email-prepare').disabled, true);
-    assert.equal(element('secretary-refresh').disabled, false);
-    assert.ok(element('secretary-status').textContent.includes('Snapshot manuale'));
+async function staleDetail() {
+  const opening = run('openRun({id: 11, kind: "owner"})');
+  const request = take('/api/agent/runs/11');
+  await logout();
+  if (options.session !== 'logged_out') {
+    await login();
+    const reload = run('loadAgent()');
+    respond(take('/api/agent'), snapshot('CURRENT_PRIVATE'));
+    await reload;
   }
+  const before = domState();
+  finish(request, options.outcome, detail('OLD_PRIVATE'));
+  await opening;
+  await checkpoint();
+  assert.deepEqual(domState(), before, 'Stale run detail changed the DOM');
+  assert.equal(element('agent-detail').hidden, true);
+}
+async function openDetail() {
+  const loading = run('loadAgent()');
+  respond(take('/api/agent'), snapshot('CURRENT_PRIVATE'));
+  await loading;
+  const button = element('agent-runs').querySelector('button');
+  assert.ok(button, 'Missing tool-usage button');
+  const opening = button.onclick();
+  respond(take('/api/agent/runs/11'), detail('CURRENT_PRIVATE'));
+  await opening;
+  assert.equal(element('agent-detail').hidden, false);
+  assert.ok(element('agent-calls').textContent.includes('db_query'));
+  assert.ok(element('agent-calls').textContent.includes('CURRENT_PRIVATE summary'));
+}
+async function staleMediaRetry() {
+  element('media-retry-id').value = '42';
+  element('media-retry-channel').value = 'telegram';
+  const form = new Element('form'); form.append(new Element('button'));
+  const submitting = element('media-retry').onsubmit({preventDefault() {}, target: form});
+  const request = take('/api/media/retry-blocked');
+  assert.deepEqual(JSON.parse(request.init.body), {message_id: 42, expected_channel: 'telegram'});
+  await logout();
+  const before = domState();
+  finish(request, options.outcome, {queued: 1});
+  await submitting;
+  await checkpoint();
+  assert.deepEqual(domState(), before, 'Stale media retry changed the DOM');
+}
+
+async function mediaRecovery() {
+  const form = new Element('form'); form.append(new Element('button'));
+  element('media-retry-channel').value = 'telegram (account)';
+  if (options.invalid) {
+    element('media-retry-id').value = '0';
+    await element('media-retry').onsubmit({preventDefault() {}, target: form});
+    assert.equal(requests.length, 0, 'An invalid message ID must never reach the server');
+    assert.ok(element('media-retry-status').textContent.includes('ID numerico'));
+    return;
+  }
+  element('media-retry-id').value = '7';
+  const pending = element('media-retry').onsubmit({preventDefault() {}, target: form});
+  assert.equal(form.children[0].disabled, true);
+  const request = take('/api/media/retry-blocked');
+  assert.equal(request.init.method, 'POST');
+  assert.equal(request.init.headers['X-CSRF-Token'], 'synthetic-session');
+  assert.deepEqual(JSON.parse(request.init.body), {message_id: 7, expected_channel: 'telegram (account)'});
+  finish(request, options.outcome, {queued: options.queued});
+  await pending;
+  assert.equal(form.children[0].disabled, false);
+  assert.ok(element('media-retry-status').textContent.includes(options.outcome === 'success'
+    ? options.queued ? 'media accodati' : 'Nessun media recuperabile'
+    : 'Verifica entrambi i consensi'));
 }
 
 (async () => {
@@ -279,8 +278,11 @@ async function currentLoad() {
   respond(take('/api/session'), {error: 'Not authenticated'}, 401);
   await checkpoint();
   run("csrf = 'synthetic-session'; show(true);");
-  if (scenario === 'sources') await sources();
+  if (scenario === 'media') await mediaRecovery();
+  else if (scenario === 'detail') await openDetail();
   else if (scenario === 'stale') await staleLoad();
+  else if (scenario === 'stale_detail') await staleDetail();
+  else if (scenario === 'stale_media') await staleMediaRetry();
   else {assert.equal(scenario, 'current'); await currentLoad();}
   assert.equal(requests.length, 0, 'Unexpected API request');
   console.log('PASS');
@@ -299,39 +301,45 @@ class WebSessionSafetyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('PASS', result.stdout)
 
-    def test_searched_message_opens_immutable_revision_and_its_documents(self):
-        self.run_scenario('sources', kind='message')
-
-    def test_searched_document_keeps_exact_occurrence_route(self):
-        self.run_scenario('sources', kind='document')
-
-    def test_unversioned_and_optional_sources_keep_existing_routes(self):
-        self.run_scenario('sources', kind='fallback')
-
-    def test_current_session_renders_with_optional_execution_fallback(self):
+    def test_current_session_renders_runs_and_drafts_without_a_send_control(self):
         for outcome in ('success', 'unavailable'):
             with self.subTest(outcome=outcome):
                 self.run_scenario('current', outcome=outcome)
 
-    def test_execution_unauthorized_cannot_restore_secretary_snapshot(self):
+    def test_unauthorized_cannot_restore_the_agent_view(self):
         self.run_scenario('current', outcome='unauthorized')
 
-    def test_logout_during_execution_cannot_restore_private_dom(self):
+    def test_run_detail_lists_tools_used(self):
+        self.run_scenario('detail')
+
+    def test_logout_during_load_cannot_restore_private_dom(self):
         for outcome in ('success', 'unavailable', 'network', 'json', 'unauthorized'):
             with self.subTest(outcome=outcome):
-                self.run_scenario('stale', stage='execution', session='logged_out', outcome=outcome)
+                self.run_scenario('stale', session='logged_out', outcome=outcome)
 
-    def test_relogin_fences_execution_render_errors_and_cleanup(self):
+    def test_relogin_fences_render_errors_and_cleanup(self):
         for session in ('new_pending', 'new_rendered'):
             for outcome in ('success', 'unavailable', 'network', 'json', 'unauthorized'):
                 with self.subTest(session=session, outcome=outcome):
-                    self.run_scenario('stale', stage='execution', session=session, outcome=outcome)
+                    self.run_scenario('stale', session=session, outcome=outcome)
 
-    def test_snapshot_await_errors_and_cleanup_are_also_session_fenced(self):
-        for session in ('logged_out', 'new_pending', 'new_rendered'):
-            for outcome in ('success', 'unavailable'):
+    def test_stale_run_detail_is_session_fenced(self):
+        for session in ('logged_out', 'new_rendered'):
+            for outcome in ('success', 'network', 'unauthorized'):
                 with self.subTest(session=session, outcome=outcome):
-                    self.run_scenario('stale', stage='snapshot', session=session, outcome=outcome)
+                    self.run_scenario('stale_detail', session=session, outcome=outcome)
+
+    def test_media_retry_is_explicit_per_message_and_reports_the_real_outcome(self):
+        for queued in (0, 1):
+            self.run_scenario('media', outcome='success', queued=queued)
+        for outcome in ('unavailable', 'network'):
+            self.run_scenario('media', outcome=outcome)
+        self.run_scenario('media', invalid=True)
+
+    def test_stale_media_retry_is_session_fenced(self):
+        for outcome in ('success', 'network', 'unavailable'):
+            with self.subTest(outcome=outcome):
+                self.run_scenario('stale_media', outcome=outcome)
 
 
 if __name__ == '__main__':

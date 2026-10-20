@@ -2,7 +2,6 @@
 import threading
 import time
 
-import config
 import db
 import capabilities
 

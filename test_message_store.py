@@ -97,15 +97,6 @@ class NativeTests(unittest.TestCase):
             },
         }
 
-    def test_preserved_ledger_repairs_native_without_ai(self):
-        calls = []
-        with patch.object(db, 'store_message', side_effect=lambda *a, **k: calls.append('store') or 42), \
-             patch.object(db, 'communication_seen', side_effect=lambda *a: calls.append('seen') or True), \
-             patch.object(main.brain, 'analyze') as ai:
-            main._legacy_process_message('whatsapp', 'sender', '', '', {}, source_id='native')
-        self.assertEqual(calls, ['store', 'seen'])
-        ai.assert_not_called()
-
     def test_owner_command_persisted_before_routing(self):
         m = self._telegram_message()
         events = Mock()
@@ -158,8 +149,8 @@ class NativeTests(unittest.TestCase):
             patch.object(db, 'communication_seen') as seen,
             patch.object(jobs, 'enqueue') as enqueue,
             patch.object(main, 'process_message') as process,
-            patch.object(main, '_handle_user_command') as command,
-            patch.object(main, 'handle_user_chat') as chat,
+            patch.object(main, '_owner_job') as command,
+            patch.object(main, '_analysis_job') as chat,
         ):
             state = {}
             main.check_telegram(state)
@@ -196,8 +187,8 @@ class NativeTests(unittest.TestCase):
                     db, 'communication_seen') as seen, patch.object(
                     jobs, 'enqueue') as enqueue, patch.object(
                     main, 'process_message') as process, patch.object(
-                    main, '_handle_user_command') as command, patch.object(
-                    main, 'handle_user_chat') as chat, patch.object(
+                    main, '_owner_job') as command, patch.object(
+                    main, '_analysis_job') as chat, patch.object(
                     telegram, 'notify') as notify:
                 state = {}
                 main.check_telegram(state)
@@ -225,17 +216,6 @@ class NativeTests(unittest.TestCase):
     def test_identity_contains_native_scope(self):
         self.assertNotEqual(email.json_identity('a', 'INBOX', '1', '2'),
                             email.json_identity('a', 'INBOX', '3', '2'))
-
-    def test_source_before_analysis_failure(self):
-        calls = []
-        with patch.object(db, 'store_message', side_effect=lambda *a, **k: calls.append('stored') or 42), \
-             patch.object(main.brain, 'analyze', side_effect=lambda *a: calls.append('ai') or (_ for _ in ()).throw(RuntimeError())), \
-             patch.object(main.telegram, 'notify') as send:
-            with self.assertRaises(RuntimeError):
-                main._legacy_process_message('telegram', 'third party', '', 'hello', {},
-                                     msg_date='2026-10-14T10:00:00+00:00')
-            self.assertEqual(calls, ['stored', 'ai'])
-            send.assert_not_called()
 
     def test_telegram_missing_owner_is_unauthorized(self):
         now = int(datetime.now(ZoneInfo(config.TIMEZONE)).timestamp())

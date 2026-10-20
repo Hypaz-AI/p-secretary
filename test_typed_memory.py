@@ -1,9 +1,8 @@
-"""Offline contracts for typed personal memory (topic replace-on-conflict).
+"""Contratti offline della memoria personale tipizzata (un solo ricordo vivo per argomento).
 
-No production database, network, workers or provider calls. The apply path runs
-for real against a strict SQL double; model outputs are scripted JSON.
+Nessun database di produzione, rete, worker o provider. Il percorso di scrittura gira
+davvero contro un doppio SQL rigoroso.
 """
-import json
 import os
 import tempfile
 import unittest
@@ -13,7 +12,6 @@ from unittest.mock import MagicMock, patch
 with tempfile.TemporaryDirectory(prefix='typed-memory-') as _bootstrap:
     with patch.dict(os.environ, {'PI_SECRETARY_CONFIG_FILE': '/dev/null',
                                  'DATA_DIR': _bootstrap, 'DATABASE_URL': ''}):
-        import brain
         import db
         import jobs
 
@@ -28,8 +26,8 @@ class TypedMemoryTests(unittest.TestCase):
         self.conn.execute.side_effect = self.execute
         self.enterContext(patch.object(db, '_conn')).return_value.__enter__.return_value = self.conn
         self.enterContext(patch('urllib.request.urlopen', side_effect=AssertionError('HTTP forbidden')))
-        self.enterContext(patch.object(brain.ai_budget, 'request_content',
-                                       side_effect=AssertionError('Provider forbidden')))
+        self.enterContext(patch('ai_budget.request_content',
+                                side_effect=AssertionError('Provider forbidden')))
         self.enterContext(patch.object(jobs.Worker, 'start', side_effect=AssertionError('Workers forbidden')))
 
     def execute(self, sql, params=None):
@@ -151,27 +149,98 @@ class ReplaceOnConflictTests(TypedMemoryTests):
                 set(), conn=self.conn, source_message=101)
 
 
-class PrepareTopicTests(TypedMemoryTests):
-    def prepare(self, raw):
-        with patch.object(brain, '_chat', return_value=raw):
-            return brain.prepare_user_memories('Ricorda che il caffè lo prendo amaro.', [])
+class MemoryApplicationTests(unittest.TestCase):
+    """CAS transazionale di apply_personal_memories (usata dallo strumento note_save/note_forget)."""
 
-    def test_prepare_passes_valid_topic_through(self):
-        plan = self.prepare(json.dumps(dict(changes=[
-            dict(operation='add', id=None, text='Il caffè amaro.', topic='caffe')])))
-        self.assertEqual(plan['changes'][0]['topic'], 'caffe')
+    def connection(self, rows=None):
+        conn = MagicMock()
+        rows = rows or {}
 
-    def test_prepare_drops_invalid_or_oversized_topics(self):
-        for bad in ('', '   ', 'x' * 121, 5, True, [], {}):
-            with self.subTest(bad=bad):
-                plan = self.prepare(json.dumps(dict(changes=[
-                    dict(operation='add', id=None, text='Nota.', topic=bad)])))
-                self.assertNotIn('topic', plan['changes'][0])
+        def execute(query, params=None):
+            cursor = MagicMock(rowcount=1)
+            if query.startswith('SELECT text'):
+                cursor.fetchone.return_value = rows.get(params[0])
+            elif query.startswith('INSERT'):
+                cursor.fetchone.return_value = (99,)
+            return cursor
 
-    def test_prepare_keeps_topic_optional(self):
-        plan = self.prepare(json.dumps(dict(changes=[
-            dict(operation='add', id=None, text='Fatto indipendente.')])))
-        self.assertNotIn('topic', plan['changes'][0])
+        conn.execute.side_effect = execute
+        return conn
+
+    def test_shared_connection_is_not_opened_committed_or_closed(self):
+        conn = self.connection({7: ('Tè',), 8: ('Obsoleto',)})
+        changes = [dict(operation='add', text='Cammina'),
+                   dict(operation='update', id=7, text='Caffè'),
+                   dict(operation='delete', id=8)]
+        expected = [dict(id=7, text='Tè'), dict(id=8, text='Obsoleto')]
+        with patch('db._conn') as connect:
+            count = db.apply_personal_memories(changes, {7, 8}, conn=conn, expected=expected)
+        self.assertEqual(count, 3)
+        connect.assert_not_called()
+        for method in (conn.transaction, conn.commit, conn.rollback, conn.close,
+                       conn.__enter__, conn.__exit__):
+            method.assert_not_called()
+        queries = [call.args[0] for call in conn.execute.call_args_list]
+        self.assertIn('pg_advisory_xact_lock', queries[0])
+        self.assertTrue(all('FOR UPDATE' in query for query in queries[1:3]))
+        self.assertTrue(queries[3].startswith('INSERT'))
+
+    def test_changed_missing_or_unsnapshotted_target_fails_before_any_write(self):
+        for operation in ('update', 'delete'):
+            for row, expected in [(('Changed',), {7: 'Tè'}), (None, {7: 'Tè'}),
+                                  (('Tè',), {})]:
+                with self.subTest(operation=operation, row=row, expected=expected):
+                    conn = self.connection({7: row})
+                    changes = [dict(operation='add', text='Non scrivere'),
+                               dict(operation=operation, id=7, text='Caffè')]
+                    with self.assertRaises(ValueError):
+                        db.apply_personal_memories(changes, {7}, conn=conn, expected=expected)
+                    queries = [call.args[0] for call in conn.execute.call_args_list]
+                    self.assertFalse(any(q.startswith(('INSERT', 'UPDATE', 'DELETE'))
+                                         for q in queries))
+
+    def test_cas_validates_original_snapshot_once_for_repeated_target(self):
+        conn = self.connection({7: ('Tè',)})
+        count = db.apply_personal_memories([
+            dict(operation='update', id=7, text='Caffè'),
+            dict(operation='delete', id=7)], {7}, conn=conn, expected={7: 'Tè'})
+        self.assertEqual(count, 2)
+        queries = [call.args[0] for call in conn.execute.call_args_list]
+        self.assertEqual(sum(q.startswith('SELECT text') for q in queries), 1)
+
+    def test_legacy_owns_connection_and_transaction_without_recursion(self):
+        conn = self.connection()
+        with patch('db._conn') as connect:
+            connect.return_value.__enter__.return_value = conn
+            count = db.apply_personal_memories([dict(operation='add', text='Fatto')], set())
+        self.assertEqual(count, 1)
+        connect.assert_called_once_with()
+        conn.transaction.assert_called_once_with()
+        conn.transaction.return_value.__exit__.assert_called_once()
+        self.assertEqual(conn.transaction.return_value.__exit__.call_args.args[-3:],
+                 (None, None, None))
+        connect.return_value.__exit__.assert_called_once()
+        self.assertEqual(connect.return_value.__exit__.call_args.args[-3:], (None, None, None))
+
+    def test_owned_transaction_rolls_back_on_stale_snapshot(self):
+        conn = self.connection({7: ('Changed',)})
+        with patch('db._conn') as connect:
+            connect.return_value.__enter__.return_value = conn
+            with self.assertRaises(ValueError):
+                db.apply_personal_memories([dict(operation='delete', id=7)], {7},
+                                           expected={7: 'Tè'})
+            self.assertIs(conn.transaction.return_value.__exit__.call_args.args[-3], ValueError)
+
+    def test_legacy_noop_counts_and_unknown_id_are_preserved(self):
+        conn = self.connection()
+        conn.execute.side_effect = None
+        conn.execute.return_value.fetchone.return_value = None
+        conn.execute.return_value.rowcount = 0
+        self.assertEqual(db.apply_personal_memories([
+            dict(operation='add', text='Duplicato'),
+            dict(operation='update', id=7, text='Identico'),
+            dict(operation='delete', id=99)], {7}, conn=conn), 0)
+        self.assertEqual(len(conn.execute.call_args_list), 3)
 
 
 if __name__ == '__main__':

@@ -80,7 +80,8 @@ class AdminConfigTests(unittest.TestCase):
             if field['secret']:
                 self.assertIn(field['type'], ('password', 'textarea'))
                 self.assertIsNone(field['value'])
-        self.assertEqual(fields['NOTIFY_PRIORITY_THRESHOLD']['options'], ['mai', 'alta', 'media', 'bassa'])
+        self.assertNotIn('NOTIFY_PRIORITY_THRESHOLD', fields)  # decide l'agente, con tetto giornaliero
+        self.assertEqual((fields['AGENT_NOTIFY_MAX_PER_DAY']['min'], fields['AGENT_NOTIFY_MAX_PER_DAY']['max']), (0, 100))
         for key in ('GCAL_ENABLED', 'WHATSAPP_ENABLED', 'TELEGRAM_USER_ENABLED', 'DASHBOARD_COOKIE_SECURE'):
             self.assertEqual(fields[key]['options'], ['true', 'false'])
         self.assertEqual(fields['DIGEST_TIME']['type'], 'time')
@@ -122,12 +123,13 @@ class AdminConfigTests(unittest.TestCase):
     def test_enum_validation_precedes_network_and_keeps_file(self):
         before = self.path.read_bytes()
         with patch.object(admin, 'verify_email') as verify:
-            for key in ('EMAIL1_PROVIDER', 'EMAIL50_AUTH', 'NOTIFY_PRIORITY_THRESHOLD'):
+            for key in ('EMAIL1_PROVIDER', 'EMAIL50_AUTH'):
                 self.assertEqual(self.post({key: 'unsupported'}).status_code, 400)
             verify.assert_not_called()
         self.assertEqual(self.path.read_bytes(), before)
-        for threshold in ('mai', 'alta', 'media', 'bassa'):
-            self.assertEqual(self.post({'NOTIFY_PRIORITY_THRESHOLD': threshold}).status_code, 200)
+        for value in ('-1', '101', 'x'):
+            self.assertEqual(self.post({'AGENT_NOTIFY_MAX_PER_DAY': value}).status_code, 400)
+        self.assertEqual(self.post({'AGENT_NOTIFY_MAX_PER_DAY': '3'}).status_code, 200)
         with patch.object(admin, 'verify_email'):
             self.assertEqual(self.post({'EMAIL50_PROVIDER': 'm365', 'EMAIL50_AUTH': 'oauth2'}).status_code, 200)
 

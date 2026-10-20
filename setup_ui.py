@@ -15,7 +15,7 @@ def section(title, steps=()):
 
 GUIDES = {
     'welcome': ('Configurazione guidata · PI-SECRETARY', (
-        'Segretario personale: documenti, ricerca, memoria, attività e responsabilità. Fatture e ZIP sono funzionalità opzionali.',
+        'Segretario personale con un agente che legge i tuoi messaggi e documenti, ricerca, tiene attività e note. Fatture e ZIP sono funzionalità opzionali.',
         'Prepara un browser sul PC o telefono: i link ufficiali sono indicati in ogni sezione.',
         'Inserisci segreti solo nei prompt nascosti del terminale o sui siti ufficiali, mai in chat o nei log.',
         'INVIO mantiene il valore indicato o salta; [s/N] richiede un sì esplicito. Le risposte vengono salvate subito.',
@@ -39,7 +39,7 @@ GUIDES = {
         'Ora digest: formato 24 ore HH:MM nel fuso scelto (es. 21:00). Il bot Telegram va collegato per riceverlo.',
         'Le entità fatture sono facoltative (massimo 4): nome/cartella, partita IVA e descrizione aiutano la classificazione; non sono credenziali fiscali.',
         'Il profilo DB decide i default fatture/ZIP: nuovi disabilitati, legacy preservati. Dopo l’avvio usa Flussi operativi; niente flag env alternativi.',
-        'Modalità observe/active, quiet hours globali e budget monetario locale sono pianificati. Il runtime revisioni ha una propria fascia silenziosa 22–08, non globale. Imposta limiti di spesa presso OpenRouter.')),
+        'Modalità observe/active e tetto di spesa giornaliero si modificano poi dalla dashboard (Impostazioni). Imposta comunque un limite di spesa presso OpenRouter.')),
     'email': ('Account email', (
         'Scegli il provider della casella, poi un nome riconoscibile e l’indirizzo completo. Sono supportati fino a 50 account.',
         'gmail usa una password per app; outlook è Microsoft personale, m365 è lavoro/scuola e richiedono OAuth, non password.',
@@ -97,7 +97,7 @@ GUIDES = {
         'Dopo l’avvio apri http://127.0.0.1:8080 sul server; da remoto usa un tunnel SSH come descritto nel README, non pubblicare HTTP su Internet.',
         'Docker: apri privatamente PI_SECRETARY_HOME/config/dashboard.json sull’host con un editor locale e leggi username/password generati al primo avvio, poi inseriscili nella pagina login.',
         'Non stampare né condividere il file. Verifica gli interruttori dei connettori: configurazione completata non significa servizio pronto o login ancora valido.',
-        'Apri Cosa seguo per te, Documenti e ricerca, Permessi AI ed Esiti. Un’approvazione non è un invio né un esito verificato.',
+        'Apri Permessi AI e concedi i consensi che vuoi (default: tutto negato). Poi scrivi al bot: l’agente risponde usando solo ciò che hai autorizzato. Le email partono solo con il tuo /invia.',
         'Consenso AI separato per email/Telegram/WhatsApp e testo/media: nessun consenso automatico nel wizard. Telegram comprende bot e account personale.')),
 }
 

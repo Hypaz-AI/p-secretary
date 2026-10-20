@@ -5,16 +5,17 @@ bootstrap, then verifies that erase_message removes every derived row and
 respects the append-only audit trail, and that export is a faithful snapshot.
 Requires PI_SECRETARY_TEST_DATABASE_URL (explicit *_test DB, Unix socket).
 """
+import json
 import os
 import unittest
 import uuid
-from datetime import datetime, timezone
+
 from unittest.mock import patch
 
 import config
 import db
 import privacy
-import secretary as sec
+import dashboard_owner as owners
 
 
 def _params():
@@ -47,12 +48,15 @@ class PrivacyErasePostgresTests(unittest.TestCase):
         self.conn.execute(sql.SQL('SET search_path TO {}').format(sql.Identifier(self.schema)))
         self.conn.execute("SET statement_timeout='15s'")
         self.conn.execute("SET lock_timeout='10s'")
+        self.views = 'agent_priv_' + uuid.uuid4().hex[:12]
+        self.addCleanup(lambda: self.conn.execute(f'DROP SCHEMA IF EXISTS {self.views} CASCADE'))
+        self.enterContext(patch.object(config, 'AGENT_DB_SCHEMA', self.views))
         with patch.object(db, 'available', return_value=True), \
              patch.object(db, '_conn', side_effect=lambda: _NullContext(self.conn)):
             self.assertEqual(db.init(), 0)
         self.enterContext(patch.object(config, 'TELEGRAM_CHAT_ID', '101'))
         self.enterContext(patch.object(config, 'TELEGRAM_BOT_TOKEN', '777:not-a-secret'))
-        self.owner = sec.DashboardOwner('101', True, True)
+        self.owner = owners.DashboardOwner('101', True, True)
 
     def _drop(self):
         from psycopg import sql
@@ -125,19 +129,12 @@ class PrivacyErasePostgresTests(unittest.TestCase):
     def test_erase_removes_every_derived_row_and_keeps_audit(self):
         mid = self._third_party_message()
         seeded = self._seed_everything(mid)
-        # A practice linked to this message as evidence (owner origin required).
-        owner_mid = self._owner_message()
-        practice = self.conn.execute('''INSERT INTO secretary_practices
-            (objective, state, version, next_action, waiting_for, blocked_reason,
-             next_review_at, completion_criteria, origin_message, operation_key)
-            VALUES ('riparazione casa', 'active', 1, 'chiamare', '', '', NULL,
-            'fatto', %s, %s) RETURNING id''',
-            (owner_mid, 'op-' + uuid.uuid4().hex[:8])).fetchone()[0]
-        column = {'telegram': 'telegram_message_id', 'email': 'email_message_id',
-                  'whatsapp': 'whatsapp_message_id'}['telegram']
-        self.conn.execute(f'''INSERT INTO secretary_links(practice_id, {column},
-            evidence, origin_message) VALUES (%s, %s, 'testo privato', %s)''',
-            (practice, mid, owner_mid))
+        # Audit dell'agente che cita il messaggio (e uno che non lo cita).
+        run = self.conn.execute("INSERT INTO agent_runs(kind,turn_key) VALUES ('inbox','inbox:test') RETURNING id").fetchone()[0]
+        for tool, args in (('triage', json.dumps(dict(message_id=mid, summary='riepilogo privato'))),
+                           ('read_message', json.dumps(dict(message_id=mid + 1000)))):
+            self.conn.execute('''INSERT INTO agent_tool_calls(run_id,seq,tool,args,ok,summary)
+                VALUES (%s,1,%s,%s,true,'ok')''', (run, tool, args))
         # Export BEFORE erase: everything must be visible.
         exported = privacy.export_message(self.conn, mid, self.owner)
         self.assertEqual(exported['message_id'], mid)
@@ -145,12 +142,12 @@ class PrivacyErasePostgresTests(unittest.TestCase):
         self.assertEqual(len(exported['notes']), 1)
         self.assertEqual(len(exported['task_evidence']), 1)
         self.assertEqual(len(exported['knowledge']), 1)
-        self.assertEqual(len(exported['practice_links']), 1)
+        self.assertEqual(len(exported['agent_tool_calls']), 1)
         self.assertEqual(len(exported['attachments']), 1)
         self.assertNotIn('data', exported['attachments'][0])  # no raw bytes in export
         # Erase.
         report = privacy.erase_message(self.conn, mid, self.owner,
-                                       operation_key='secretary-privacy-erase:' + uuid.uuid4().hex)
+                                       operation_key='privacy-erase:' + uuid.uuid4().hex)
         self.assertTrue(report['db_erased'])
         self.assertEqual(report['message_id'], mid)
         # Every derived row is gone.
@@ -166,55 +163,96 @@ class PrivacyErasePostgresTests(unittest.TestCase):
             'SELECT 1 FROM knowledge_runs WHERE message_id=%s', (mid,)).fetchone())
         self.assertIsNone(self.conn.execute(
             'SELECT 1 FROM attachments WHERE message_id=%s', (mid,)).fetchone())
-        self.assertIsNone(self.conn.execute(
-            f'SELECT 1 FROM secretary_links WHERE {column}=%s', (mid,)).fetchone())
+        # Le chiamate dell'agente per QUESTO messaggio spariscono; le altre restano (id che inizia uguale).
+        self.assertEqual(self.conn.execute('SELECT tool FROM agent_tool_calls').fetchall(), [('read_message',)])
         self.assertIsNone(self.conn.execute(
             'SELECT 1 FROM telegram_messages WHERE id=%s', (mid,)).fetchone())
         # The task itself survives (it is the owner's work, not the evidence).
         self.assertIsNotNone(self.conn.execute(
             'SELECT 1 FROM tasks WHERE id=%s', (seeded['task'],)).fetchone())
-        # The practice and its owner origin survive untouched.
-        self.assertIsNotNone(self.conn.execute(
-            'SELECT 1 FROM secretary_practices WHERE id=%s', (practice,)).fetchone())
-        # The erase receipt is in the append-only audit trail.
-        receipt = self.conn.execute('''SELECT result FROM secretary_receipts
-            WHERE operation_key LIKE 'secretary-privacy-erase:%'
+        # The erase receipt is kept as the audit trail.
+        receipt = self.conn.execute('''SELECT result FROM privacy_receipts
+            WHERE operation_key LIKE 'privacy-erase:%'
             ORDER BY created_at DESC LIMIT 1''').fetchone()
         self.assertIsNotNone(receipt)
         self.assertEqual(receipt[0]['message_id'], mid)
 
+    def test_erase_succeeds_on_a_database_that_still_has_the_legacy_secretary_tables(self):
+        """Produzione ha ancora le tabelle del vecchio segretario (FK + trigger append-only)."""
+        mid = self._third_party_message()
+        seeded = self._seed_everything(mid)
+        owner_mid = self._owner_message()
+        self.conn.execute('''CREATE TABLE secretary_practices (id BIGSERIAL PRIMARY KEY, objective TEXT);
+            CREATE TABLE secretary_links (
+              id BIGSERIAL PRIMARY KEY, practice_id BIGINT REFERENCES secretary_practices(id),
+              email_message_id BIGINT REFERENCES email_messages(id),
+              telegram_message_id BIGINT REFERENCES telegram_messages(id),
+              whatsapp_message_id BIGINT REFERENCES whatsapp_messages(id),
+              evidence TEXT, origin_message BIGINT REFERENCES telegram_messages(id));
+            CREATE TABLE secretary_runtime_link_proposals (
+              id BIGSERIAL PRIMARY KEY, practice_id BIGINT, message_id BIGINT NOT NULL,
+              entry_id BIGINT NOT NULL REFERENCES knowledge_entries(id), evidence TEXT);
+            CREATE FUNCTION secretary_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+              BEGIN RAISE EXCEPTION 'secretary append-only relation'; END $$;
+            CREATE TRIGGER secretary_no_mutation BEFORE UPDATE OR DELETE ON secretary_links
+              FOR EACH ROW EXECUTE FUNCTION secretary_immutable()''')
+        practice = self.conn.execute("INSERT INTO secretary_practices(objective) VALUES ('casa') RETURNING id").fetchone()[0]
+        self.conn.execute("INSERT INTO secretary_links(practice_id,telegram_message_id,evidence,origin_message) VALUES (%s,%s,'privato',%s)",
+                          (practice, mid, owner_mid))
+        self.conn.execute("INSERT INTO secretary_runtime_link_proposals(practice_id,message_id,entry_id,evidence) VALUES (%s,%s,%s,'privato')",
+                          (practice, mid, seeded['entry']))
+        report = privacy.erase_message(self.conn, mid, self.owner, operation_key='privacy-erase:legacy-tables')
+        self.assertTrue(report['db_erased'])
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM secretary_links').fetchone()[0], 0)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM secretary_runtime_link_proposals').fetchone()[0], 0)
+        # Il trigger append-only è ripristinato dopo l'oblio.
+        self.assertEqual(self.conn.execute("SELECT tgenabled FROM pg_trigger WHERE tgname='secretary_no_mutation'").fetchone()[0], 'O')
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM secretary_practices').fetchone()[0], 1)
+
+    def test_erase_requires_a_key_and_is_bound_to_its_request(self):
+        mid = self._third_party_message()
+        other = self._third_party_message(channel='email')
+        for key in (None, '', 'x', 'k' * 181, 'privacy\x00key', 7):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                privacy.erase_message(self.conn, mid, self.owner, operation_key=key)
+        privacy.erase_message(self.conn, mid, self.owner, operation_key='privacy-erase:same-key')
+        with self.assertRaises(owners.Conflict):  # la stessa chiave non può cancellare un altro messaggio
+            privacy.erase_message(self.conn, other, self.owner, operation_key='privacy-erase:same-key')
+        self.assertIsNotNone(self.conn.execute('SELECT 1 FROM email_messages WHERE id=%s', (other,)).fetchone())
+
+
     def test_erase_is_idempotent_via_receipt_replay(self):
         mid = self._third_party_message(channel='email')
         self._seed_everything(mid, channel='email')
-        key = 'secretary-privacy-erase:' + uuid.uuid4().hex
+        key = 'privacy-erase:' + uuid.uuid4().hex
         first = privacy.erase_message(self.conn, mid, self.owner, operation_key=key)
         second = privacy.erase_message(self.conn, mid, self.owner, operation_key=key)
         self.assertEqual(first, second)  # receipt replay returns the original report
 
     def test_erase_requires_authenticated_owner(self):
         mid = self._third_party_message()
-        for bad in (sec.DashboardOwner('202', True, True),      # wrong owner
-                    sec.DashboardOwner('101', False, True),    # not authenticated
-                    sec.DashboardOwner('101', True, False),     # no CSRF
+        for bad in (owners.DashboardOwner('202', True, True),      # wrong owner
+                    owners.DashboardOwner('101', False, True),    # not authenticated
+                    owners.DashboardOwner('101', True, False),     # no CSRF
                     None, 'owner', {}):
-            with self.subTest(caller=bad), self.assertRaises(sec.Unauthorized):
+            with self.subTest(caller=bad), self.assertRaises(owners.Unauthorized):
                 privacy.erase_message(self.conn, mid, bad,
-                                     operation_key='secretary-privacy-erase:x')
+                                     operation_key='privacy-erase:valid-key')
         # Nothing was erased.
         self.assertIsNotNone(self.conn.execute(
             'SELECT 1 FROM telegram_messages WHERE id=%s', (mid,)).fetchone())
 
     def test_erase_unknown_message_fails_closed(self):
-        with self.assertRaises(sec.Conflict):
+        with self.assertRaises(owners.Conflict):
             privacy.erase_message(self.conn, 999999, self.owner,
-                                 operation_key='secretary-privacy-erase:unknown')
+                                 operation_key='privacy-erase:unknown')
 
     def test_erase_owner_authority_message_is_refused(self):
         """The live owner command stream is not erasable via this API."""
         mid = self._owner_message()
-        with self.assertRaises(sec.Conflict):
+        with self.assertRaises(owners.Conflict):
             privacy.erase_message(self.conn, mid, self.owner,
-                                 operation_key='secretary-privacy-erase:owner')
+                                 operation_key='privacy-erase:owner')
 
 
 class _NullContext:

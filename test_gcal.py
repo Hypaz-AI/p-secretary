@@ -9,8 +9,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import config
-import brain
-import main
 from connectors import gcal
 
 
@@ -190,51 +188,6 @@ class ServiceAccountTests(unittest.TestCase):
                 gcal._parse_rsa_private_key(bad)
 
 
-class MarkerTests(unittest.TestCase):
-    def test_extended_reminder_marker(self):
-        _, events = gcal.parse_markers(
-            '@@EVENTO@@ Paga F24 | 2026-10-20 12:00 | | scadenza | 15 | 0')
-        ev = gcal.validate_event(events[0])
-        self.assertEqual(ev['duration_min'], 15)
-        self.assertEqual(ev['reminder_minutes'], 0)
-
-    def test_boundary_rejects_invalid_values(self):
-        for changes in ({'dt': '2026-10-20'}, {'dt': '2026-02-30 10:00'},
-                        {'dt': '2020-01-01 10:00'}, {'duration_min': -2},
-                        {'reminder_minutes': 40321}, {'reminder_minutes': True},
-                        {'title': ''}):
-            with self.subTest(changes=changes), self.assertRaises(ValueError):
-                gcal.validate_event(dict(title='X', dt='2026-10-20 12:00') | changes)
-
-    def test_text_without_markers_is_untouched(self):
-        text = "Ciao! Come posso aiutarti?"
-        clean, events = gcal.parse_markers(text)
-        self.assertEqual(clean, text)
-        self.assertEqual(events, [])
-
-    def test_single_marker(self):
-        text = "Fatto!\n@@EVENTO@@ Dentista | 2026-10-15 15:00 | Studio Rossi | radiografia"
-        clean, events = gcal.parse_markers(text)
-        self.assertEqual(clean, "Fatto!")
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0], {"title": "Dentista", "dt": "2026-10-15 15:00",
-                                     "location": "Studio Rossi", "notes": "radiografia"})
-
-    def test_multiple_markers_and_optional_fields(self):
-        text = "@@EVENTO@@ A | 2026-10-15 10:00\n@@EVENTO@@ B | 2026-10-16 11:00 | Roma"
-        clean, events = gcal.parse_markers(text)
-        self.assertEqual(clean, "")
-        self.assertEqual([(e["title"], e["location"]) for e in events],
-                         [("A", ""), ("B", "Roma")])
-
-    def test_invalid_or_missing_datetime(self):
-        for payload in ("Cena | domani sera", "Solo titolo", ""):
-            with self.subTest(payload=payload):
-                _, events = gcal.parse_markers(f"@@EVENTO@@ {payload}")
-                self.assertEqual(len(events), 1)
-                self.assertIn("error", events[0])
-
-
 class ApiTests(unittest.TestCase):
     def setUp(self):
         self.env = patch.dict(os.environ, {'GCAL_CALENDAR_ID': 'shared@example.com'})
@@ -321,144 +274,6 @@ class ApiTests(unittest.TestCase):
              patch.object(gcal, 'readiness', return_value='ready'), \
              patch.object(gcal.flows, 'enabled', return_value=True):
             self.assertTrue(gcal.is_active())
-
-
-class ChatAppointmentTests(unittest.TestCase):
-    def test_invalid_incoming_deadline_never_writes(self):
-        verdict = {'summary': 's', 'category': 'lavoro', 'priority': 'bassa',
-                   'appointments': [{'title': 'Scadenza', 'datetime': '2026-10-20'}]}
-        with patch.object(main.db, 'store_message', return_value=1), \
-             patch.object(main.db, 'log_communication'), \
-             patch.object(main.brain, 'analyze', return_value=verdict), \
-             patch.object(main.db, 'add_appointment') as add, \
-             patch.object(main.gcal, 'create_event') as create, \
-             patch.object(main.telegram, 'notify'):
-            main._legacy_process_message('email', 'Marco', '', 'scade il 20 ottobre', {})
-        add.assert_not_called()
-        create.assert_not_called()
-        self.assertFalse(verdict['appointment_results'][0]['ok'])
-
-    def test_analysis_prompt_has_aware_reference_and_deadline_policy(self):
-        with patch.object(brain, '_chat', return_value='{"appointments": []}') as chat, \
-             patch.object(brain, '_rules_block', return_value=''), \
-             patch.object(brain, '_entities_block', return_value=''):
-            brain.analyze('Pagamento', 'Marco', 'Scade domani', 'email')
-        system, context = chat.call_args.args
-        self.assertIn('scadenze', system)
-        self.assertIn('NON inventare data o ora', system)
-        self.assertIn('newsletter', system)
-        self.assertIn('ADESSO:', context)
-        self.assertIn(config.TIMEZONE, context)
-        self.assertRegex(context, r'\d{2}:\d{2}:\d{2}.*[+-]\d{2}:\d{2}')
-
-    def test_calendar_failure_replaces_model_success_and_history(self):
-        reply = 'Fatto, salvato!\n@@EVENTO@@ Pagamento | 2026-10-20 12:00 | | | 15 | 0'
-        with patch.object(main.brain, 'chat_with_user', return_value=reply), \
-             patch.object(main.gcal, 'is_active', return_value=True), \
-             patch.object(main.gcal, 'create_event', side_effect=RuntimeError('offline')), \
-             patch.object(main.db, 'add_appointment'), \
-             patch.object(main.telegram, 'notify') as send:
-            main.handle_user_chat('ricordami il pagamento')
-        text = send.call_args.args[0]
-        self.assertNotIn('Fatto', text)
-        self.assertIn('non ancora confermata', text)
-        self.assertEqual(main._chat_history[-1]['content'], text)
-
-    def setUp(self):
-        from datetime import datetime as RealDateTime
-        class FrozenDateTime(RealDateTime):
-            @classmethod
-            def now(cls, tz=None):
-                value = cls(2026, 10, 14, 12, tzinfo=ZoneInfo(config.TIMEZONE))
-                return value.astimezone(tz) if tz else value.replace(tzinfo=None)
-        from zoneinfo import ZoneInfo
-        for name, kwargs in (('connectors.gcal.datetime', {'new':FrozenDateTime}),
-                     ('main.db._conn', {}), ('pipeline.save_event', {'return_value':1})):
-            p = patch(name, **kwargs)
-            p.start()
-            self.addCleanup(p.stop)
-        switch = patch.object(main.flows, 'enabled', return_value=True)
-        switch.start()
-        self.addCleanup(switch.stop)
-
-    def test_marker_creates_db_and_calendar_event(self):
-        reply = "Fatto!\n@@EVENTO@@ Dentista | 2026-10-15 15:00 | Studio Rossi"
-        with patch.object(main.brain, 'chat_with_user', return_value=reply), \
-             patch.object(main.gcal, 'is_active', return_value=True), \
-             patch.object(main.gcal, 'create_event',
-                          return_value={'ok': True, 'event_id': 'e1'}) as create, \
-             patch.object(main.db, 'add_appointment', return_value=1) as add, \
-             patch.object(main.telegram, 'notify') as send:
-            main.handle_user_chat('mettimi un appuntamento domani dal dentista')
-        add.assert_not_called()
-        create.assert_not_called()
-        text = send.call_args[0][0]
-        self.assertNotIn('@@EVENTO@@', text)
-        self.assertIn('sincronizzazione Calendar in coda', text)
-
-    def test_marker_without_calendar_saves_local_agenda(self):
-        reply = "Ok\n@@EVENTO@@ Cena | 2026-10-15 20:00"
-        with patch.object(main.brain, 'chat_with_user', return_value=reply), \
-             patch.object(main.gcal, 'is_active', return_value=False), \
-             patch.object(main.gcal, 'create_event') as create, \
-             patch.object(main.db, 'add_appointment', return_value=1) as add, \
-             patch.object(main.telegram, 'notify') as send:
-            main.handle_user_chat('ricordimi la cena')
-        create.assert_not_called()
-        add.assert_not_called()
-        self.assertIn('salvato localmente', send.call_args[0][0])
-
-    def test_invalid_marker_warns_user(self):
-        reply = "Fatto!\n@@EVENTO@@ Cena | domani sera"
-        with patch.object(main.brain, 'chat_with_user', return_value=reply), \
-             patch.object(main.db, 'add_appointment') as add, \
-             patch.object(main.telegram, 'notify') as send:
-            main.handle_user_chat('mettimi la cena')
-        add.assert_not_called()
-        self.assertIn('Non sono riuscito', send.call_args[0][0])
-
-    def test_detected_appointments_sync_to_calendar(self):
-        verdict = {'summary': 's', 'category': 'lavoro', 'priority': 'bassa',
-                   'needs_action': False, 'action': '', 'needs_reply': False,
-                   'reply_hint': '',
-                   'appointments': [{'title': 'Scadenza pagamento', 'datetime': '2026-10-16 10:00',
-                                     'location': '', 'notes': '', 'duration_min': 15,
-                                     'reminder_minutes': 0}],
-                   'is_invoice': False, 'invoice_info': {}}
-        with patch.object(main.db, 'store_message', return_value=42), \
-             patch.object(main.db, 'communication_seen', return_value=False), \
-             patch.object(main.db, 'log_communication', return_value=1), \
-             patch.object(main.db, 'add_appointment', return_value=1), \
-             patch.object(main.brain, 'analyze', return_value=verdict), \
-             patch.object(main.gcal, 'is_active', return_value=True), \
-             patch.object(main.gcal, 'create_event', return_value={'ok': True}) as create, \
-             patch.object(main.telegram, 'notify'):
-            main._legacy_process_message('email (test)', 'mittente', 'oggetto', 'testo', {})
-        create.assert_called_once()
-        self.assertEqual(create.call_args.kwargs['reminder_minutes'], 0)
-        self.assertTrue(verdict['appointment_results'][0]['ok'])
-
-    def test_appointments_command_prefers_calendar(self):
-        events = [{'dt': '2026-10-15 15:00', 'title': 'Dentista',
-                   'location': 'Studio', 'all_day': False, 'event_id': '1'}]
-        with patch.object(main.gcal, 'is_active', return_value=True), \
-               patch.object(main.db, 'upcoming_appointments', return_value=[]), \
-             patch.object(main.gcal, 'upcoming_events', return_value=events), \
-             patch.object(main.telegram, 'notify') as send:
-            self.assertTrue(main._handle_user_command('/appuntamenti'))
-        text = send.call_args[0][0]
-        self.assertIn('Google Calendar', text)
-        self.assertIn('Dentista', text)
-
-    def test_appointments_command_falls_back_to_db(self):
-        appts = [{'id': 1, 'dt': '2026-10-15 09:00', 'title': 'X',
-                  'location': '', 'notes': ''}]
-        with patch.object(main.gcal, 'is_active', return_value=False), \
-             patch.object(main.db, 'upcoming_appointments', return_value=appts) as up, \
-             patch.object(main.telegram, 'notify') as send:
-            self.assertTrue(main._handle_user_command('/appuntamenti'))
-        up.assert_called_once()
-        self.assertIn('X', send.call_args[0][0])
 
 
 if __name__ == '__main__':

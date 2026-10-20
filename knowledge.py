@@ -1,10 +1,10 @@
-"""Local, versioned knowledge catalogue. Importing this module starts no worker.
+"""Catalogo locale e versionato del testo estratto da documenti e allegati.
 
-Integration is deliberately opt-in: migrate(conn), enqueue(conn, message_id),
-then jobs.Worker('knowledge', index_message). Nothing here sends, calls AI,
-discovers directories, copies originals, or grants authority to source text.
-Document source IDs identify *occurrences*, not deduplicated content IDs.
-Use open_source('entry', entry_id) to reopen an exact message version.
+Opt-in: migrate(conn), enqueue(conn, message_id), poi jobs.Worker('knowledge',
+index_message). Nulla qui invia, chiama l'AI, scopre cartelle, copia originali o
+concede autorità al testo delle fonti. Gli ID dei documenti identificano le
+*occorrenze*, non il contenuto deduplicato. L'agente legge il risultato dalla
+vista `agent.documents` (consensi rivalutati a ogni query).
 """
 from contextlib import contextmanager
 import hashlib
@@ -26,10 +26,6 @@ MAX_ATTACHMENTS = 20
 MAX_BYTES = documents.MAX_BYTES
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 MAX_PDF_PAGES = 10
-MAX_RESULTS = 50
-MAX_QUERY = 512
-MAX_SNIPPET = 800
-MAX_CONTEXT = 6000
 TABLES = ('email_messages', 'whatsapp_messages', 'telegram_messages')
 CONTENT_DIRS = {'email_attachments', 'wa_media', 'tg_files', 'uploads', 'invoices'}
 SECRET_NAME = re.compile(
@@ -111,42 +107,6 @@ def _exists(conn, table):
     return bool(conn.execute('SELECT to_regclass(%s)', (table,)).fetchone()[0])
 
 
-def _optional_sources(conn):
-    """Only known, selected columns; never export a table's raw JSON/metadata.
-
-    Notes: id/text/[created]. Practices: id/title, optional description,
-    objective, goal, status, version, created_at/created/updated_at. Other
-    supported adapter: secretary_practices(id,objective,state,version,...).
-    Sources stay live (no stale notes); incompatible schemas are not guessed.
-    """
-    specs = []
-    for kind, table, required in (('note', 'notes', {'id', 'text'}),
-                                  ('practice', 'secretary_practices', {'id', 'objective'}),
-                                  ('practice', 'practices', {'id', 'title'})):
-        if any(spec['kind'] == kind for spec in specs):
-            continue
-        columns = {row[0] for row in conn.execute('''SELECT attname FROM pg_attribute
-            WHERE attrelid=to_regclass(%s) AND attnum>0 AND NOT attisdropped''',
-            (table,)).fetchall()}
-        if not required <= columns:
-            continue
-        fields = (('text',) if kind == 'note' else
-              ('title', 'description', 'objective', 'goal', 'next_action', 'waiting_for',
-               'blocked_reason', 'completion_criteria'))
-        parts = [f"coalesce(s.{name},'')" for name in fields if name in columns]
-        full_text = " || E'\n' || ".join(parts)
-        text = f'left({full_text}, {MAX_TEXT})'
-        date_col = next((c for c in ('updated_at', 'created_at', 'created') if c in columns), None)
-        title = "'Nota'" if kind == 'note' else f"left(s.{'title' if 'title' in columns else 'objective'},240)"
-        state = next((c for c in ('status', 'state') if c in columns), None)
-        specs.append(dict(kind=kind, table=table, text=text, full_text=full_text, title=title,
-                          date=f's.{date_col}::timestamptz' if date_col else 'NULL::timestamptz',
-                          revision=("s.version::text" if 'version' in columns else
-                                    f"encode(sha256(convert_to({full_text},'UTF8')),'hex')"),
-                          status=f's.{state}::text' if state else "'available'"))
-    return specs
-
-
 def migrate(conn):
     """Additive, transactional migration; no scans/backfill or original writes."""
     with conn.transaction():
@@ -158,11 +118,6 @@ def migrate(conn):
                                        (VERSION,)).fetchone())
         if applied:
             conn.execute(SCHEMA)
-            for spec in _optional_sources(conn):
-                expression = spec['text'].replace('s.', '')
-                # Identifiers/expressions come exclusively from the whitelist above.
-                conn.execute(f"CREATE INDEX IF NOT EXISTS knowledge_{spec['table']}_fts "
-                             f"ON {spec['table']} USING gin(to_tsvector('italian'::regconfig, {expression}))")
             conn.execute('INSERT INTO schema_migrations(version,reset_rows) VALUES (%s,0)', (VERSION,))
     return dict(version=VERSION, applied=applied, reset_rows=0)
 
@@ -592,133 +547,6 @@ def index_message(payload):
         return _publish(conn, snapshot, results)
 
 
-def _query(query):
-    return _text(query, MAX_QUERY).strip()
-
-
-def _citation(result):
-    result['citation'] = f"{result['source_type']}:{result['source_id']}@{result['revision']}"
-    return result
-
-
-ENTRY_JSON = """jsonb_build_object(
- 'entry_id',e.id,'source_type',e.source_type,
- 'source_id',CASE WHEN e.source_type='document' THEN e.occurrence_id ELSE e.message_id END,
- 'revision',r.revision,'channel',e.channel,'title',e.title,
- 'date',e.ts,'acquired_at',e.acquired_at,'historical',e.historical,
- 'status',e.status,'source',e.source_ref,'current',e.active)"""
-
-
-def _optional_json(spec):
-    return ("jsonb_build_object('source_type',%s::text,'source_id',s.id,'revision'," + spec['revision']
-            + ",'channel','memory','title'," + spec['title'] + ",'date'," + spec['date']
-            + ",'status'," + spec['status']
-            + ",'historical',false,'current',true,'source',jsonb_build_object('table',%s::text,'id',s.id))")
-
-
-def search(query, limit=8, channel=None):
-    """Italian lexical search; bounded, parameterized SQL. Empty query -> [].
-
-    Channel is exact (e.g. 'telegram (account)'); 'memory' selects notes/practices.
-    Results contain plain untrusted snippets, citations and extraction states.
-    """
-    query = _query(query)
-    if not query:
-        return []
-    limit = _limit(limit, 8, MAX_RESULTS)
-    if channel is not None:
-        if not isinstance(channel, str) or len(channel) > 80:
-            raise ValueError('Invalid channel')
-    with db._conn() as conn:
-        if not _exists(conn, 'knowledge_entries'):
-            return []
-        branches = [f'''(SELECT {ENTRY_JSON} || jsonb_build_object('snippet',
-            left(ts_headline('italian',e.title || E'\n' || e.text,q.value,
-            'StartSel=[[,StopSel=]],MaxWords=45,MinWords=12,MaxFragments=2'),%s)) AS result,
-            ts_rank_cd(e.search_vector,q.value) AS rank,e.ts AS date,e.id AS id
-            FROM knowledge_entries e JOIN knowledge_runs r ON r.id=e.run_id CROSS JOIN q
-            WHERE e.active AND e.search_vector @@ q.value
-            AND (%s::text IS NULL OR e.channel=%s) ORDER BY rank DESC,date DESC NULLS LAST,e.id DESC LIMIT %s)''']
-        params = [query, MAX_SNIPPET, channel, channel, limit]
-        for spec in _optional_sources(conn):
-            if channel is not None and channel != 'memory':
-                continue
-            text = spec['text']
-            vector = f"to_tsvector('italian'::regconfig,{text})"
-            branches.append(f'''(SELECT {_optional_json(spec)} || jsonb_build_object('snippet',
-                left(ts_headline('italian',left({text},%s),q.value,
-                'StartSel=[[,StopSel=]],MaxWords=45,MinWords=12,MaxFragments=2'),%s)),
-                ts_rank_cd({vector},q.value),{spec['date']},s.id
-                FROM {spec['table']} s CROSS JOIN q WHERE {vector} @@ q.value
-                ORDER BY 2 DESC,3 DESC NULLS LAST,s.id DESC LIMIT %s)''')
-            params += [spec['kind'], spec['table'], MAX_TEXT, MAX_SNIPPET, limit]
-        statement = ("WITH q AS (SELECT websearch_to_tsquery('italian',%s) AS value) "
-                     'SELECT result FROM (' + ' UNION ALL '.join(branches)
-                     + ') hits ORDER BY rank DESC,date DESC NULLS LAST,id DESC LIMIT %s')
-        rows = conn.execute(statement, (*params, limit)).fetchall()
-    return [_citation(row[0]) for row in rows]
-
-
-def open_source(source_type, source_id):
-    """Open an allowlisted DB source, never a caller-supplied path or URL.
-
-    message = current native message's indexed version; document = immutable
-    occurrence ID; entry = exact indexed version; note/practice = live source.
-    No bytes/physical paths or arbitrary provider metadata are returned.
-    """
-    if source_type not in ('message', 'document', 'entry', 'note', 'practice'):
-        raise ValueError('Unsupported source type')
-    identity = _id(source_id)
-    with db._conn() as conn:
-        if source_type in ('note', 'practice'):
-            spec = next((s for s in _optional_sources(conn) if s['kind'] == source_type), None)
-            if spec is None:
-                return dict(status='not_found', source_type=source_type, source_id=identity)
-            row = conn.execute(f'''SELECT {_optional_json(spec)} ||
-                jsonb_build_object('text',left({spec['text']},%s),'truncated',length({spec['text']})>%s)
-                FROM {spec['table']} s WHERE s.id=%s LIMIT 1''',
-                (spec['kind'], spec['table'], MAX_TEXT, MAX_TEXT, identity)).fetchone()
-        else:
-            if not _exists(conn, 'knowledge_entries'):
-                return dict(status='not_found', source_type=source_type, source_id=identity)
-            where = {'message': "e.source_type='message' AND e.message_id=%s AND e.active",
-                     'document': "e.source_type='document' AND e.occurrence_id=%s", 'entry': 'e.id=%s'}[source_type]
-            row = conn.execute(f'''SELECT {ENTRY_JSON} || jsonb_build_object('text',left(e.text,%s),
-                'truncated',coalesce((e.source_ref->>'truncated')::boolean,false)
-                    OR (e.source_type='message' AND e.status='partial'))
-                FROM knowledge_entries e JOIN knowledge_runs r ON r.id=e.run_id
-                WHERE {where} ORDER BY e.id DESC LIMIT 1''', (MAX_TEXT, identity)).fetchone()
-        if not row:
-            return dict(status='not_found', source_type=source_type, source_id=identity)
-        result = _citation(row[0])
-        if result['source_type'] == 'message':
-            documents_rows = conn.execute(f'''SELECT {ENTRY_JSON} FROM knowledge_entries e
-                JOIN knowledge_runs r ON r.id=e.run_id WHERE e.message_id=%s
-                AND r.revision=%s AND e.source_type='document' ORDER BY e.id LIMIT %s''',
-                (result['source_id'], result['revision'], MAX_ATTACHMENTS)).fetchall()
-            result['documents'] = [_citation(r[0]) for r in documents_rows]
-        return result
-
-
-def context(query, limit=6):
-    """Budgeted retrieval for LLMs: source data, not executable instructions."""
-    hits = search(query, _limit(limit, 6, 12))
-    snippets, citations, remaining = [], [], MAX_CONTEXT
-    for hit in hits:
-        text = _text(hit.get('snippet'), min(MAX_SNIPPET, remaining))
-        if not text:
-            continue
-        snippets.append(dict(text=text, citation=hit['citation']))
-        citations.append({k: hit.get(k) for k in ('citation', 'entry_id', 'source_type', 'source_id',
-                                                'revision', 'channel', 'date', 'historical', 'status')})
-        remaining -= len(text)
-        if remaining <= 0:
-            break
-    return dict(query=_query(query), snippets=snippets, citations=citations,
-                untrusted_sources=True, text_chars=MAX_CONTEXT - remaining,
-                truncated=len(snippets) < len(hits))
-
-
 def backfill(batch=100, after_id=0):
     """Resume by returned after_id. Queue only; historical data stays historical."""
     batch = _limit(batch, 100, 500)
@@ -731,28 +559,3 @@ def backfill(batch=100, after_id=0):
         queued = sum(bool(enqueue(conn, row[0])['queued']) for row in selected)
     return dict(scanned=len(selected), queued=queued, after_id=selected[-1][0] if selected else after_id,
                 has_more=len(rows) > batch, archive_only=True)
-
-
-def snapshot(limit=20):
-    """Dashboard-ready bounded documents/stats; no raw paths, bytes or config."""
-    limit = _limit(limit, 20, MAX_RESULTS)
-    with db._conn() as conn:
-        if not _exists(conn, 'knowledge_entries'):
-            return dict(available=False, version=VERSION, documents=[], stats={}, search={'language': 'italian'})
-        counts = conn.execute('''SELECT source_type,status,count(*) FROM knowledge_entries
-            WHERE active GROUP BY source_type,status ORDER BY source_type,status''').fetchall()
-        content_count, occurrence_count = conn.execute('''SELECT
-            (SELECT count(*) FROM knowledge_documents),(SELECT count(*) FROM knowledge_occurrences)''').fetchone()
-        rows = conn.execute(f'''SELECT {ENTRY_JSON} FROM knowledge_entries e
-            JOIN knowledge_runs r ON r.id=e.run_id WHERE e.active AND e.source_type='document'
-            ORDER BY e.ts DESC NULLS LAST,e.id DESC LIMIT %s''', (limit,)).fetchall()
-        runs = conn.execute('SELECT state,count(*) FROM knowledge_runs GROUP BY state ORDER BY state').fetchall()
-        queue = (conn.execute("SELECT status,count(*) FROM work_jobs WHERE kind='knowledge' GROUP BY status ORDER BY status").fetchall()
-             if _exists(conn, 'work_jobs') else [])
-        optional = [s['kind'] for s in _optional_sources(conn)]
-    return dict(available=True, version=VERSION, documents=[_citation(r[0]) for r in rows],
-                stats=dict(contents=content_count, occurrences=occurrence_count,
-                           entries=[dict(source_type=k, status=s, count=n) for k, s, n in counts],
-                           runs=[dict(status=s, count=n) for s, n in runs],
-                           queue=[dict(status=s, count=n) for s, n in queue]),
-                search=dict(language='italian', max_results=MAX_RESULTS, optional_sources=optional))
