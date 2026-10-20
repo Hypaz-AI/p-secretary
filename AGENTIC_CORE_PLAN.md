@@ -15,9 +15,11 @@ scrittura tipizzati con journal idempotente (`agent/toolkit.py`, `agent/journal.
 loro test, la UI «Cosa seguo per te», le approvazioni dashboard, le quiet hours e le soglie di notifica. La mappa dei
 moduli è in `AGENTS.md`, i flussi in `AGENT_FLOWS.md`.
 
-**Verifica**: 820 test; offline 748 OK (97 saltati per opt-in); con PostgreSQL usa-e-getta e **runtime Copilot reale**
-12 scenari end-to-end (inclusa l'iniezione da email ostile: 3 scritture rifiutate). Un test di concorrenza ha
-trovato una vera race sul tetto notifiche (due `notify_urgent` parallele), corretta con un advisory lock.
+**Verifica**: 878 test, tutti OK, con PostgreSQL usa-e-getta (anche via socket Unix) e **runtime Copilot reale**:
+12 scenari end-to-end (inclusa l'iniezione da email ostile: 3 scritture rifiutate). Senza database né runtime
+(come la CI) i test PostgreSQL e quelli del runtime vengono saltati. Due difetti veri sono emersi dai test: una race
+sul tetto notifiche (due `notify_urgent` parallele), corretta con un advisory lock, e il controllo sul ruolo
+`agent_ro`, che su PostgreSQL 16+ guardava l'appartenenza invece del privilegio `SET`.
 
 ### Scostamenti dal piano (deliberati)
 
