@@ -335,7 +335,10 @@ class DashboardApiTests(unittest.TestCase):
             self.assertIn(f'id="{identity}"', page, identity)
         # CSP default-src 'self': nessuna risorsa esterna; ogni asset della pagina e` servito dalla lista chiusa.
         for name in ('index.html', 'style.css', 'app.js', 'charts.js'):
+            # Unici URL ammessi: namespace SVG e i link di attribuzione (href cliccabili, nessun caricamento di risorse).
             text = (STATIC_DIR / name).read_text().replace('http://www.w3.org/2000/svg', '')
+            for credit in ('https://www.hypaz.com', 'https://github.com/Hypaz-AI/p-secretary'):
+                text = text.replace(credit, '')
             self.assertIsNone(re.search(r'https?://', text), name)
         for asset in re.findall(r'(?:href|src)="/([^"]+)"', page):
             self.assertIn(asset, dashboard.STATIC_ASSETS)

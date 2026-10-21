@@ -1,5 +1,6 @@
 <p align="center">
-  <img src="secretary/dashboard/static/logo.webp" alt="Logo p-secretary" width="200">
+  <img src="secretary/dashboard/static/logo.webp" alt="Logo p-secretary" width="200"><br>
+  <sub>P-Secretary by <a href="https://github.com/Hypaz-AI/p-secretary">Hypaz</a> · powered by <a href="https://www.hypaz.com">Hypaz</a></sub>
 </p>
 
 # P-Secretary · un agente per le tue comunicazioni
