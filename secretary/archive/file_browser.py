@@ -143,8 +143,9 @@ def delete(root, path):
             info = regular(target)
             physical = root_path(root).joinpath(*segments)
             try:
-                with db._conn() as conn:
-                    # Blocks concurrent reference writes for the duration of deletion.
+                # La connessione e' in autocommit: LOCK TABLE esiste solo dentro una transazione, che resta
+                # aperta fino all'unlink (blocca le scritture concorrenti di riferimenti).
+                with db._conn() as conn, conn.transaction():
                     conn.execute('LOCK TABLE attachments, invoices, monthly_zips IN SHARE MODE')
                     rows = conn.execute('SELECT path FROM attachments WHERE path IS NOT NULL UNION ALL SELECT path FROM invoices UNION ALL SELECT path FROM monthly_zips').fetchall()
                     for row in rows:

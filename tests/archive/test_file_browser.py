@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import DEFAULT, MagicMock, patch
 
 from secretary.dashboard import dashboard
 from secretary.archive import file_browser as browser
@@ -28,6 +28,21 @@ class FileBrowserTests(unittest.TestCase):
     def db(self, paths=()):
         conn = MagicMock()
         conn.execute.return_value.fetchall.return_value = [(p,) for p in paths]
+        # Come PostgreSQL in autocommit: LOCK TABLE fuori da una transazione e' un errore.
+        state = {'open': False}
+
+        def transaction():
+            manager = MagicMock()
+            manager.__enter__.side_effect = lambda: state.update(open=True)
+            manager.__exit__.side_effect = lambda *args: state.update(open=False) or False
+            return manager
+
+        def execute(sql, *args):
+            if sql.lstrip().upper().startswith('LOCK TABLE') and not state['open']:
+                raise RuntimeError('LOCK TABLE can only be used in transaction blocks')
+            return DEFAULT
+        conn.transaction.side_effect = transaction
+        conn.execute.side_effect = execute
         context = MagicMock(); context.__enter__.return_value = conn
         return patch.object(browser.db, '_conn', return_value=context)
 
