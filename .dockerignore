@@ -1,19 +1,8 @@
 **
 !requirements.txt
-!*.py
-test_*.py
-!agent/
-!agent/*.py
-!connectors/
-!connectors/*.py
-!web/
-!web/*.js
-!web/*.css
-!web/*.html
-!data/
-!data/package.json
-!data/package-lock.json
-!docker/
-!docker/entrypoint.py
+!secretary/
+!deploy/docker/entrypoint.py
+!deploy/whatsapp/package.json
+!deploy/whatsapp/package-lock.json
 # Ultima regola vince: niente bytecode locale nell'immagine.
 **/__pycache__

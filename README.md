@@ -52,7 +52,7 @@ Il modello **non è autorità**: lo è la provenienza nativa verificata dal serv
   consentite, transazione READ ONLY con timeout, cursore con tetto di righe e
   `SET LOCAL ROLE` a un ruolo `agent_ro` che vede **solo** quelle viste. L'app lo crea da
   sola al primo avvio (DB locale); con un DB esterno senza `CREATEROLE` il DBA esegue due
-  istruzioni una tantum ([`deploy/agent_ro.sql`](deploy/agent_ro.sql)).
+  istruzioni una tantum ([`deploy/sql/agent_ro.sql`](deploy/sql/agent_ro.sql)).
 - **La chiave OpenRouter non entra mai nel runtime dell'agente**: ogni richiesta passa
   da un gateway locale (loopback, bearer monouso per turno) che applica il ledger
   di budget (`AI_BUDGET_*`), limita l'output e legge costo/token reali.
@@ -88,9 +88,20 @@ sincronizzazioni passano dal tuo gesto su Telegram.
   thread e con allegati, erase nei backup, prova di ripristino completa e
   valutazione qualitativa dell'agente sul tuo archivio.
 
-Dettaglio dei flussi: [AGENT_FLOWS.md](AGENT_FLOWS.md). Baseline per chi sviluppa:
-[AGENTS.md](AGENTS.md). Configurazione: [CONFIGURATION.md](CONFIGURATION.md).
-Operatività: [OPERATIONS.md](OPERATIONS.md).
+Dettaglio dei flussi: [AGENT_FLOWS.md](docs/AGENT_FLOWS.md). Baseline per chi sviluppa:
+[AGENTS.md](AGENTS.md). Configurazione: [CONFIGURATION.md](docs/CONFIGURATION.md).
+Operatività: [OPERATIONS.md](docs/OPERATIONS.md).
+
+### Struttura del repository
+
+```
+secretary/        pacchetto Python (`python -m secretary`): core, archive, workflows,
+                  agent, connectors, dashboard (API + `static/`), setup, maintenance
+tests/            suite unittest, una cartella per pacchetto (`python -m unittest discover`)
+docs/             flussi, configurazione, operatività, guida Docker, note storiche
+deploy/           entrypoint Docker, manifest del ponte WhatsApp, SQL del DBA, unità systemd
+Dockerfile, compose*.yaml, pi-secretary (launcher), requirements.txt, .env.example
+```
 
 ## Nuove installazioni e aggiornamenti
 
@@ -98,7 +109,7 @@ Fatture e ZIP sono opzionali e partono disattivati. Un aggiornamento da una vers
 precedente conserva i flag espliciti e **non** concede consensi AI. Le tabelle del vecchio
 segretario (pratiche, responsabilità, revisioni, esecuzione email) non vengono più
 usate: restano nel DB finché non le rimuovi tu con
-[`deploy/drop_legacy_tables.sql`](deploy/drop_legacy_tables.sql), da eseguire solo dopo un backup.
+[`deploy/sql/drop_legacy_tables.sql`](deploy/sql/drop_legacy_tables.sql), da eseguire solo dopo un backup.
 
 # Importazione storica una tantum
 
@@ -111,7 +122,7 @@ Il comando ferma l'app per liberare le sessioni Telegram/WhatsApp, ricostruisce
 l'immagine e avvia un container temporaneo. **Al termine l'app resta ferma**:
 riavviarla con `sh ./pi-secretary up`. Non eseguire altri runtime sulle stesse
 sessioni durante l'importazione. In installazioni Python dirette è disponibile
-`python historical_import.py --days 30`, dopo aver fermato il runtime.
+`python -m secretary.archive.historical_import --days 30`, dopo aver fermato il runtime.
 
 - Email: INBOX e cartella Inviate riconosciuta, allegati inclusi, senza segnare
   i messaggi come letti. Cartella Inviate assente o errori producono un esito
@@ -233,7 +244,7 @@ multilinea, termina con una riga `FINE`) oppure importazione da file. Serve un
 terminale con input nascosto; se non disponibile, l’incolla viene bloccato.
 Non inserire chiavi in chat, argomenti di shell o upload generici. La dashboard
 protetta dispone di un campo JSON Calendar dedicato con validazione separata,
-senza evento di prova: vedere [CONFIGURATION.md](CONFIGURATION.md#setup-calendar).
+senza evento di prova: vedere [CONFIGURATION.md](docs/CONFIGURATION.md#setup-calendar).
 
 La chiave viene validata localmente e salvata atomicamente con permessi `0600`;
 ogni sostituzione richiede consenso. Il default Docker è
@@ -349,8 +360,8 @@ restano gli stessi. Backup di DB e filesystem sono a tuo carico.
 - `sh ./pi-secretary doctor`: prova connessione DB, senza avviarlo o migrare.
 - `sh ./pi-secretary down`: rimuove container/rete, **conserva il volume DB**.
 
-Per account, troubleshooting e migrazione leggi la [guida Docker](docker/README.md).
-[OPERATIONS.md](OPERATIONS.md) è il riferimento tecnico per operatori, in inglese.
+Per account, troubleshooting e migrazione leggi la [guida Docker](docs/DOCKER.md).
+[OPERATIONS.md](docs/OPERATIONS.md) è il riferimento tecnico per operatori, in inglese.
 
 **Limiti:** nessun import storico illimitato, backup o aggiornamento automatico,
 né consegna esattamente una volta. Gli appuntamenti rilevati sono proposte da

@@ -1,8 +1,8 @@
 # ============================================================
 #  PI-SECRETARY — .gitignore
 #  Esclude segreti, stato locale e file generati.
-#  NB: non si ignora "data/" in blocco, così restano versionabili
-#  i file sorgente del ponte WhatsApp (package.json / lockfile).
+#  `data/` è solo stato di runtime (default di DATA_DIR fuori da Docker):
+#  il manifest del ponte WhatsApp (package.json) vive in deploy/whatsapp/.
 # ============================================================
 
 # --- Segreti e configurazione locale ------------------------
@@ -12,15 +12,8 @@
 *.pem
 *.key
 
-# --- Credenziali e token (in data/) -------------------------
-data/gcal_service_account.json
-data/gcal_tokens.json
-data/ms_tokens.json
-
-# --- Stato e cache di runtime -------------------------------
-data/state.json
-data/.wwebjs_cache/
-data/locks/
+# --- Stato e dati di runtime (credenziali, sessioni, media, code) ---
+data/
 .env.lock
 .env.*.lock
 
@@ -29,22 +22,9 @@ data/locks/
 *.session
 *.session-*
 *.session.*
-data/telegram_account/
-data/wa_session/
-
-# --- Media, code e archivi generati -------------------------
-data/wa_media/
-data/wa_pending/
-data/tg_files/
-data/email_attachments/
-data/zips/
-
-# --- Ponte WhatsApp generato (sorgente in connectors/whatsapp.py) ---
-data/wa_bridge.js
 
 # --- Node ---------------------------------------------------
 node_modules/
-data/node_modules/
 
 # --- Python -------------------------------------------------
 __pycache__/

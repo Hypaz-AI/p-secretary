@@ -21,17 +21,10 @@ RUN COPILOT_CLI_EXTRACT_DIR=/opt/copilot-runtime python -m copilot download-runt
     && chmod -R a+rX /opt/copilot-runtime \
     && COPILOT_CLI_EXTRACT_DIR=/opt/copilot-runtime COPILOT_SKIP_CLI_DOWNLOAD=1 python -c "import os; from copilot._cli_download import get_or_download_cli as g; p=g(); assert p and os.access(p, os.X_OK), 'runtime non risolvibile'; print('runtime ok:', p)"
 ENV COPILOT_CLI_EXTRACT_DIR=/opt/copilot-runtime COPILOT_SKIP_CLI_DOWNLOAD=1
-COPY data/package.json data/package-lock.json ./node/
+COPY deploy/whatsapp/package.json deploy/whatsapp/package-lock.json ./node/
 RUN cd node && npm ci --omit=dev && npm cache clean --force
-COPY actions.py admin_config.py config.py dashboard.py dashboard_owner.py db.py digest.py documents.py email_attachments.py file_browser.py flows.py invoices.py jobs.py main.py message_store.py pipeline.py recovery.py installer.py ./
-COPY ai_budget.py platform_health.py historical_import.py setup_gcal.py setup_ms_auth.py setup_telegram.py setup_telegram_account.py setup_whatsapp.py ./
-COPY setup_ui.py ./
-COPY task_reconciliation.py owner_commitments.py ./
-COPY policy.py capabilities.py knowledge.py privacy.py ./
-COPY agent/ ./agent/
-COPY connectors/ ./connectors/
-COPY web/ ./web/
-COPY docker/entrypoint.py ./docker/entrypoint.py
+COPY secretary/ ./secretary/
+COPY deploy/docker/entrypoint.py ./deploy/docker/entrypoint.py
 USER 1000:1000
-ENTRYPOINT ["python", "/opt/pi-secretary/docker/entrypoint.py"]
-CMD ["python", "main.py"]
+ENTRYPOINT ["python", "/opt/pi-secretary/deploy/docker/entrypoint.py"]
+CMD ["python", "-m", "secretary"]

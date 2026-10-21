@@ -17,15 +17,17 @@ jobs:
         run: |
           env -i PATH="$PATH" HOME="$RUNNER_TEMP" \
             PI_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
-            python -m unittest -v test_agent_sqlguard test_agent_fsbox test_agent_gateway test_agent_owner \
-              test_dashboard_api test_secretary_budget test_secretary_policy
+            python -m unittest -v tests.agent.test_agent_sqlguard tests.agent.test_agent_fsbox \
+              tests.agent.test_agent_gateway tests.agent.test_agent_owner \
+              tests.dashboard.test_dashboard_api tests.core.test_secretary_budget \
+              tests.core.test_secretary_policy
       - name: Full offline discovery (no deployment dotenv or inherited credentials)
         run: |
           env -i PATH="$PATH" HOME="$RUNNER_TEMP" \
             PI_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
             python -m unittest discover -v
       - run: sh -n pi-secretary
-      - run: node --check web/app.js
+      - run: node --check secretary/dashboard/static/app.js
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
