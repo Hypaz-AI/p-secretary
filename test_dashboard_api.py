@@ -328,6 +328,10 @@ class DashboardApiTests(unittest.TestCase):
         # Il runtime è incorporato nell'immagine: niente download all'avvio.
         self.assertIn('python -m copilot download-runtime', image)
         self.assertIn('COPILOT_SKIP_CLI_DOWNLOAD=1', image)
+        # La build deve verificare, senza rete, che il runtime incorporato sia risolvibile (il
+        # client usa `copilot-runtime`; l'alias `copilot` e' una difesa per get_or_download_cli).
+        self.assertIn('download_cli', image)
+        self.assertIn('runtime non risolvibile', image)
         requirements = (root / 'requirements.txt').read_text()
         for pin in ('github-copilot-sdk==', 'pydantic', 'pglast'):
             self.assertIn(pin, requirements)
