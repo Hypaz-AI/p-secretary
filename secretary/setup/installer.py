@@ -378,6 +378,8 @@ def launch(args):
                 raise ValueError('Eseguire setup e confermare prima di avviare app')
             if not read_env(home / 'config/secretary.env').get('OPENROUTER_API_KEY', '').strip():
                 raise ValueError('OPENROUTER_API_KEY obbligatoria: usare configure prima di up.')
+            # Ricostruisce sempre l'immagine: il codice dell'app e' copiato dentro di essa.
+            compose('build', 'app')
             database()
             if doctor():
                 return 1

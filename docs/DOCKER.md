@@ -227,9 +227,8 @@ collegare Calendar non significa abilitare creazione automatica.
 | `doctor` | Solo `SELECT 1`, non avvia DB né applica migrazioni |
 
 Un lock host serializza i comandi. Non ci sono comandi launcher `restart`,
-`backup` o `update`. Build manuale facoltativa: per `docker compose build app`
-esporta prima `P_SECRETARY_HOME`, `P_SECRETARY_UID`, `P_SECRETARY_GID` corretti;
-`config/postgres.env` deve già esistere. Setup fa già la build. Nessuna promessa
+`backup` o `update`. `up` ricostruisce l'immagine prima di ricreare il container
+(nessuna variabile da esportare); `setup`, `configure` e `import-history` fanno già la build. Nessuna promessa
 di immagine prebuilt o build riproducibile: base non fissata a digest, Python
 non bloccato a versioni esatte.
 

@@ -43,6 +43,21 @@ class LauncherRegression(unittest.TestCase):
                     installer.launch(SimpleNamespace(command='up'))
                 self.assertFalse(any('up' in c.args[0] for c in run.call_args_list))
 
+    def test_up_rebuilds_image_before_probe_and_start(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'P_SECRETARY_HOME': tmp}):
+            (Path(tmp) / 'config').mkdir()
+            (Path(tmp) / 'config/progress.json').write_text('{"complete":true}')
+            (Path(tmp) / 'config/secretary.env').write_text('OPENROUTER_API_KEY=test-key\n')
+            with patch('secretary.setup.installer.subprocess.run', return_value=SimpleNamespace(returncode=0)) as run, \
+                    patch('secretary.connectors.whatsapp_profile.repair_docker_singletons', return_value=False):
+                self.assertEqual(installer.launch(SimpleNamespace(command='up')), 0)
+            commands = [c.args[0] for c in run.call_args_list]
+            build = next(i for i, c in enumerate(commands) if c[-2:] == ['build', 'app'])
+            probe = next(i for i, c in enumerate(commands) if '_probe' in c)
+            start = next(i for i, c in enumerate(commands) if '--force-recreate' in c)
+            self.assertLess(build, probe)
+            self.assertLess(build, start)
+
 
 class SetupRegression(ConfigPortabilityTests):
     def test_personal_consent_and_whatsapp_failure(self):

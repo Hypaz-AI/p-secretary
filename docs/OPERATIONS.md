@@ -286,7 +286,7 @@ history conversion and `db.init` rejects resets. Back up and test the migration 
 ### Upgrading from the previous secretary
 
 1. Back up the database and the private config/media; test on a clone with external I/O disabled.
-2. Rebuild the image (the Dockerfile copies modules **by name**) and recreate the container.
+2. Run `sh ./p-secretary up`: it rebuilds the image and recreates the container (the Dockerfile copies modules **by name**).
 3. The new `agent` schema and `agent_*` tables are created at startup. If the application user
    cannot create roles, ask the DBA to run PART 1 of `deploy/sql/agent_ro.sql` (two statements) and
    restart. Existing flags (including `false`) and consents are preserved; nothing
