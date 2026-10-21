@@ -1,0 +1,18 @@
+P-Secretary
+Copyright (C) 2026 Hypaz (https://www.hypaz.com)
+
+Built with Ileen (https://ileen.hypaz.com), as a demonstration of the platform.
+
+This program is free software, licensed under the GNU Affero General Public
+License, version 3 (see the LICENSE file), with the following additional term
+under section 7(b) of that license:
+
+  Attribution. Every copy, modified or unmodified, and every use of this
+  program, including when it is offered as a paid service, must keep this
+  NOTICE file and display the credit "P-Secretary by Hypaz" together with a
+  link to https://github.com/Hypaz-AI/p-secretary in the documentation, in
+  the user interface or in the service's legal notices.
+
+Under section 13 of the AGPL, if you modify this program and let users interact
+with it over a network, you must offer them the corresponding source code of
+your modified version.

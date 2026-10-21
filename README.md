@@ -1,4 +1,4 @@
-# p-secretary · un agente per le tue comunicazioni
+# P-Secretary · un agente per le tue comunicazioni
 
 Segretario personale containerizzato (Docker, multi-piattaforma): raccoglie email, WhatsApp e
 Telegram, archivia tutto su PostgreSQL e **lascia che sia un agente a ragionare**.
@@ -80,6 +80,13 @@ basso su telefono), tema scuro/chiaro e nessuna risorsa esterna:
 La dashboard non decide né invia nulla per conto dell'agente: bozze e
 sincronizzazioni passano dal tuo gesto su Telegram. Per sviluppare l'interfaccia con dati
 fittizi su un database usa-e-getta: `python -m tests.demo_dashboard` (vedi `docs/OPERATIONS.md`).
+
+## Licenza e attribuzione
+
+P-Secretary è software libero rilasciato sotto **GNU AGPL-3.0** (vedi [LICENSE](LICENSE)),
+con una condizione aggiuntiva di attribuzione ([NOTICE](NOTICE)): il credito a Hypaz va
+mantenuto in ogni uso, anche quando il programma è offerto come servizio a pagamento.
+È realizzato con [Ileen](https://ileen.hypaz.com) come dimostrazione delle sue capacità.
 
 ## Stato e limiti
 
