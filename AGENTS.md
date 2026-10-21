@@ -136,7 +136,10 @@ Dockerfile, compose*.yaml, pi-secretary (launcher), requirements.txt, .env.examp
 6. **La chiave OpenRouter non lascia il processo dell'app**; nessun prompt/risposta nei log.
 7. **Notifiche autonome**: solo vere emergenze, tetto giornaliero serializzato con
    advisory lock (`AGENT_NOTIFY_MAX_PER_DAY`).
-8. Il `Dockerfile` copia il pacchetto `secretary/` **intero** (nuovi moduli e sottopacchetti
+8. **Chat escluse** (`WHATSAPP_EXCLUDED_CHATS`, `TELEGRAM_EXCLUDED_CHATS`): il blocco è nei
+   connettori, prima di ogni lettura del contenuto, download, spool, archivio o job AI. Nessun
+   percorso (live, recupero, import storico, spool) deve archiviare o loggare messaggi di chat escluse.
+9. Il `Dockerfile` copia il pacchetto `secretary/` **intero** (nuovi moduli e sottopacchetti
    entrano da soli; nessun `*.py` fuori da `secretary/`). `.dockerignore` parte da `**` e
    riammette solo ciò che elenca (`!secretary/`, `deploy/docker/entrypoint.py`,
    `deploy/whatsapp/package*.json`): ogni NUOVA cartella copiata dal Dockerfile fuori da

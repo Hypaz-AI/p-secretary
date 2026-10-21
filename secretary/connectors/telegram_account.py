@@ -48,6 +48,11 @@ def api_credentials():
     return api_id, config.TELEGRAM_API_HASH
 
 
+def excluded_chat(chat_id) -> bool:
+    """Chat esclusa da TELEGRAM_EXCLUDED_CHATS (ID Telethon marcato, come chat_id dei messaggi)."""
+    return chat_id is not None and str(chat_id) in config.TELEGRAM_EXCLUDED_CHATS
+
+
 def display_name(entity) -> str:
     """Nome visualizzabile di un'entità Telethon (utente, gruppo o canale):
     'Nome Cognome (@user)' per le persone, il titolo per gruppi/canali."""
@@ -224,6 +229,10 @@ class TelegramAccountWorker:
                  'duration': getattr(file, 'duration', None)}]
 
     async def archive(self, message, recovered=False, window=None, *, historical=False):
+        # Blocco a monte: chat escluse prima di qualsiasi lettura del mittente/chat,
+        # download di media o scrittura. Vale per live, recupero e import storico.
+        if excluded_chat(message.chat_id):
+            return False
         cutoff, end = history_window() if window is None else window
         if not message.date or not cutoff <= message.date < end or message.chat_id is None:
             return False
@@ -305,6 +314,8 @@ class TelegramAccountWorker:
         async for dialog in self.client.iter_dialogs(limit=config.TELEGRAM_USER_DIALOG_LIMIT):
             if self.stopping.is_set():
                 break
+            if excluded_chat(getattr(dialog, 'id', None)):
+                continue  # nessuna richiesta di messaggi per le chat escluse
             dialogs += 1
             count = 0
             from secretary.core import recovery
@@ -409,6 +420,8 @@ async def import_history(start, end, max_flood_wait=300):
                 # A failed async iterator cannot be resumed. Restart the full
                 # scan, without advancing recovery watermarks or double counting.
                 async for dialog in client.iter_dialogs(limit=None):
+                    if excluded_chat(getattr(dialog, 'id', None)):
+                        continue
                     async for message in client.iter_messages(dialog.entity, limit=None,
                                                                offset_date=end):
                         if message.date and message.date < start:

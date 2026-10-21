@@ -20,6 +20,11 @@ const path = require('path');
 const readline = require('readline');
 const AUTH_ONLY = process.env.WA_AUTH_ONLY === '1';
 const HISTORY_IMPORT = process.env.WA_HISTORY_IMPORT === '1';
+// Chat escluse (WHATSAPP_EXCLUDED_CHATS): blocco a monte, prima di qualsiasi lettura
+// del contenuto, download, spool o log. Un ID mancante è trattato come escluso.
+const EXCLUDED_CHATS = new Set((process.env.WA_EXCLUDED_CHATS || '').split(',').filter(Boolean));
+function serializedId(id) { return id ? String(id._serialized || id) : ''; }
+function excludedChat(chatId) { return !chatId || EXCLUDED_CHATS.has(chatId); }
 // Never forward dependency errors: they can contain message text, IDs or URLs.
 function historyReason(error) {
   const text = String(error).toLowerCase();
@@ -114,6 +119,7 @@ function mediaFailure(entry, reason) {
 }
 async function archive(msg, recovered_cached=false) {
   if (AUTH_ONLY || !SPOOL) return;
+  if (excludedChat(serializedId(msg.fromMe ? msg.to : msg.from))) return;
   const id = msg.id && (msg.id._serialized || msg.id.id);
   if (!id || msg.from==='status@broadcast' || msg.timestamp < cutoff() ||
       (HISTORY_IMPORT && msg.timestamp >= Number(process.env.WA_HISTORY_END))) return;
@@ -186,7 +192,7 @@ async function archive(msg, recovered_cached=false) {
 async function recover() {
   if(!ready || AUTH_ONLY) return;
   try {
-    const chats=await client.getChats();
+    const chats=(await client.getChats()).filter(chat => !excludedChat(serializedId(chat.id)));
     // prima riempi la mappa dei nomi (rapida), poi il fetch lento
     for(const chat of chats.slice(0,100)) rememberChat(chat);
     for(const chat of chats.slice(0,100)) {
@@ -217,7 +223,7 @@ client.on('ready', async () => {
   console.log(JSON.stringify({ type: 'ready', self: client.info && client.info.wid ? client.info.wid._serialized : null }));
   if (!HISTORY_IMPORT) { recover(); return; }
   try {
-    const chats = await client.getChats();
+    const chats = (await client.getChats()).filter(chat => !excludedChat(serializedId(chat.id)));
     for (const chat of chats) rememberChat(chat);
     const errors = {};
     const record = reason => {errors[reason]=(errors[reason] || 0)+1;};
@@ -355,7 +361,8 @@ def bridge_env(auth_only=False):
          WA_SPOOL_DIR=str(config.DATA_DIR / 'wa_pending'),
          WA_MEDIA_DIR=str(config.DATA_DIR / 'wa_media'),
          WA_AUTH_ONLY='1' if auth_only else '0',
-         WA_SHOW_QR='1' if auth_only else '0')
+         WA_SHOW_QR='1' if auth_only else '0',
+         WA_EXCLUDED_CHATS=','.join(sorted(config.WHATSAPP_EXCLUDED_CHATS)))
   # Preserve Docker-provided NODE_PATH; keep legacy data/node_modules working.
   env['NODE_PATH'] = os.pathsep.join(filter(None, [os.environ.get('NODE_PATH'),
     config.get('WA_NODE_MODULES'), str(config.BASE_DIR / 'data/node_modules')]))
@@ -519,6 +526,9 @@ def import_history(start, end, timeout=600):
       count = 0
       for path in sorted(spool.glob('*.json')):
         m = json.loads(path.read_text())
+        if m.get('chat_id') in config.WHATSAPP_EXCLUDED_CHATS:
+          path.unlink(missing_ok=True)  # chat esclusa: nessun archivio, nessun conteggio
+          continue
         if not self_wid or not m.get('enriched'):
           continue
         if (not start.timestamp() <= m['timestamp'] < end.timestamp()
@@ -760,6 +770,9 @@ class WhatsAppBridge:
           if (not isinstance(m, dict) or not isinstance(m.get('id'), str) or not m['id']
               or path.name != m['id'].encode().hex() + '.json'):
             quarantine(path)
+            continue
+          if m.get('chat_id') in config.WHATSAPP_EXCLUDED_CHATS:
+            path.unlink(missing_ok=True)  # spool di una chat esclusa: non archiviare né analizzare
             continue
           if not m.get('enriched'):
             quarantine(path)

@@ -140,6 +140,28 @@ for i in range(1, 51):
 # --- Telegram / WhatsApp --------------------------------------
 TELEGRAM_BOT_TOKEN = get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = get("TELEGRAM_CHAT_ID")
+# Chat/gruppi ESCLUSI a monte: i loro messaggi (in ingresso e in uscita) non vengono
+# né letti nel dettaglio, né archiviati, né analizzati. Elenco di ID separati da virgole.
+# WhatsApp: ID serializzato (es. 120363…@g.us, 39333…@c.us); Telegram: ID Telethon
+# (es. -1001234567890 per canali/supergruppi, -123456 per gruppi base, 123456 per utenti).
+CHAT_ID_PATTERNS = {
+    'WHATSAPP_EXCLUDED_CHATS': re.compile(r'[A-Za-z0-9._-]{1,64}@(?:c\.us|g\.us|lid)'),
+    'TELEGRAM_EXCLUDED_CHATS': re.compile(r'-?[0-9]{1,20}'),
+}
+
+
+def parse_chat_list(key: str, raw: str) -> frozenset:
+    """Solo ID ben formati; le voci malformate non possono corrispondere a nessuna chat.
+    Non si stampa il contenuto: solo il numero di voci scartate."""
+    items = [item.strip() for item in (raw or '').split(',') if item.strip()]
+    valid = frozenset(item for item in items if CHAT_ID_PATTERNS[key].fullmatch(item))
+    if len(valid) != len(items):
+        print(f'[config] {key}: {len(items) - len(valid)} voci non valide ignorate')
+    return valid
+
+
+WHATSAPP_EXCLUDED_CHATS = parse_chat_list('WHATSAPP_EXCLUDED_CHATS', get('WHATSAPP_EXCLUDED_CHATS'))
+TELEGRAM_EXCLUDED_CHATS = parse_chat_list('TELEGRAM_EXCLUDED_CHATS', get('TELEGRAM_EXCLUDED_CHATS'))
 WHATSAPP_ENABLED = get_bool("WHATSAPP_ENABLED", False)
 TELEGRAM_USER_ENABLED = get_bool('TELEGRAM_USER_ENABLED', False)
 TELEGRAM_API_ID = get('TELEGRAM_API_ID')

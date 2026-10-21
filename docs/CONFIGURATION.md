@@ -290,3 +290,19 @@ correttamente configurato. Un amministratore locale del filesystem resta fidato.
 una riga `FINE` conclude, INVIO iniziale annulla. Non esiste più la scelta `[i]`.
 Il percorso CLI mantiene il proprio flusso con consenso esplicito per l'evento
 di prova; la nuova transazione dashboard è separata e non crea eventi.
+
+## Chat escluse (WhatsApp e Telegram personale)
+
+- `WHATSAPP_EXCLUDED_CHATS` e `TELEGRAM_EXCLUDED_CHATS`: elenchi di ID separati da virgole
+  (massimo 200). Modificabili dalla dashboard (Impostazioni → Telegram e WhatsApp), effetto dopo il riavvio.
+- Il blocco è **a monte**, nel connettore, prima di qualsiasi lettura del contenuto, download di media,
+  scrittura nello spool o nell'archivio, e prima di ogni analisi o job AI:
+  - WhatsApp: il ponte Node scarta i messaggi di chat escluse in `archive()` (live, recupero,
+    import storico) e non interroga le chat escluse; Python elimina dallo spool le voci residue.
+  - Telegram personale: `archive()` esce prima di ogni RPC o download (live, recupero, import
+    storico); i dialog esclusi non vengono neppure letti.
+  - Un ID malformato viene ignorato con un avviso che non ne riporta il contenuto.
+- Il bot Telegram accetta solo la chat privata del proprietario (`TELEGRAM_CHAT_ID`): non ha una
+  lista di esclusione.
+- Non cancella i messaggi già archiviati. Per trovare gli ID:
+  `SELECT DISTINCT channel, chat_id, sender FROM communications WHERE channel IN ('whatsapp','telegram (account)');`

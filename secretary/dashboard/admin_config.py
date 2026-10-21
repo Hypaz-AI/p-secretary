@@ -96,6 +96,8 @@ def field_metadata(key):
         'TELEGRAM_USER_MESSAGE_LIMIT': 'Numero massimo di messaggi per chat e passata di recupero di ieri/oggi.',
         'TELEGRAM_USER_RECOVERY_INTERVAL': 'Secondi tra i recuperi Telegram di ieri/oggi; rispetta i FloodWait.',
         'WHATSAPP_ENABLED': 'Abilita il ponte whatsapp-web.js; autorizzazione QR da terminale.',
+        'WHATSAPP_EXCLUDED_CHATS': 'ID WhatsApp di chat o gruppi da escludere, separati da virgole (es. 120363…@g.us). Messaggi in entrata e uscita di queste chat non vengono archiviati né analizzati. Effetto dopo il riavvio; i messaggi già archiviati restano.',
+        'TELEGRAM_EXCLUDED_CHATS': 'ID Telegram di chat, gruppi o canali dell’account personale da escludere, separati da virgole (es. -1001234567890). Messaggi in entrata e uscita di queste chat non vengono archiviati né analizzati. Effetto dopo il riavvio; i messaggi già archiviati restano.',
         'GCAL_ENABLED': 'Abilita Google Calendar con service account IAM; nessun OAuth utente.',
         'GCAL_CALENDAR_ID': 'ID esplicito del calendario condiviso con client_email, permesso di modifica; non usare primary.',
         'GCAL_EVENT_DURATION': 'Durata predefinita degli appuntamenti, in minuti.',
@@ -178,7 +180,8 @@ def schema():
                   'AGENT_NOTIFY_MAX_PER_DAY', 'OPENROUTER_MODEL', 'OPENROUTER_AUDIO_MODEL'],
         'Database': ['DATABASE_URL'],
         'Telegram e WhatsApp': ['TELEGRAM_BOT_TOKEN', *INTERACTIVE,
-            'TELEGRAM_USER_DIALOG_LIMIT', 'TELEGRAM_USER_MESSAGE_LIMIT', 'TELEGRAM_USER_RECOVERY_INTERVAL'],
+            'TELEGRAM_USER_DIALOG_LIMIT', 'TELEGRAM_USER_MESSAGE_LIMIT', 'TELEGRAM_USER_RECOVERY_INTERVAL',
+            'TELEGRAM_EXCLUDED_CHATS', 'WHATSAPP_EXCLUDED_CHATS'],
         'Calendar': ['GCAL_ENABLED', 'GCAL_CALENDAR_ID', 'GCAL_EVENT_DURATION', 'GCAL_SERVICE_ACCOUNT_JSON'],
         'Preferenze': ['TIMEZONE', 'LANGUAGE', 'DIGEST_TIME', 'POLL_INTERVAL'],
         'Segretario · modalità e retention': list(SECRETARY_FIELDS),
@@ -355,6 +358,10 @@ def validate(changes, values):
                 raise ValueError('Tetto di spesa non valido: usare un importo decimale, ad esempio 5.00') from None
             if not daily_cost.is_finite() or daily_cost < 0 or daily_cost > Decimal('1e9'):
                 raise ValueError('Tetto di spesa fuori intervallo (0 – 1e9); 0 disattiva il tetto monetario')
+        if key in config.CHAT_ID_PATTERNS:
+            items = [item.strip() for item in value.split(',') if item.strip()]
+            if len(items) > 200 or any(not config.CHAT_ID_PATTERNS[key].fullmatch(item) for item in items):
+                raise ValueError('Elenco chat escluse non valido: ID separati da virgole, massimo 200')
         if key == 'AGENT_NOTIFY_MAX_PER_DAY' and (not value.isdecimal() or not 0 <= int(value) <= 100):
             raise ValueError('Tetto notifiche fuori intervallo 0–100')
         if key == 'EFFECT_AUDIT_RETENTION_DAYS' and (not value.isdecimal() or not 0 <= int(value) <= 3650):
