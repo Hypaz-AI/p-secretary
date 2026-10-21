@@ -9,7 +9,6 @@ from unittest.mock import patch, MagicMock
 from secretary.dashboard import admin_config as admin
 from secretary.core import config
 from secretary.dashboard import dashboard
-from tests.support import STATIC_DIR
 
 
 class AdminConfigTests(unittest.TestCase):
@@ -133,16 +132,6 @@ class AdminConfigTests(unittest.TestCase):
         self.assertEqual(self.post({'AGENT_NOTIFY_MAX_PER_DAY': '3'}).status_code, 200)
         with patch.object(admin, 'verify_email'):
             self.assertEqual(self.post({'EMAIL50_PROVIDER': 'm365', 'EMAIL50_AUTH': 'oauth2'}).status_code, 200)
-
-    def test_frontend_metadata_and_select_lifecycle_contract(self):
-        script = (STATIC_DIR / 'app.js').read_text()
-        self.assertIn("field.type === 'select' ? 'select'", script)
-        self.assertIn('field.options || []', script)
-        self.assertIn('field.description', script)
-        self.assertIn("input.setAttribute('aria-describedby', help.id)", script)
-        self.assertIn("querySelectorAll('input,textarea,select')", script)
-        self.assertIn('i.value = i.dataset.original', script)
-        self.assertIn("i.value !== i.dataset.original", script)
 
     def test_failed_batch_keeps_file_environment_and_redacts_errors(self):
         before = self.path.read_bytes()

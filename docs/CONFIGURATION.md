@@ -65,6 +65,7 @@ credenziali dashboard è l'amministratore fidato, non un utente con permessi rid
 | Rotta | Contratto |
 | --- | --- |
 | `GET /api/dashboard` | Flussi, contatori, traffico, attività recente (solo metadati: nessun testo o contatto) |
+| `GET /api/trends` | Serie giornaliere (14 giorni) per i grafici: messaggi per canale e direzione, chiamate/token/costo AI, esecuzioni dell'agente per stato. Solo conteggi aggregati, mai testo, contatti o prompt |
 | `POST /api/flows/<flow>` | Interruttore esistente, booleano `enabled`; non concede consenso dati |
 | `POST /api/platform-health` | Verifica manuale e di sola lettura di DB, email, bot, Calendar, chiave AI |
 | `GET /api/agent` | Modello, protezione DB (`readonly_role`), `sends_allowed`, limiti, ultime 30 esecuzioni e 20 bozze email |

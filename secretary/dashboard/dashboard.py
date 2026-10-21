@@ -7,6 +7,7 @@ from pathlib import Path
 import secrets
 import threading
 import time
+from datetime import timedelta
 
 from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -17,6 +18,8 @@ from secretary.core import config, dashboard_owner as owners, db, flows
 CREDENTIAL_FILE = Path.home() / '.config' / 'pi-secretary' / 'dashboard.json'
 
 # Finite server contracts. No module, table, path or SQL arrives from the browser.
+STATIC_ASSETS = ('app.js', 'charts.js', 'style.css', 'favicon.svg')
+TREND_DAYS = 14
 DATA_CHANNELS = ('email', 'telegram', 'whatsapp')
 DATA_EFFECTS = ('ai_text', 'ai_media', 'ai_history')
 
@@ -96,6 +99,39 @@ def budget_view():
                                created_at=item['created_at'].isoformat()) for item in orphaned],
                 day_timezone='UTC', scope='jobs execution context only',
                 reservations_refunded=False)
+
+
+def trends_view():
+    """Serie giornaliere per i grafici: solo conteggi aggregati, mai testo, contatti o prompt."""
+    with db._conn() as conn:
+        today = conn.execute('SELECT (now() AT TIME ZONE %s)::date', (config.TIMEZONE,)).fetchone()[0]
+        first = today - timedelta(days=TREND_DAYS - 1)
+        messages = conn.execute('''SELECT day,channel,COALESCE(direction,'unknown'),count(*)
+            FROM communications WHERE day BETWEEN %s AND %s GROUP BY 1,2,3 ORDER BY 1,2,3 LIMIT 2000''',
+            (first, today)).fetchall()
+        usage = conn.execute('''SELECT usage_day,count(*),coalesce(sum(charged_tokens),0),sum(provider_cost)
+            FROM secretary_ai_usage WHERE usage_day BETWEEN %s AND %s GROUP BY 1 ORDER BY 1 LIMIT 100''',
+            (first, today)).fetchall()
+        runs = conn.execute('''SELECT (started_at AT TIME ZONE %s)::date,state,count(*)
+            FROM agent_runs WHERE (started_at AT TIME ZONE %s)::date BETWEEN %s AND %s
+            GROUP BY 1,2 ORDER BY 1,2 LIMIT 200''', (config.TIMEZONE, config.TIMEZONE, first, today)).fetchall()
+    days = [first + timedelta(days=offset) for offset in range(TREND_DAYS)]
+    position = {day: offset for offset, day in enumerate(days)}
+    channels = {}
+    for day, channel, direction, count in messages:
+        series = channels.setdefault(channel, {key: [0] * TREND_DAYS for key in ('in', 'out', 'other')})
+        series[direction if direction in ('in', 'out') else 'other'][position[day]] += count
+    ai = {key: [0] * TREND_DAYS for key in ('calls', 'tokens', 'cost')}
+    for day, calls, tokens, cost in usage:
+        ai['calls'][position[day]] = calls
+        ai['tokens'][position[day]] = int(tokens)
+        ai['cost'][position[day]] = float(cost) if cost is not None else 0
+    states = {key: [0] * TREND_DAYS for key in ('done', 'failed', 'running')}
+    for day, state, count in runs:
+        if state in states:
+            states[state][position[day]] = count
+    return dict(available=True, timezone=config.TIMEZONE, days=[day.isoformat() for day in days],
+                messages=channels, ai=ai, runs=states, ai_day_timezone='UTC')
 
 
 def budget_limits_view():
@@ -249,7 +285,7 @@ def create_app(auth=None):
             origin = request.headers.get('Origin')
             if origin and origin != request.host_url.rstrip('/'):
                 return jsonify(error='Origin refused'), 403
-        if request.path in ('/', '/app.js', '/style.css', '/api/login', '/healthz'):
+        if request.path in ('/', '/api/login', '/healthz') or request.path.lstrip('/') in STATIC_ASSETS:
             return
         with lock:
             now = time.time()
@@ -285,7 +321,7 @@ def create_app(auth=None):
 
     @app.get('/<name>')
     def asset(name):
-        if name not in ('app.js', 'style.css'):
+        if name not in STATIC_ASSETS:
             return '', 404
         return send_from_directory(config.STATIC_DIR, name)
 
@@ -446,6 +482,13 @@ def register_api(app):
     @bounded
     def ai_budget_snapshot():
         return budget_view()
+
+    @app.get('/api/trends')
+    @bounded
+    def trends():
+        if request.args:
+            raise ValueError('Unknown parameter')
+        return trends_view()
 
     @app.get('/api/budget/limits')
     @bounded

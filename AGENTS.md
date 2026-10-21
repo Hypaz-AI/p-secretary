@@ -170,6 +170,12 @@ concorrenza vanno ripetuti più volte (la race sul tetto notifiche falliva 1 vol
 i moduli `*_postgres` con cluster proprio vanno lanciati per classe. I test che sostituiscono un modulo
 del pacchetto in `sys.modules` devono usare `tests.support.fake_module(s)`, che tocca anche l'attributo del
 pacchetto padre (`from pacchetto import modulo` lo legge prima di `sys.modules`).
+Frontend (`dashboard/static/`): `charts.js` (grafici SVG, nessuna dipendenza) + `app.js`; ogni testo passa
+da `textContent`/nodi DOM (mai markup), nessun `confirm()` nativo (dialogo in pagina). La VM Node di
+`tests/dashboard/test_web_session_safety.py` carica entrambi gli script e simula il DOM: ogni nuova API DOM
+usata va aggiunta all'harness (`append(false/null)` vi è un errore perché il browser lo mostrerebbe come
+testo). Per vedere la grafica con dati fittizi: `python -m tests.demo_dashboard` (vedi `docs/OPERATIONS.md`).
+`GET /api/trends` espone solo conteggi aggregati per i grafici.
 Aree coperte: provenienza e consensi (viste `agent.*`), SQL guard, fsbox, gateway, bordi di web/posta/prompt/bozze
 (`tests/agent/test_agent_edges.py`),
 turni dell'owner (comandi, idempotenza, autorità), runtime reale (12 scenari, inclusa

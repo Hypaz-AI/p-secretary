@@ -2,9 +2,10 @@
 
 Nessuna credenziale di deployment, chiamata a provider, worker o migrazione di produzione.
 """
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+import re
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -32,7 +33,7 @@ class DashboardApiTests(unittest.TestCase):
     # ------------------------------------------------------------ guardie
     def test_every_api_requires_authentication_and_same_origin(self):
         anonymous = dashboard.create_app({'username': 'owner', 'password': 'offline'}).test_client()
-        for path in ('/api/agent', '/api/agent/runs/1', '/api/budget', '/api/budget/limits',
+        for path in ('/api/agent', '/api/agent/runs/1', '/api/budget', '/api/budget/limits', '/api/trends',
                      '/api/data-policies', '/api/capabilities', '/api/privacy/messages/1/export'):
             with self.subTest(path=path):
                 self.assertEqual(anonymous.get(path).status_code, 401)
@@ -135,6 +136,51 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/agent/runs/0').status_code, 400)
         self.assertEqual(self.client.get('/api/agent/runs/5?x=1').status_code, 400)
         self.assertEqual(self.client.get('/api/agent/runs/abc').status_code, 404)
+
+    # -------------------------------------------------------------- tendenze
+    def test_trends_are_aggregate_counts_aligned_to_days_without_content(self):
+        today = date(2026, 10, 21)
+        self.conn.execute.return_value.fetchone.return_value = (today,)
+        self.conn.execute.return_value.fetchall.side_effect = [
+            [(today - timedelta(days=1), 'email', 'out', 2), (today, 'email', 'in', 3),
+             (today, 'telegram', 'unknown', 1)],
+            [(today, 5, 1200, Decimal('0.0200')), (today - timedelta(days=2), 1, 40, None)],
+            [(today, 'done', 2), (today, 'failed', 1), (today, 'mystery', 9)]]
+        response = self.client.get('/api/trends')
+        self.assertEqual(response.status_code, 200)
+        body = response.json
+        self.assertEqual(len(body['days']), dashboard.TREND_DAYS)
+        self.assertEqual(body['days'][-1], '2026-10-21')
+        self.assertEqual(body['days'][0], '2026-10-08')
+        self.assertEqual(body['messages']['email']['in'][-1], 3)
+        self.assertEqual(body['messages']['email']['out'][-2], 2)
+        self.assertEqual(body['messages']['telegram']['other'][-1], 1)
+        self.assertEqual((body['ai']['calls'][-1], body['ai']['tokens'][-1], body['ai']['cost'][-1]), (5, 1200, 0.02))
+        self.assertEqual(body['ai']['cost'][-3], 0)  # costo non comunicato: mai presentato come reale
+        self.assertEqual((body['runs']['done'][-1], body['runs']['failed'][-1]), (2, 1))
+        self.assertNotIn('mystery', body['runs'])
+        for series in [*body['ai'].values(), *body['runs'].values(),
+                       *[values for channel in body['messages'].values() for values in channel.values()]]:
+            self.assertEqual(len(series), dashboard.TREND_DAYS)
+        for statement in (call.args[0] for call in self.conn.execute.call_args_list[1:]):
+            self.assertTrue(statement.lstrip().startswith('SELECT'))
+            self.assertIn('LIMIT', statement)
+            for forbidden in ('body', 'content', 'prompt', 'subject'):
+                self.assertNotIn(forbidden, statement.lower())
+        self.assertEqual(self.client.get('/api/trends?x=1').status_code, 400)
+        self.assertEqual(self.post('/api/trends', {}).status_code, 405)
+
+    def test_static_assets_are_public_and_allowlisted(self):
+        anonymous = dashboard.create_app({'username': 'owner', 'password': 'offline'}).test_client()
+        for name in dashboard.STATIC_ASSETS:
+            with self.subTest(name=name):
+                response = anonymous.get('/' + name)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        for name in ('secrets.env', 'index.html', '..%2Fconfig.py', 'app.js.map'):
+            with self.subTest(name=name):
+                self.assertIn(anonymous.get('/' + name).status_code, (401, 404))
+        self.connection.assert_not_called()
 
     # --------------------------------------------------------------- budget
     def test_budget_snapshot_aggregate_only_null_cost_and_real_caps(self):
@@ -260,47 +306,48 @@ class DashboardApiTests(unittest.TestCase):
 
     # ------------------------------------------------------------ frontend
     def test_frontend_is_safe_text_only_and_has_no_send_surface(self):
-        script = (STATIC_DIR / 'app.js').read_text()
+        scripts = {name: (STATIC_DIR / name).read_text() for name in ('app.js', 'charts.js')}
+        script = scripts['app.js']
         page = (STATIC_DIR / 'index.html').read_text()
-        for label in ('Agente', 'Permessi AI', 'Impostazioni', 'Archivio e file', 'Panoramica'):
+        for label in ('Agente', 'Permessi AI', 'Budget AI', 'Impostazioni', 'Archivio e file', 'Panoramica'):
             self.assertIn(label, page)
-        for forbidden in ('innerHTML', 'localStorage', 'sessionStorage', 'eval('):
-            self.assertNotIn(forbidden, script)
+        for name, source in scripts.items():
+            for forbidden in ('innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'localStorage',
+                              'sessionStorage', 'eval(', 'new Function'):
+                self.assertNotIn(forbidden, source, f'{name}: {forbidden}')
+            # Niente finestre native: ogni conferma passa dal dialogo nella pagina.
+            code = '\n'.join(line for line in source.splitlines() if not line.lstrip().startswith('//'))
+            self.assertIsNone(re.search(r'(?<![\w.])(confirm|alert|prompt)\(', code), name)
         for removed in ('/api/secretary', '/api/knowledge', 'dispatch', 'approvals', 'practice'):
             self.assertNotIn(removed, script)
         self.assertIn("/invia ${email.id}", script)  # la decisione passa dal gesto su Telegram
-        for page_id in ('page-overview', 'page-agent', 'page-ai-permissions',
-                        'page-integration-settings', 'page-archive'):
-            self.assertIn(f'id="{page_id}"', page)
-        self.assertIn("PAGES = ['overview', 'agent'", script)
-        self.assertIn('function showPage(name)', script)
-        self.assertIn("location.hash.slice(1)||'overview'", script)
+        # Ogni pagina ha una voce di menu e una sezione; l'elenco dello script coincide con la pagina.
+        pages = re.search(r"const PAGES = \[([^\]]*)\]", script).group(1)
+        names = re.findall(r"'([a-z-]+)'", pages)
+        self.assertEqual(names[0], 'overview')
+        self.assertIn("location.hash.slice(1) || 'overview'", script)
+        for name in names:
+            self.assertIn(f'id="page-{name}"', page)
+            self.assertIn(f'data-page="{name}"', page)
+        self.assertEqual(sorted(re.findall(r'data-page="([a-z-]+)"', page)), sorted(names))
         # Ogni id usato dallo script esiste nella pagina.
-        import re
         for identity in set(re.findall(r"el\('([a-z-]+)'\)", script)):
             self.assertIn(f'id="{identity}"', page, identity)
+        # CSP default-src 'self': nessuna risorsa esterna; ogni asset della pagina e` servito dalla lista chiusa.
+        for name in ('index.html', 'style.css', 'app.js', 'charts.js', 'favicon.svg'):
+            text = (STATIC_DIR / name).read_text().replace('http://www.w3.org/2000/svg', '')
+            self.assertIsNone(re.search(r'https?://', text), name)
+        for asset in re.findall(r'(?:href|src)="/([^"]+)"', page):
+            self.assertIn(asset, dashboard.STATIC_ASSETS)
+            self.assertTrue((STATIC_DIR / asset).is_file(), asset)
 
-    def test_budget_frontend_saturation_bars_and_thresholds(self):
-        script = (STATIC_DIR / 'app.js').read_text()
+    def test_budget_frontend_levels_are_styled_and_documented(self):
         page = (STATIC_DIR / 'index.html').read_text()
         style = (STATIC_DIR / 'style.css').read_text()
-        # Soglie: verde <60%, gialla 60–80%, arancione 80–100%, rossa >=100%.
-        for text in ("if (ratio < 0.6) return 'ok'", "if (ratio < 0.8) return 'warn'",
-                     "if (ratio < 1) return 'high'", "return 'full'",
-                     'function budgetMeter(parent, label, used, limit, target)',
-                     "fill.className = `budget-fill ${level}`",
-                     "fill.setAttribute('role', 'progressbar')",
-                     "const flag = node('span', 'SATURATO')",
-                     "const edit = node('button', 'Modifica questo limite')",
-                     'async function openSettingsGroup(group, key)',
-                     "api('/api/budget')", "api('/api/budget/reconcile', {})",
-                     "api('/api/jobs/requeue', {kind: 'analysis'})",
-                     'result.money_cap_enforced', 'result.scope_caps', 'result.scope_usage',
-                     "agent_owner: 'agente · tue richieste'"):
-            self.assertIn(text, script)
-        for text in ('.budget-fill.ok{background:#3ecf8e}', '.budget-fill.warn{background:#e6c34a}',
-                     '.budget-fill.high{background:#e6913a}', '.budget-fill.full{background:#e5484d}'):
-            self.assertIn(text, style)
+        # Il comportamento delle soglie e` provato nella VM Node (test_web_session_safety).
+        for level in ('ok', 'warn', 'high', 'full'):
+            self.assertIn(f'.meter-fill.lvl-{level}', style)
+            self.assertIn(f'.ring-value.lvl-{level}', style)
         self.assertIn('Barre di saturazione', page)
         self.assertIn('Modifica i limiti AI', page)
 

@@ -62,13 +62,24 @@ privacy e costi. Non è un sistema di emergenza.
 
 ## La dashboard
 
-Rete locale, login dedicato, CSRF e same-origin. Pagine: **Panoramica** (flussi,
-traffico, salute dei connettori), **Agente** (esecuzioni recenti, strumenti usati,
-bozze email; nessun prompt né risposta del modello), **Permessi AI** (consensi e
-budget AI con barre di saturazione, recupero dei media bloccati), **Impostazioni**
-(integrazioni e modelli) e **Archivio e file** (dati, fatture, `workspace/`).
+Rete locale, login dedicato, CSRF e same-origin. Sei pagine, con menu laterale (barra in
+basso su telefono), tema scuro/chiaro e nessuna risorsa esterna:
+
+- **Panoramica**: KPI con andamento a 14 giorni, grafico dei messaggi per canale, budget AI di
+  oggi, flussi con interruttore, code di lavoro, traffico, attività recente, salute dei connettori.
+- **Agente**: modello e protezione del database, grafico delle esecuzioni, tabella filtrabile con il
+  dettaglio degli strumenti usati, bozze email (nessun prompt né risposta del modello).
+- **Permessi AI**: matrice dei consensi con interruttori (ogni cambio chiede conferma) e recupero
+  dei media bloccati.
+- **Budget AI**: anelli di saturazione, soglie colorate, tetti per ambito, andamento giornaliero,
+  riparazione degli slot bloccati.
+- **Impostazioni**: elenco dei servizi a sinistra, un servizio alla volta a destra, riepilogo prima
+  di salvare.
+- **Archivio e file**: file (con filtro e percorso), fatture e ZIP mensili.
+
 La dashboard non decide né invia nulla per conto dell'agente: bozze e
-sincronizzazioni passano dal tuo gesto su Telegram.
+sincronizzazioni passano dal tuo gesto su Telegram. Per sviluppare l'interfaccia con dati
+fittizi su un database usa-e-getta: `python -m tests.demo_dashboard` (vedi `docs/OPERATIONS.md`).
 
 ## Stato e limiti
 

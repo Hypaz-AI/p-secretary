@@ -1,25 +1,319 @@
 <!doctype html>
-<html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pi Secretary · Control room</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
-<body><aside><div class="brand">◈ <b>Pi Secretary</b></div><p>PERSONAL OPERATIONS</p><nav aria-label="Navigazione principale"><button class="nav-link" data-page="overview" type="button">◧ Panoramica</button><button class="nav-link" data-page="agent" type="button">◉ Agente</button><button class="nav-link" data-page="ai-permissions" type="button">◇ Permessi AI</button><button class="nav-link" data-page="integration-settings" type="button">⚙ Impostazioni</button><button class="nav-link" data-page="archive" type="button">▤ Archivio e file</button></nav><small>Rete locale · accesso riservato<br>Le email partono solo con il tuo /invia</small></aside>
-<main><header><div><p class="eyebrow">IL TUO ASSISTENTE, SOTTO CONTROLLO</p><h1>Control room</h1><p id="status" role="status">Accesso protetto alla dashboard locale</p></div><button id="logout" hidden>Esci</button></header>
-<form id="login"><h2>Bentornato</h2><p>Inserisci le credenziali locali del dispositivo.</p><label>Utente<input name="username" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button>Accedi in sicurezza</button><p id="error" role="alert"></p></form>
-<section id="dashboard" hidden><div id="kpis" class="kpis"></div>
-<section class="page" id="page-overview">
-<section class="panel"><h2>Flussi operativi <span>LIVE CONTROLS</span></h2><p>Le modifiche si applicano ai prossimi lavori, non interrompono quelli già in corso. Nessun invio causato dalla riattivazione in sé.</p><div id="flows"></div><p class="notice">Il bot mantiene disponibili comandi e dialogo del proprietario anche con acquisizione disattivata. Telegram personale archivia senza AI. Funzioni non configurate restano indisponibili. Riattivando, il normale recupero resta limitato a ieri/oggi.</p></section>
-<div class="columns"><section class="panel"><h2>Traffico per sorgente</h2><p>Oggi e ieri · data originale, fuso configurato</p><div id="traffic"></div></section><section class="panel"><h2>Attività recente</h2><p>Solo metadati: nessun testo o contatto esposto</p><div id="activity"></div></section></div>
-<section class="panel" aria-labelledby="health-title"><p class="eyebrow">DIAGNOSTICA MANUALE · SOLA LETTURA</p><h2 id="health-title">Salute della piattaforma</h2><p>Verifica DB, account email, bot, calendario e credenziale AI. Telegram personale e WhatsApp mostrano solo lo stato del worker esistente: nessuna nuova sessione. Nessun messaggio, evento o nuova autorizzazione.</p><button id="health-check" type="button" aria-controls="health-results">Verifica tutti i connettori</button><p id="health-status" role="status" aria-live="polite">Non ancora verificato. Nessun controllo esterno automatico.</p><div id="health-results" class="integration-grid"></div></section>
-</section>
-<section class="page" id="page-agent" hidden>
-<section class="panel" id="agent" aria-labelledby="agent-title"><div class="panel-heading"><div><p class="eyebrow">UN SOLO AGENTE · STRUMENTI TIPIZZATI · SOTTO CONTROLLO</p><h2 id="agent-title">Agente</h2></div><button id="agent-refresh" type="button">Aggiorna</button></div><p>L’agente interpreta le tue richieste e usa strumenti: query in sola lettura sul database, file nella cartella <code>workspace</code> (visibile in «Archivio e file»), posta live, ricerca web. Le scritture sono azioni tipizzate con ricevuta; calendario ed email in uscita richiedono il tuo gesto esplicito su Telegram.</p><p>Modello: <strong id="agent-model">—</strong></p><p>Protezione database: <strong id="agent-role">—</strong></p><p>Invio email a terzi: <strong id="agent-send">—</strong></p><p id="agent-status" role="status" aria-live="polite">Caricamento…</p><h3>Esecuzioni recenti</h3><div id="agent-runs"></div><section id="agent-detail" hidden><h3 id="agent-detail-title">Esecuzione</h3><div id="agent-calls"></div></section><h3>Bozze di email</h3><p>Una bozza non è un invio: decidi su Telegram con /invia o /scarta.</p><div id="agent-emails"></div></section>
-</section>
-<section class="page" id="page-ai-permissions" hidden>
-<section class="panel" id="ai-permissions" aria-labelledby="permissions-title"><p class="eyebrow">CONSENSO ESPLICITO · DEFAULT NEGATO</p><h2 id="permissions-title">Permessi AI</h2><p>Autorizza separatamente ogni sorgente ed effetto. Nessuna scelta preabilitata. Telegram comprende bot e account personale: il servizio attuale non distingue account o singola chat. Il consenso non autorizza comandi né invii ai contatti.</p><p class="notice">I consensi sono salvati nel DB e rivalutati a ogni query dell’agente (le viste che legge li incorporano): revocare nasconde subito i dati. Non ritira dati già trasmessi né ferma una richiesta già in volo.</p><button id="policy-refresh" type="button">Ricarica consensi</button><p id="policy-status" role="status" aria-live="polite"></p><div id="data-policies"></div><h3>Budget AI dei Worker · giorno UTC</h3><p>Limiti reali di chiamate, token e concorrenza per tutte le chiamate dell’agente (passano dal gateway con ledger). Ogni retry conta; prenotazioni conservative non rimborsate. Costo non comunicato non significa gratuito. La ricerca web non ha budget.</p><p class="notice">Barre di saturazione: verde sotto il 60%, gialla tra il 60% e l’80%, arancione tra l’80% e il 100%, rossa al 100% o oltre. La barra rossa con etichetta SATURATO indica il budget esaurito. Ogni barra ha il pulsante “Modifica questo limite” che apre il campo corrispondente.</p><button id="budget-settings" type="button">Modifica i limiti AI</button><div id="ai-budget" role="status"></div><h3>Recupero media bloccati dal consenso</h3><p>Se un audio o un’immagine è rimasto in attesa perché mancava il consenso, dopo averlo concesso puoi riaccodarlo indicando il messaggio. Richiede entrambi i consensi (testo e media); nessun recupero automatico.</p><form id="media-retry" class="search-form"><label>ID del messaggio<input id="media-retry-id" type="number" min="1" step="1" required></label><label>Canale<select id="media-retry-channel"><option value="telegram">Telegram bot</option><option value="telegram (account)">Telegram personale</option><option value="whatsapp">WhatsApp</option></select></label><button type="submit">Riprova media</button></form><p id="media-retry-status" role="status" aria-live="polite"></p></section>
-</section>
-<section class="page" id="page-integration-settings" hidden>
-<section class="panel" id="integration-settings"><p class="eyebrow">CONNESSIONI E PREFERENZE</p><h2>Impostazioni e integrazioni</h2><p id="config-info">Scegli un servizio. Le credenziali salvate non vengono mai mostrate.</p><button id="config-load" type="button">Apri impostazioni</button><form id="config-form" autocomplete="off" hidden><div class="settings-toolbar"><label>Cerca un servizio<input id="config-search" type="search" placeholder="Telegram, email, calendario…"></label><label class="check-label"><input id="config-show-empty" type="checkbox"> Mostra account non configurati</label></div><div id="config-groups" class="integration-grid"></div><div id="config-fields"></div><section id="config-review" class="notice" hidden><h3>2 · Controlla prima di salvare</h3><ul id="config-changes"></ul><p>Confermando vengono verificate le nuove credenziali presso il fornitore e, solo se tutte le verifiche riescono, salvate. Il container si riavvia automaticamente per applicarle: la dashboard sarà temporaneamente non disponibile. Fuori da Docker occorre riavviare manualmente. Nessun messaggio di verifica inviato o pairing.</p><button id="config-confirm" type="button">Verifica e salva</button><button id="config-back" type="button">Torna alle modifiche</button></section><div class="settings-actions"><button id="config-save" type="submit" hidden>Continua · riepilogo modifiche</button><button id="config-cancel" type="button">Annulla modifiche</button></div></form><p id="config-status" role="status" aria-live="polite"></p></section>
-</section>
-<section class="page" id="page-archive" hidden>
-<section class="panel" id="archive"><h2>Archivi opzionali</h2><p id="invoice-inactive" hidden>Fatture e ZIP non attivi. I documenti storici restano consultabili senza riattivare i flussi.</p><details id="invoice-history"><summary>Consulta storico fatture e ZIP</summary><details id="invoice-records"><summary>Fatture archiviate</summary><div id="invoices"></div></details><details id="zip-records"><summary>ZIP mensili storici</summary><div id="zips"></div></details></details></section>
-<section class="panel"><h2>File</h2><p>Solo contenuti autorizzati. Upload in Dati / uploads, massimo 20 MiB, senza sovrascrittura. I file referenziati non sono eliminabili.</p><div class="file-controls"><label>Radice<select id="file-root"><option value="data">Dati</option><option value="invoices">Fatture</option></select></label><button id="file-up" type="button">Cartella superiore</button><button id="file-refresh" type="button">Aggiorna</button></div><p id="file-path"></p><div id="file-list"></div><label>Carica file<input id="file-upload" type="file"></label><button id="file-send" type="button">Carica in uploads</button><p id="file-status" role="status"></p></section>
-</section>
-</section><footer>Pi Secretary / Local workspace · aggiornamento automatico ogni 10 secondi</footer></main></body></html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Pi Secretary · Control room</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/charts.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<div class="app" id="app" data-auth="out">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l8.2 4.7v9L12 21.2l-8.2-4.7v-9z"/><path d="M12 8.2l3.6 2.1v3.4L12 15.8l-3.6-2.1v-3.4z"/></svg>
+      <div><b>Pi Secretary</b><span>Control room</span></div>
+    </div>
+    <nav aria-label="Navigazione principale">
+      <button class="nav-link" data-page="overview" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></svg>
+        <span>Panoramica</span></button>
+      <button class="nav-link" data-page="agent" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="8" width="16" height="11" rx="3"/><path d="M12 8V4.8"/><circle cx="12" cy="3.6" r="1.1"/><circle cx="9" cy="13" r="1"/><circle cx="15" cy="13" r="1"/><path d="M9.5 16h5"/></svg>
+        <span>Agente</span></button>
+      <button class="nav-link" data-page="ai-permissions" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7.5 3v5.5c0 4.4-3.1 8-7.5 9.5-4.4-1.5-7.5-5.1-7.5-9.5V6z"/><path d="M8.8 12l2.2 2.2 4.2-4.4"/></svg>
+        <span>Permessi AI</span></button>
+      <button class="nav-link" data-page="budget" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 17.5a8.5 8.5 0 1 1 15 0"/><path d="M12 14.5l3.5-4.5"/><circle cx="12" cy="14.8" r="1.2"/></svg>
+        <span>Budget AI</span></button>
+      <button class="nav-link" data-page="integration-settings" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg>
+        <span>Impostazioni</span></button>
+      <button class="nav-link" data-page="archive" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7a2 2 0 0 1 2-2H10l2 2.2h6.5a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>
+        <span>Archivio</span></button>
+    </nav>
+    <p class="sidebar-note">Rete locale · accesso riservato.<br>Le email partono solo con il tuo /invia.</p>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="topbar-title">
+        <h1 id="page-title">Control room</h1>
+        <p id="page-subtitle">Accesso protetto alla dashboard locale</p>
+      </div>
+      <div class="topbar-actions">
+        <p id="status" class="pill" role="status">Accesso protetto alla dashboard locale</p>
+        <button id="refresh-now" class="icon-btn" type="button" title="Aggiorna ora" aria-label="Aggiorna ora" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.5-4M4 4v4h4M4 13a8 8 0 0 0 14.5 4M20 20v-4h-4"/></svg></button>
+        <button id="theme-toggle" class="icon-btn" type="button" title="Tema chiaro/scuro" aria-label="Cambia tema chiaro o scuro">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.8v2M12 19.2v2M2.8 12h2M19.2 12h2M5.5 5.5l1.4 1.4M17.1 17.1l1.4 1.4M5.5 18.5l1.4-1.4M17.1 6.9l1.4-1.4"/></svg></button>
+        <button id="logout" class="btn btn-ghost" type="button" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H5.5A1.5 1.5 0 0 0 4 5.5v13A1.5 1.5 0 0 0 5.5 20H9M16 8l4 4-4 4M20 12H9"/></svg>
+          <span>Esci</span></button>
+      </div>
+    </header>
+
+    <main id="content">
+      <form id="login" class="login-card">
+        <svg class="brand-mark brand-mark-lg" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l8.2 4.7v9L12 21.2l-8.2-4.7v-9z"/><path d="M12 8.2l3.6 2.1v3.4L12 15.8l-3.6-2.1v-3.4z"/></svg>
+        <h2>Bentornato</h2>
+        <p>Inserisci le credenziali locali del dispositivo.</p>
+        <label class="field"><span>Utente</span><input name="username" autocomplete="username" required></label>
+        <label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>
+        <button class="btn btn-primary btn-block">Accedi in sicurezza</button>
+        <p id="error" role="alert"></p>
+      </form>
+
+      <section id="dashboard" hidden>
+
+        <!-- ======================= PANORAMICA ======================= -->
+        <section class="page" id="page-overview" aria-labelledby="page-title">
+          <div id="kpis" class="kpis"></div>
+
+          <div class="grid grid-main">
+            <section class="card" aria-labelledby="messages-title">
+              <div class="card-head">
+                <div><h2 id="messages-title">Messaggi · ultimi 14 giorni</h2><p>Per canale, data originale, fuso configurato</p></div>
+                <div id="messages-direction" class="seg" role="radiogroup" aria-label="Direzione dei messaggi"></div>
+              </div>
+              <div id="messages-chart" class="chart-box" aria-busy="true"></div>
+              <p id="messages-readout" class="readout" aria-live="polite"></p>
+              <div id="messages-legend" class="legend"></div>
+            </section>
+
+            <section class="card" aria-labelledby="overview-budget-title">
+              <div class="card-head">
+                <div><h2 id="overview-budget-title">Budget AI oggi</h2><p>Giorno UTC · tutti i lavori dell’agente</p></div>
+                <button id="overview-budget-open" class="btn btn-ghost btn-sm" type="button">Dettagli</button>
+              </div>
+              <div id="overview-budget" class="stack"></div>
+              <div id="overview-agent" class="mini-note"></div>
+            </section>
+          </div>
+
+          <div class="grid grid-three">
+            <section class="card" aria-labelledby="flows-title">
+              <div class="card-head"><div><h2 id="flows-title">Flussi operativi</h2><p>Si applicano ai prossimi lavori; riattivare non invia nulla.</p></div></div>
+              <div id="flows" class="flow-list"></div>
+              <p class="note">Il bot mantiene comandi e dialogo del proprietario anche con l’acquisizione disattivata. Telegram personale archivia senza AI. Riattivando, il recupero resta limitato a ieri/oggi.</p>
+            </section>
+
+            <section class="card" aria-labelledby="jobs-title">
+              <div class="card-head"><div><h2 id="jobs-title">Lavori in coda</h2><p>Code durevoli dell’applicazione</p></div></div>
+              <div id="jobs-chart" class="donut-row"></div>
+              <div id="jobs-list" class="rows"></div>
+            </section>
+
+            <section class="card" aria-labelledby="traffic-title">
+              <div class="card-head"><div><h2 id="traffic-title">Traffico di oggi</h2><p>Per sorgente · confronto con ieri</p></div></div>
+              <div id="traffic" class="rows"></div>
+              <div id="calendar-pending" class="rows" hidden></div>
+            </section>
+          </div>
+
+          <div class="grid grid-main">
+            <section class="card" aria-labelledby="activity-title">
+              <div class="card-head"><div><h2 id="activity-title">Attività recente</h2><p>Solo metadati: nessun testo o contatto esposto</p></div></div>
+              <div id="activity" class="feed"></div>
+              <button id="activity-more" class="btn btn-ghost btn-sm" type="button" hidden>Mostra altre</button>
+            </section>
+
+            <section class="card" aria-labelledby="health-title">
+              <div class="card-head">
+                <div><h2 id="health-title">Salute della piattaforma</h2><p>Diagnostica manuale · sola lettura</p></div>
+                <button id="health-check" class="btn btn-primary btn-sm" type="button" aria-controls="health-results">Verifica connettori</button>
+              </div>
+              <p class="note">Controlla DB, account email, bot, calendario e credenziale AI. Telegram personale e WhatsApp mostrano solo lo stato del worker esistente: nessuna nuova sessione, messaggio o autorizzazione.</p>
+              <p id="health-status" role="status" aria-live="polite" class="muted">Non ancora verificato. Nessun controllo esterno automatico.</p>
+              <div id="health-results" class="health-grid"></div>
+            </section>
+          </div>
+        </section>
+
+        <!-- ======================= AGENTE ======================= -->
+        <section class="page" id="page-agent" hidden aria-labelledby="page-title">
+          <div class="stats">
+            <div class="stat"><span class="stat-label">Modello</span><strong id="agent-model">—</strong></div>
+            <div class="stat"><span class="stat-label">Protezione database</span><strong id="agent-role">—</strong></div>
+            <div class="stat"><span class="stat-label">Invio email a terzi</span><strong id="agent-send">—</strong></div>
+          </div>
+          <p class="intro">L’agente interpreta le tue richieste e usa strumenti: query in sola lettura sul database, file nella cartella <code>workspace</code> (visibile in «Archivio e file»), posta live, ricerca web. Le scritture sono azioni tipizzate con ricevuta; calendario ed email in uscita richiedono il tuo gesto esplicito su Telegram.</p>
+
+          <section class="card" id="agent" aria-labelledby="agent-title">
+            <div class="card-head">
+              <div><h2 id="agent-title">Attività dell’agente</h2><p id="agent-status" role="status" aria-live="polite">Caricamento…</p></div>
+              <button id="agent-refresh" class="btn btn-ghost btn-sm" type="button">Aggiorna</button>
+            </div>
+            <div id="agent-runs-chart" class="chart-box chart-short"></div>
+            <div class="tabs" role="tablist" aria-label="Sezioni dell’agente">
+              <button id="agent-tab-runs" class="tab" role="tab" type="button" aria-selected="true" aria-controls="agent-panel-runs">Esecuzioni</button>
+              <button id="agent-tab-drafts" class="tab" role="tab" type="button" aria-selected="false" aria-controls="agent-panel-drafts">Bozze di email <span id="agent-draft-count" class="count"></span></button>
+            </div>
+            <div id="agent-panel-runs" role="tabpanel" aria-labelledby="agent-tab-runs">
+              <div id="agent-run-filters" class="chips" role="group" aria-label="Filtra le esecuzioni"></div>
+              <div id="agent-runs" class="table-wrap"></div>
+              <button id="agent-runs-more" class="btn btn-ghost btn-sm" type="button" hidden>Mostra altre</button>
+            </div>
+            <div id="agent-panel-drafts" role="tabpanel" aria-labelledby="agent-tab-drafts" hidden>
+              <p class="note">Una bozza non è un invio: decidi su Telegram con /invia o /scarta.</p>
+              <div id="agent-emails" class="cards"></div>
+            </div>
+          </section>
+
+          <aside id="agent-detail" class="drawer" hidden aria-labelledby="agent-detail-title">
+            <div class="drawer-head">
+              <h3 id="agent-detail-title">Esecuzione</h3>
+              <button id="agent-detail-close" class="icon-btn" type="button" aria-label="Chiudi dettaglio">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+            </div>
+            <p class="muted">Strumenti usati in ordine di chiamata. Solo nome, esito e riepilogo troncato: nessun prompt né risposta del modello.</p>
+            <div id="agent-calls" class="timeline"></div>
+          </aside>
+        </section>
+
+        <!-- ======================= PERMESSI AI ======================= -->
+        <section class="page" id="page-ai-permissions" hidden aria-labelledby="page-title">
+          <section class="card" id="ai-permissions" aria-labelledby="permissions-title">
+            <div class="card-head">
+              <div><h2 id="permissions-title">Consensi · default negato</h2><p>Autorizza separatamente ogni sorgente ed effetto. Nessuna scelta è preabilitata.</p></div>
+              <button id="policy-refresh" class="btn btn-ghost btn-sm" type="button">Ricarica consensi</button>
+            </div>
+            <div id="data-policies" class="matrix"></div>
+            <p id="policy-status" role="status" aria-live="polite" class="muted"></p>
+            <p class="note">Telegram comprende bot e account personale: il servizio attuale non distingue account o singola chat. Il consenso non autorizza comandi né invii ai contatti. I consensi sono salvati nel DB e rivalutati a ogni query dell’agente: revocare nasconde subito i dati. Non ritira dati già trasmessi né ferma una richiesta già in volo.</p>
+          </section>
+
+          <section class="card" aria-labelledby="media-title">
+            <div class="card-head"><div><h2 id="media-title">Recupero media bloccati dal consenso</h2><p>Dopo aver concesso testo e media, riaccoda un singolo messaggio. Nessun recupero automatico.</p></div></div>
+            <form id="media-retry" class="inline-form">
+              <label class="field"><span>ID del messaggio</span><input id="media-retry-id" type="number" min="1" step="1" required></label>
+              <div class="field"><span id="media-retry-channel-label">Canale</span><div id="media-retry-channel" class="seg" role="radiogroup" aria-labelledby="media-retry-channel-label"></div></div>
+              <button class="btn btn-primary">Riprova media</button>
+            </form>
+            <p id="media-retry-status" role="status" aria-live="polite" class="muted"></p>
+          </section>
+        </section>
+
+        <!-- ======================= BUDGET AI ======================= -->
+        <section class="page" id="page-budget" hidden aria-labelledby="page-title">
+          <section class="card" aria-labelledby="budget-title">
+            <div class="card-head">
+              <div><h2 id="budget-title">Budget AI dei Worker · giorno UTC</h2>
+                <p>Limiti reali di chiamate, token e concorrenza: ogni richiesta dell’agente passa dal gateway con ledger. Ogni retry conta; le prenotazioni conservative non sono rimborsate. Costo non comunicato non significa gratuito. La ricerca web non ha budget.</p></div>
+              <button id="budget-settings" class="btn btn-primary btn-sm" type="button">Modifica i limiti AI</button>
+            </div>
+            <p class="legend-note">Barre di saturazione: verde sotto il 60%, gialla tra il 60% e l’80%, arancione tra l’80% e il 100%, rossa al 100% o oltre. La barra rossa con etichetta SATURATO indica il budget esaurito; ogni misura ha il pulsante “Modifica questo limite”.</p>
+            <div id="ai-budget" role="status"></div>
+          </section>
+          <section class="card" aria-labelledby="budget-trend-title">
+            <div class="card-head">
+              <div><h2 id="budget-trend-title">Consumo · ultimi 14 giorni</h2><p>Per giorno UTC; token addebitati in modo conservativo</p></div>
+              <div id="budget-metric" class="seg" role="radiogroup" aria-label="Metrica del grafico"></div>
+            </div>
+            <div id="budget-chart" class="chart-box" aria-busy="true"></div>
+            <p id="budget-readout" class="readout" aria-live="polite"></p>
+          </section>
+        </section>
+
+        <!-- ======================= IMPOSTAZIONI ======================= -->
+        <section class="page" id="page-integration-settings" hidden aria-labelledby="page-title">
+          <section class="card card-flush" id="integration-settings">
+            <div class="card-head card-pad">
+              <div><h2>Impostazioni e integrazioni</h2><p id="config-info">Scegli un servizio. Le credenziali salvate non vengono mai mostrate.</p></div>
+              <button id="config-load" class="btn btn-ghost btn-sm" type="button">Ricarica impostazioni</button>
+            </div>
+            <form id="config-form" class="settings" autocomplete="off" hidden>
+              <div class="settings-nav">
+                <label class="field field-search"><span class="sr-only">Cerca un servizio</span>
+                  <input id="config-search" type="search" placeholder="Cerca: Telegram, email, calendario…"></label>
+                <label class="check"><input id="config-show-empty" type="checkbox"><span>Mostra account non configurati</span></label>
+                <div id="config-groups" class="group-list"></div>
+              </div>
+              <div class="settings-pane">
+                <div id="config-fields"></div>
+                <section id="config-review" class="review" hidden>
+                  <h3>Controlla prima di salvare</h3>
+                  <ul id="config-changes"></ul>
+                  <p>Confermando vengono verificate le nuove credenziali presso il fornitore e, solo se tutte le verifiche riescono, salvate. Il container si riavvia automaticamente per applicarle: la dashboard sarà temporaneamente non disponibile. Fuori da Docker occorre riavviare manualmente. Nessun messaggio di verifica inviato né pairing.</p>
+                  <div class="actions">
+                    <button id="config-confirm" class="btn btn-primary" type="button">Verifica e salva</button>
+                    <button id="config-back" class="btn btn-ghost" type="button">Torna alle modifiche</button>
+                  </div>
+                </section>
+                <div class="actionbar">
+                  <p id="config-status" role="status" aria-live="polite"></p>
+                  <div class="actions">
+                    <button id="config-cancel" class="btn btn-ghost" type="button">Annulla modifiche</button>
+                    <button id="config-save" class="btn btn-primary" type="submit" hidden>Continua · riepilogo modifiche</button>
+                  </div>
+                </div>
+              </div>
+            </form>
+          </section>
+        </section>
+
+        <!-- ======================= ARCHIVIO ======================= -->
+        <section class="page" id="page-archive" hidden aria-labelledby="page-title">
+          <section class="card" id="archive" aria-labelledby="archive-title">
+            <div class="card-head"><div><h2 id="archive-title">Archivio e file</h2><p>Solo contenuti autorizzati: nessun percorso fisico esposto.</p></div></div>
+            <div class="tabs" role="tablist" aria-label="Sezioni dell’archivio">
+              <button id="archive-tab-files" class="tab" role="tab" type="button" aria-selected="true" aria-controls="archive-panel-files">File</button>
+              <button id="archive-tab-invoices" class="tab" role="tab" type="button" aria-selected="false" aria-controls="archive-panel-invoices">Fatture</button>
+              <button id="archive-tab-zips" class="tab" role="tab" type="button" aria-selected="false" aria-controls="archive-panel-zips">ZIP mensili</button>
+            </div>
+
+            <div id="archive-panel-files" role="tabpanel" aria-labelledby="archive-tab-files">
+              <div class="file-toolbar">
+                <div id="file-root" class="seg" role="radiogroup" aria-label="Radice dei file"></div>
+                <nav id="file-path" class="crumbs" aria-label="Percorso"></nav>
+                <div class="grow"></div>
+                <label class="field field-search"><span class="sr-only">Filtra per nome</span><input id="file-search" type="search" placeholder="Filtra per nome…"></label>
+                <button id="file-up" class="btn btn-ghost btn-sm" type="button">Cartella superiore</button>
+                <button id="file-refresh" class="btn btn-ghost btn-sm" type="button">Aggiorna</button>
+              </div>
+              <div id="file-list" class="table-wrap"></div>
+              <button id="file-more" class="btn btn-ghost btn-sm" type="button" hidden>Mostra altri</button>
+              <div class="upload">
+                <div><strong>Carica un file</strong><p>In Dati / uploads · massimo 20 MiB · senza sovrascrittura. I file referenziati non sono eliminabili.</p></div>
+                <label class="btn btn-ghost btn-sm file-pick"><input id="file-upload" type="file"><span id="file-picked">Scegli file…</span></label>
+                <button id="file-send" class="btn btn-primary btn-sm" type="button">Carica in uploads</button>
+              </div>
+              <p id="file-status" role="status" aria-live="polite" class="muted"></p>
+            </div>
+
+            <div id="archive-panel-invoices" role="tabpanel" aria-labelledby="archive-tab-invoices" hidden>
+              <p id="invoice-inactive" class="note" hidden>Fatture e ZIP non attivi. I documenti storici restano consultabili senza riattivare i flussi.</p>
+              <div id="invoice-chart" class="chart-box chart-short"></div>
+              <div id="invoices" class="table-wrap"></div>
+            </div>
+            <div id="archive-panel-zips" role="tabpanel" aria-labelledby="archive-tab-zips" hidden>
+              <div id="zips" class="table-wrap"></div>
+            </div>
+          </section>
+        </section>
+
+      </section>
+    </main>
+    <footer>Pi Secretary · spazio di lavoro locale · aggiornamento automatico ogni 10 secondi</footer>
+  </div>
+</div>
+
+<div id="dialog" class="overlay" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-body">
+    <h2 id="dialog-title">Conferma</h2>
+    <p id="dialog-body"></p>
+    <div class="actions">
+      <button id="dialog-cancel" class="btn btn-ghost" type="button">Annulla</button>
+      <button id="dialog-ok" class="btn btn-primary" type="button">Conferma</button>
+    </div>
+  </div>
+</div>
+<div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+</body>
+</html>
