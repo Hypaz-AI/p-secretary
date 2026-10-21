@@ -65,8 +65,8 @@ def _json_object(raw, final=False):
 def supply_service_account():
     path = gcal.service_account_file()
     print(f'Percorso JSON nel processo corrente: {path}')
-    print('Docker: il default /var/lib/pi-secretary/gcal_service_account.json corrisponde a')
-    print('PI_SECRETARY_HOME/data/gcal_service_account.json sull’host.')
+    print('Docker: il default /var/lib/p-secretary/gcal_service_account.json corrisponde a')
+    print('P_SECRETARY_HOME/data/gcal_service_account.json sull’host.')
     print('Incolla il contenuto JSON, non il percorso del file sul PC.')
     existing = gcal._load_service_account()
     if existing and not confirm('Una chiave valida è già presente. Sostituirla?'):
@@ -95,7 +95,7 @@ def verify_write():
     if not confirm('Creare e cancellare un evento di prova?'):
         return None
     probe = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d %H:%M')
-    res = gcal.create_event(title='Test pi-secretary', start=probe, source='setup di prova')
+    res = gcal.create_event(title='Test p-secretary', start=probe, source='setup di prova')
     if not res.get('ok') or not res.get('event_id'):
         print('❌ Scrittura fallita; calendario non abilitato.')
         return False

@@ -12,13 +12,14 @@ La configurazione confermata non implica che tutti i setup opzionali siano ready
 # Docker: configurazione e risoluzione dei problemi
 
 Per il primo avvio parti dal [README principale](../README.md).
-Esegui il launcher `sh ./pi-secretary` dalla directory del repository.
+Esegui il launcher `sh ./p-secretary` dalla directory del repository.
 Gli script di autenticazione sono eseguiti dal wizard nel container:
 non serve un virtualenv host né installare Node/Chromium sull'host.
 
 ## Prerequisiti, percorsi e permessi
 
-Linux, Git, Python 3 host, Docker e plugin Compose recente con `up --wait`.
+Shell POSIX (`sh`), Git, Python 3 host, Docker e plugin Compose recente con `up --wait`.
+L'immagine è multi-piattaforma: si costruisce per l'architettura dell'host (amd64 o arm64).
 Verifica `python3 --version`, `docker compose version` e `docker info`.
 L'accesso al daemon deve essere già predisposto per il tuo utente: il launcher
 non usa sudo, non modifica gruppi e non cambia proprietari. L'accesso al daemon
@@ -28,30 +29,30 @@ App e tmpfs usano UID/GID correnti. Le directory host devono appartenere a
 quell'utente ed essere scrivibili; il launcher imposta 700 sulle directory
 principali. Non alternare root e utente normale. Non usare `chmod 777`.
 
-`PI_SECRETARY_HOME` seleziona la directory persistente, default
-`~/.local/share/pi-secretary`. Se la cambi, esportala nella sessione e usala
+`P_SECRETARY_HOME` seleziona la directory persistente, default
+`~/.local/share/p-secretary`. Se la cambi, esportala nella sessione e usala
 coerentemente per tutti i comandi:
 
 ```sh
-export PI_SECRETARY_HOME="$HOME/.local/share/pi-secretary"
-sh ./pi-secretary setup
+export P_SECRETARY_HOME="$HOME/.local/share/p-secretary"
+sh ./p-secretary setup
 ```
 
-| Host, sotto `PI_SECRETARY_HOME` | Container |
+| Host, sotto `P_SECRETARY_HOME` | Container |
 |---|---|
 | `config/` | `/config` |
 | `config/secretary.env` | `/config/secretary.env` |
 | `config/dashboard.json` | `/config/dashboard.json` |
-| `data/` | `/var/lib/pi-secretary` |
-| `data/invoices/` | `/var/lib/pi-secretary/invoices` |
-| `data/telegram_account/personal.session` | `/var/lib/pi-secretary/telegram_account/personal.session` |
+| `data/` | `/var/lib/p-secretary` |
+| `data/invoices/` | `/var/lib/p-secretary/invoices` |
+| `data/telegram_account/personal.session` | `/var/lib/p-secretary/telegram_account/personal.session` |
 | `data/home/` | HOME del container |
 
 La cache bridge è rigenerata in `/tmp/cache`. Compose impone percorsi dati,
 fatture, sessione personale Telegram, credenziali dashboard e bind/porta
 interni: prevalgono su `secretary.env`.
 
-**Una sola istanza:** progetto `pi-secretary`, volume DB `pi-secretary_postgres`.
+**Una sola istanza:** progetto `p-secretary`, volume DB `p-secretary_postgres`.
 Cambiare home non isola DB o container. Le invocazioni dirette di Compose
 usano 1000:1000 se UID/GID non sono esportati: preferisci il launcher.
 
@@ -97,7 +98,7 @@ Il file è montato, ma viene letto solo all'avvio del processo. `up` forza
 la ricreazione dell'app e verifica prima il DB. Dopo modifiche usa:
 
 ```sh
-sh ./pi-secretary up
+sh ./p-secretary up
 ```
 
 Non cambiare
@@ -172,7 +173,7 @@ L'agente (dialogo e riepilogo) può leggere il testo persistente, solo con il co
 Accetta setup `whatsapp`, scansiona QR da WhatsApp → Dispositivi collegati.
 Node/Chromium sono nell'immagine; sessione in `data/wa_session/`, riusata se
 valida. Verifica che sia stato salvato `WHATSAPP_ENABLED=true` prima dell'avvio.
-I messaggi in uscita non attivano dialogo AI. Compatibilità ARM non garantita
+I messaggi in uscita non attivano dialogo AI. Compatibilità per architettura non garantita
 senza test reali; non seguire suggerimenti snap host come rimedio al container.
 
 ### Google Calendar
@@ -182,10 +183,10 @@ senza test reali; non seguire suggerimenti snap host come rimedio al container.
 amministrazione, poi chiave JSON. Importala privatamente via filesystem host,
 **non dalla pagina File**:
 
-1. Copia in `PI_SECRETARY_HOME/data/gcal_service_account.json`, sostituendo
-	 `PI_SECRETARY_HOME` col percorso reale. È il default nel container:
-	 `/var/lib/pi-secretary/gcal_service_account.json`.
-2. In alternativa copia in `PI_SECRETARY_HOME/config/gcal_service_account.json`
+1. Copia in `P_SECRETARY_HOME/data/gcal_service_account.json`, sostituendo
+	 `P_SECRETARY_HOME` col percorso reale. È il default nel container:
+	 `/var/lib/p-secretary/gcal_service_account.json`.
+2. In alternativa copia in `P_SECRETARY_HOME/config/gcal_service_account.json`
 	 e imposta `GCAL_SERVICE_ACCOUNT_FILE=/config/gcal_service_account.json`
 	 in `secretary.env`. **La cartella config è montata ed è utilizzabile**.
 	 Non impostare il percorso host come percorso nel container.
@@ -215,7 +216,7 @@ collegare Calendar non significa abilitare creazione automatica.
 
 ## Comandi e dashboard
 
-| Suffisso di `sh ./pi-secretary` | Effetto |
+| Suffisso di `sh ./p-secretary` | Effetto |
 |---|---|
 | `setup` | Build/wizard, consensi separati per verifica e avvio |
 | `configure` | Conferma arresto app, build/wizard per campi mancanti e login |
@@ -227,7 +228,7 @@ collegare Calendar non significa abilitare creazione automatica.
 
 Un lock host serializza i comandi. Non ci sono comandi launcher `restart`,
 `backup` o `update`. Build manuale facoltativa: per `docker compose build app`
-esporta prima `PI_SECRETARY_HOME`, `PI_SECRETARY_UID`, `PI_SECRETARY_GID` corretti;
+esporta prima `P_SECRETARY_HOME`, `P_SECRETARY_UID`, `P_SECRETARY_GID` corretti;
 `config/postgres.env` deve già esistere. Setup fa già la build. Nessuna promessa
 di immagine prebuilt o build riproducibile: base non fissata a digest, Python
 non bloccato a versioni esatte.
@@ -281,7 +282,7 @@ Policy dettagliate in [OPERATIONS.md](OPERATIONS.md).
 - Configurazione incompleta: completa/conferma wizard, non aggirare entrypoint
 	modificando `progress.json`.
 - Login fallito: ripeti `configure`, accetta solo il setup interessato.
-- Chromium/WhatsApp: controlla errori bridge; non scaricare x86 su ARM.
+- Chromium/WhatsApp: controlla errori bridge; non mescolare architetture (binari x86 su host arm64 o viceversa).
 
 Non condividere `docker compose config`: può espandere credenziali.
 Log e output dei login possono contenere dati personali o segreti.
@@ -290,7 +291,7 @@ Log e output dei login possono contenere dati personali o segreti.
 
 **Non serve a una nuova installazione.** Solo durante una migrazione pianificata,
 fai fermare/disabilitare il vecchio servizio dall'amministratore, per esempio
-`sudo systemctl disable --now pi-secretary.service`. Non eseguire systemd e
+`sudo systemctl disable --now p-secretary.service`. Non eseguire systemd e
 Docker sugli stessi account: il launcher non ferma systemd, lock su directory
 diverse non bastano.
 
@@ -328,8 +329,8 @@ Informazioni operative in [OPERATIONS.md](OPERATIONS.md):
 - L'agente interroga il DB con il ruolo di sola lettura `agent_ro`. Con il **database locale**
 	del compose lo crea l'app da sola al primo avvio; con un **database esterno** senza
 	`CREATEROLE` il DBA esegue una volta la PARTE 1 di `deploy/sql/agent_ro.sql` (vedi
-	OPERATIONS.md). Il runtime dell'agente è già nell'immagine; su Raspberry costruiscila
-	sul Raspberry (arm64).
+	OPERATIONS.md). Il runtime dell'agente è già nell'immagine; ricostruiscila sull'host di destinazione
+	(arm64 su Raspberry Pi 4, amd64 su x86-64).
 - PDF/XML con limiti difensivi, niente OCR, verifica P7M, estrazione ZIP o
 	validazione fiscale. ZIP mesi chiusi dal mese successivo; fatture tardive
 	non causano reinvio automatico di ZIP già consegnati.

@@ -1,6 +1,6 @@
 """Explicit consent recovery: offline HTTP/UI and opt-in isolated PostgreSQL.
 
-Only PI_SECRETARY_TEST_DATABASE_URL, naming an explicit *_test database, is
+Only P_SECRETARY_TEST_DATABASE_URL, naming an explicit *_test database, is
 used. Each SQL case creates/drops its own schema; no cluster is started/stopped.
 Providers, Python network access and background worker startup are forbidden.
 """
@@ -107,9 +107,9 @@ class MediaConsentHTTPTests(unittest.TestCase):
 class MediaConsentPostgresTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.url = os.environ.get('PI_SECRETARY_TEST_DATABASE_URL')
+        cls.url = os.environ.get('P_SECRETARY_TEST_DATABASE_URL')
         if not cls.url or db.psycopg is None:
-            raise unittest.SkipTest('Explicit isolated PI_SECRETARY_TEST_DATABASE_URL required')
+            raise unittest.SkipTest('Explicit isolated P_SECRETARY_TEST_DATABASE_URL required')
         from psycopg.conninfo import conninfo_to_dict
         params = conninfo_to_dict(cls.url)
         if not params.get('dbname', '').endswith('_test') or params.get('service'):

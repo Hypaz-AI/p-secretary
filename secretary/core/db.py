@@ -136,6 +136,8 @@ def init(approved_reset: bool = False) -> int:
             ai_budget.migrate(conn)
             from secretary.agent import schema as agent_schema
             agent_schema.migrate(conn, config.AGENT_DB_SCHEMA)
+            from secretary.workflows import retention
+            retention.migrate(conn)
             # Ruolo di sola lettura dell'agente: creato qui se l'utente applicativo può
             # (DB locale del compose), altrimenti lo segnala main() e lo crea il DBA.
             agent_schema.ensure_readonly_role(conn, config.AGENT_DB_SCHEMA, config.AGENT_DB_ROLE)

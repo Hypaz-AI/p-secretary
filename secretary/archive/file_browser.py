@@ -62,7 +62,7 @@ def directory(root, path=''):
 
 
 def protected(info):
-    legacy = Path.home() / '.config' / 'pi-secretary' / 'dashboard.json'
+    legacy = Path.home() / '.config' / 'p-secretary' / 'dashboard.json'
     for path in (legacy, Path(config.get('DASHBOARD_CREDENTIAL_FILE', str(legacy)))):
         try:
             other = path.stat()

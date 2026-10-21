@@ -490,7 +490,7 @@ async function configLifecycle() {
 // ----------------------------------------------------------------- panoramica
 function dashboardFixture(flowEnabled) {
   const today = '2026-10-21';
-  return {agent_name: 'Pi Secretary', timezone: 'Europe/Rome', today,
+  return {agent_name: 'p-secretary', timezone: 'Europe/Rome', today,
     counts: [[today, 'email', 'in', 3, 2, 1], ['2026-10-20', 'email', 'in', 1, 1, 0], [today, 'telegram', 'out', 2, 0, 0]],
     recent: [['email', 'in', '2026-10-21T08:00:00+00:00', 'analyzed'], ['telegram', 'out', null, 'archived']],
     jobs: [{kind: 'analysis', status: 'failed', count: 2, oldest_age_seconds: 30, last_success: null, failure_reason: 'Timeout provider'},

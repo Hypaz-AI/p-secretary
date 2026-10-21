@@ -34,19 +34,19 @@ def tg_call(token: str, method: str, params: dict = None) -> dict:
 
 def warn_if_service_running() -> None:
     """Il bot può leggere i messaggi da un solo processo alla volta."""
-    if os.environ.get('PI_SECRETARY_CONTAINER'):
+    if os.environ.get('P_SECRETARY_CONTAINER'):
         print('Fermare app con il launcher prima del setup concorrente.')
         return
     try:
         r = subprocess.run(
-            ["systemctl", "is-active", "pi-secretary"],
+            ["systemctl", "is-active", "p-secretary"],
             capture_output=True, text=True, timeout=5,
         )
         if r.stdout.strip() == "active":
-            print("⚠️  Il servizio pi-secretary è ATTIVO.")
+            print("⚠️  Il servizio p-secretary è ATTIVO.")
             print("    Fermalo prima di continuare, altrimenti i due processi")
             print("    si contendono i messaggi del bot:")
-            print("    sudo systemctl stop pi-secretary\n")
+            print("    sudo systemctl stop p-secretary\n")
             input("Premi INVIO se l'hai fermato (o per continuare comunque) ")
     except Exception:  # noqa: BLE001
         pass  # systemctl non disponibile o servizio inesistente: si prosegue

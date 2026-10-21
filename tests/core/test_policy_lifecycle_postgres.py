@@ -1,6 +1,6 @@
 """Policy, ricevute e ciclo di vita delle attività su PostgreSQL di test (mai config.DATABASE_URL).
 
-Opt-in: PI_SECRETARY_TEST_DATABASE_URL con un database il cui nome finisce in _test.
+Opt-in: P_SECRETARY_TEST_DATABASE_URL con un database il cui nome finisce in _test.
 Nessuna applicazione, worker, AI o servizio esterno viene avviato.
 """
 from contextlib import nullcontext
@@ -21,9 +21,9 @@ from secretary.agent import owner as agent_owner
 class _PostgresFixture(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        url = os.environ.get('PI_SECRETARY_TEST_DATABASE_URL')
+        url = os.environ.get('P_SECRETARY_TEST_DATABASE_URL')
         if not url:
-            raise unittest.SkipTest('Set PI_SECRETARY_TEST_DATABASE_URL to opt in')
+            raise unittest.SkipTest('Set P_SECRETARY_TEST_DATABASE_URL to opt in')
         if db.psycopg is None:
             raise unittest.SkipTest('psycopg is not installed')
         from psycopg.conninfo import conninfo_to_dict

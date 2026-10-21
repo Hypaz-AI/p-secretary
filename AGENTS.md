@@ -7,7 +7,7 @@ sorgenti e i documenti: `README.md`, `docs/AGENT_FLOWS.md` (flussi con diagrammi
 file quando l'architettura cambia.
 
 ## Cos'è p-secretary
-Segretario personale per un solo owner (Raspberry Pi 4, aarch64, Docker). Canali:
+Segretario personale per un solo owner, containerizzato (Docker, multi-piattaforma: amd64 e arm64, es. Raspberry Pi 4). Canali:
 Email (IMAP/SMTP), Telegram (bot + account Telethon solo-archivio), WhatsApp
 (bridge Node/whatsapp-web.js), Google Calendar. Dashboard Flask+waitress su LAN :8080.
 
@@ -85,7 +85,7 @@ secretary/            pacchetto Python (si avvia con `python -m secretary`)
 tests/                una cartella per pacchetto (+ support.py); `python -m unittest discover`
 docs/                 AGENT_FLOWS, CONFIGURATION, OPERATIONS, DOCKER, AGENTIC_CORE_PLAN, notes/
 deploy/               docker/entrypoint.py, whatsapp/package*.json, sql/, systemd/
-Dockerfile, compose*.yaml, pi-secretary (launcher), requirements.txt, .env.example
+Dockerfile, compose*.yaml, p-secretary (launcher), requirements.txt, .env.example
 ```
 
 ### Resto dell'applicazione
@@ -104,6 +104,7 @@ Dockerfile, compose*.yaml, pi-secretary (launcher), requirements.txt, .env.examp
 - `workflows/pipeline.py` — `ingest` (un solo job `analysis` per messaggio), `load_message`,
   `action` (notify, calendar, invoice, email), promemoria, `schedule` (prune
   retention giornaliero, audit agente incluso).
+- `workflows/retention.py` — potatura giornaliera (`run_scheduled` dal loop): messaggi scaduti per `acquired_at` con file e derivati, payload dei job conclusi (chiavi conservate), outbox terminale, ledger AI completato. Protezioni in `_protected`; identità e ricevute mai potate.
 - `workflows/digest.py` — `run(payload)` per `digest:AAAA-MM-GG`: testimoni dei consensi,
   sezione deterministica delle scadenze personali, sigillo delle fonti, notifica
   durevole. Senza fonti **non chiama il modello**.
@@ -147,23 +148,29 @@ Dockerfile, compose*.yaml, pi-secretary (launcher), requirements.txt, .env.examp
    ("/cartella: not found"). Lo verifica `tests/dashboard/test_dashboard_api.py::
    test_packaging_and_ci_contracts` (con un modello di `.dockerignore` in `tests/support.py`).
 
+10. **Retention**: l'unica cancellazione automatica. Mai toccare identità di deduplica (`message_dedup`,
+   `email_seen`, **chiavi** di `work_jobs`: cancellare una riga fa ri-accodare lavoro già eseguito), ricevute,
+   dati dell'owner, job falliti. Un messaggio resta se è ancora usato (vedi `_protected`). I file si rimuovono
+   solo dopo il commit, per chiave relativa e oltre la grazia di 30 giorni; `persist()` aggiorna la data di
+   modifica al riuso: non rimuoverlo.
+
 ## Convenzioni dei test (~55 file)
 Offline-first: rete e DB vietati via patch. SQL opt-in con
-`PI_SECRETARY_TEST_DATABASE_URL` (dbname che finisce in `_test`; alcuni moduli
+`P_SECRETARY_TEST_DATABASE_URL` (dbname che finisce in `_test`; alcuni moduli
 richiedono un **socket Unix**, es. `host=/tmp/pg-test-sock`, senza service/hostaddr).
 `support.py` fornisce `completion`, `job_context`, `postgres_fixture()` (schema unico per
 test: patch di `config.AGENT_DB_SCHEMA` e drop finale). Il runtime Copilot reale si
-abilita con `PI_SECRETARY_TEST_AGENT_RUNTIME=/percorso/copilot-runtime`; i test di
+abilita con `P_SECRETARY_TEST_AGENT_RUNTIME=/percorso/copilot-runtime`; i test di
 `test_agent_runtime` usano un LLM scriptato dietro il vero gateway.
 
 ```sh
 # offline (come la CI), da root: scopre tests/<pacchetto>/test_*.py
-env -i PATH="$PATH" HOME=/tmp PI_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
+env -i PATH="$PATH" HOME=/tmp P_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
   python -m unittest discover
 # un solo modulo: python -m unittest tests.agent.test_agent_owner
 # con PostgreSQL usa-e-getta e runtime reale
-env -i PATH="$PATH" HOME=/tmp PI_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
-  PI_SECRETARY_TEST_AGENT_RUNTIME=... PI_SECRETARY_TEST_DATABASE_URL="host=/tmp/pg-test-sock dbname=secretary_test user=secretary_test password=..." \
+env -i PATH="$PATH" HOME=/tmp P_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
+  P_SECRETARY_TEST_AGENT_RUNTIME=... P_SECRETARY_TEST_DATABASE_URL="host=/tmp/pg-test-sock dbname=secretary_test user=secretary_test password=..." \
   python -m unittest discover
 ```
 

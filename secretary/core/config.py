@@ -10,7 +10,7 @@ from secretary.connectors.storage import FileLock, atomic_write
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
 BASE_DIR = PACKAGE_DIR.parent
 STATIC_DIR = PACKAGE_DIR / 'dashboard' / 'static'
-CONFIG_FILE = Path(os.environ.get('PI_SECRETARY_CONFIG_FILE') or BASE_DIR / '.env').expanduser().resolve()
+CONFIG_FILE = Path(os.environ.get('P_SECRETARY_CONFIG_FILE') or BASE_DIR / '.env').expanduser().resolve()
 # Preserve provenance before dotenv fills the process environment. Dashboard
 # edits must never claim to override values injected by the deployment.
 DEPLOYMENT_ENV_KEYS = frozenset(os.environ)
@@ -64,7 +64,7 @@ def get_bool(key: str, default: bool = False) -> bool:
 
 
 # --- OpenRouter ----------------------------------------------
-AGENT_NAME = get("AGENT_NAME", "Pi Secretary") or "Pi Secretary"
+AGENT_NAME = get("AGENT_NAME", "p-secretary") or "p-secretary"
 OPENROUTER_API_KEY = get("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
 OPENROUTER_AUDIO_MODEL = get("OPENROUTER_AUDIO_MODEL", "google/gemini-2.5-flash")
@@ -221,6 +221,24 @@ except ValueError:
     EFFECT_AUDIT_RETENTION_DAYS = 30
 if not 0 <= EFFECT_AUDIT_RETENTION_DAYS <= 3650:
     EFFECT_AUDIT_RETENTION_DAYS = 30
+
+
+def _retention_days(name, default, maximum):
+    """Giorni di retention validati: fuori intervallo o non numerico = default."""
+    try:
+        value = int(get(name, str(default)))
+    except ValueError:
+        return default
+    return value if 0 <= value <= maximum else default
+
+
+# Retention della storia (secretary/workflows/retention.py). 0 disattiva la classe.
+# Messaggi scaduti per data di acquisizione (con allegati, derivati e file);
+# dati operativi conclusi (payload dei job, outbox inviata, ledger AI, con
+# identità di deduplica sempre conservate).
+RETENTION_MESSAGES_DAYS = _retention_days('RETENTION_MESSAGES_DAYS', 730, 36500)
+RETENTION_OPERATIONAL_DAYS = _retention_days('RETENTION_OPERATIONAL_DAYS', 90, 3650)
+RETENTION_AI_USAGE_DAYS = _retention_days('RETENTION_AI_USAGE_DAYS', 365, 3650)
 
 
 def _tz():

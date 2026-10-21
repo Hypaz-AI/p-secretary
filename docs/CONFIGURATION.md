@@ -29,6 +29,9 @@ e `SECRETARY_MODE` / `EFFECT_AUDIT_RETENTION_DAYS` si modificano anche dalla das
 | `AGENT_DB_ROLE` | `agent_ro` | Ruolo PostgreSQL di sola lettura (vedi sotto) |
 | `SECRETARY_MODE` | `observe` | `observe`: nessuna email a terzi, le bozze restano salvate; `active`: `/invia` può inviare |
 | `EFFECT_AUDIT_RETENTION_DAYS` | 30 | Retention del registro di audit delle policy (0 la disattiva; le ricevute restano) |
+| `RETENTION_MESSAGES_DAYS` | 730 (0–36500) | Messaggi scaduti per data di acquisizione, con allegati, derivati e file non più referenziati; 0 disattiva. Vedi [OPERATIONS.md](OPERATIONS.md#retention) |
+| `RETENTION_OPERATIONAL_DAYS` | 90 (0–3650) | Payload dei job conclusi (chiavi conservate), outbox email inviata/rifiutata; 0 disattiva |
+| `RETENTION_AI_USAGE_DAYS` | 365 (0–3650) | Ledger AI dei consumi completati oltre la finestra (prenotazioni incerte escluse); 0 disattiva |
 
 `OPENROUTER_MODEL` e `OPENROUTER_AUDIO_MODEL` **non** sono il modello dell'agente: servono
 solo a descrivere le immagini e trascrivere i vocali archiviati (sezione sotto).

@@ -78,7 +78,7 @@ class ServiceAccountTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         # chiave RSA generata al volo e serializzata in PEM PKCS#8, come le
-        # chiavi JSON di Google. 1024 bit: veloci sul Raspberry, la logica
+        # chiavi JSON di Google. 1024 bit: veloci nei test, la logica
         # di firma è identica a 2048.
         import rsa as rsa_mod
         _, priv = rsa_mod.newkeys(1024)

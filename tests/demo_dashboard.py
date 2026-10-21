@@ -2,7 +2,7 @@
 
 Uso (dalla radice del repository, con le dipendenze installate):
 
-    PI_SECRETARY_DEMO_DATABASE_URL="host=127.0.0.1 port=54329 dbname=secretary_demo user=... password=..." \
+    P_SECRETARY_DEMO_DATABASE_URL="host=127.0.0.1 port=54329 dbname=secretary_demo user=... password=..." \
         python -m tests.demo_dashboard [--port 8099]
 
 Il nome del database DEVE finire con `_demo`: il comando rifiuta qualsiasi altro database. Nessuna
@@ -18,7 +18,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-DEMO_CONFIG = '''AGENT_NAME=Pi Secretary
+DEMO_CONFIG = '''AGENT_NAME=p-secretary
 TIMEZONE=Europe/Rome
 LANGUAGE=it
 DIGEST_TIME=21:00
@@ -54,10 +54,10 @@ TOOLS = ['db_query', 'fs_read', 'mail_search', 'web_search', 'task_add', 'note_a
 
 def require_demo_database():
     import psycopg
-    url = os.environ.get('PI_SECRETARY_DEMO_DATABASE_URL', '')
+    url = os.environ.get('P_SECRETARY_DEMO_DATABASE_URL', '')
     name = psycopg.conninfo.conninfo_to_dict(url).get('dbname', '') if url else ''
     if not name.endswith('_demo'):
-        sys.exit('Imposta PI_SECRETARY_DEMO_DATABASE_URL su un database il cui nome finisce con _demo.')
+        sys.exit('Imposta P_SECRETARY_DEMO_DATABASE_URL su un database il cui nome finisce con _demo.')
     return url
 
 
@@ -157,7 +157,7 @@ def main():
     (root / 'data').mkdir()
     config_file = root / 'secretary.env'
     config_file.write_text(DEMO_CONFIG)
-    os.environ.update(PI_SECRETARY_CONFIG_FILE=str(config_file), DATA_DIR=str(root / 'data'), DATABASE_URL=url,
+    os.environ.update(P_SECRETARY_CONFIG_FILE=str(config_file), DATA_DIR=str(root / 'data'), DATABASE_URL=url,
                       DASHBOARD_CREDENTIAL_FILE=str(root / 'dashboard.json'), DASHBOARD_BIND='127.0.0.1')
     from waitress import create_server
     from secretary.core import db, flows

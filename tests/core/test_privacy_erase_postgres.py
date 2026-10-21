@@ -3,7 +3,7 @@
 Real schema, real triggers, real FKs: no mocks. Exercises the full db.init()
 bootstrap, then verifies that erase_message removes every derived row and
 respects the append-only audit trail, and that export is a faithful snapshot.
-Requires PI_SECRETARY_TEST_DATABASE_URL (explicit *_test DB, Unix socket).
+Requires P_SECRETARY_TEST_DATABASE_URL (explicit *_test DB, Unix socket).
 """
 import json
 import os
@@ -16,9 +16,9 @@ from secretary.core import config, db, privacy, dashboard_owner as owners
 
 
 def _params():
-    url = os.environ.get('PI_SECRETARY_TEST_DATABASE_URL')
+    url = os.environ.get('P_SECRETARY_TEST_DATABASE_URL')
     if not url:
-        raise unittest.SkipTest('Set PI_SECRETARY_TEST_DATABASE_URL to opt in')
+        raise unittest.SkipTest('Set P_SECRETARY_TEST_DATABASE_URL to opt in')
     from psycopg.conninfo import conninfo_to_dict
     params = conninfo_to_dict(url)
     if (not params.get('dbname', '').endswith('_test') or 'service' in params

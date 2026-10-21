@@ -1,5 +1,5 @@
 # ============================================================
-#  PI-SECRETARY — .gitignore
+#  p-secretary — .gitignore
 #  Esclude segreti, stato locale e file generati.
 #  `data/` è solo stato di runtime (default di DATA_DIR fuori da Docker):
 #  il manifest del ponte WhatsApp (package.json) vive in deploy/whatsapp/.

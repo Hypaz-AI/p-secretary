@@ -157,7 +157,7 @@ def run_setup(name):
     env = os.environ.copy()
     env['PYTHONPATH'] = os.pathsep.join(filter(None, [str(ROOT), env.get('PYTHONPATH')]))
     for key in read_env(config.CONFIG_FILE):
-        if key not in ('PI_SECRETARY_CONFIG_FILE', 'DATA_DIR', 'INVOICE_DIR',
+        if key not in ('P_SECRETARY_CONFIG_FILE', 'DATA_DIR', 'INVOICE_DIR',
                        'DASHBOARD_BIND', 'DASHBOARD_PORT', 'DASHBOARD_CREDENTIAL_FILE',
                        'TELEGRAM_USER_SESSION'):
             env.pop(key, None)
@@ -299,16 +299,16 @@ def probe():
 
 
 def launch(args):
-    home = Path(os.environ.get('PI_SECRETARY_HOME', '~/.local/share/pi-secretary')).expanduser().resolve()
+    home = Path(os.environ.get('P_SECRETARY_HOME', '~/.local/share/p-secretary')).expanduser().resolve()
     uid, gid = os.getuid(), os.getgid()
     for directory in (home, home / 'config', home / 'data'):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         if directory.stat().st_uid != uid or not os.access(directory, os.W_OK | os.X_OK):
             raise ValueError('Directory non appartenente al chiamante o non scrivibile')
         directory.chmod(0o700)
-    os.environ['PI_SECRETARY_HOME'] = str(home)
-    os.environ['PI_SECRETARY_UID'] = str(uid)
-    os.environ['PI_SECRETARY_GID'] = str(gid)
+    os.environ['P_SECRETARY_HOME'] = str(home)
+    os.environ['P_SECRETARY_UID'] = str(uid)
+    os.environ['P_SECRETARY_GID'] = str(gid)
     with (home / 'launcher.lock').open('a') as lock:
         os.chmod(lock.name, 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

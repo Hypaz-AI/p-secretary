@@ -222,7 +222,7 @@ class InstallerHistoryTests(unittest.TestCase):
     def test_launcher_stops_repairs_builds_then_imports_and_propagates_code(self):
         for days, code in ((None, 0), (14, 2), (3650, 1), (1, 130)):
             with self.subTest(days=days, code=code), tempfile.TemporaryDirectory() as temp, \
-                    patch.dict(os.environ, {'PI_SECRETARY_HOME': temp}), \
+                    patch.dict(os.environ, {'P_SECRETARY_HOME': temp}), \
                     patch.object(installer, 'progress', return_value={'complete': True, 'database': 'local'}), \
                     patch.object(installer, 'read_env', return_value={}), \
                     patch.object(installer.subprocess, 'run', return_value=Mock(returncode=code)) as run, \
@@ -245,7 +245,7 @@ class InstallerHistoryTests(unittest.TestCase):
                     call.run(base + command, check=False)])
 
     def test_launcher_requires_completed_setup_before_mutating_services(self):
-        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'PI_SECRETARY_HOME': temp}), \
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'P_SECRETARY_HOME': temp}), \
                 patch.object(installer, 'progress', return_value={}), \
                 patch.object(installer.subprocess, 'run') as run:
             with self.assertRaisesRegex(ValueError, 'setup'):

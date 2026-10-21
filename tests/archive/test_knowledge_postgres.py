@@ -1,6 +1,6 @@
 """Opt-in SQL tests: explicit *_test database, unique schema, no public fallback.
 
-Only PI_SECRETARY_TEST_DATABASE_URL is used; no servers/workers are started.
+Only P_SECRETARY_TEST_DATABASE_URL is used; no servers/workers are started.
 Fresh-interpreter imports disable dotenv and use temporary application data.
 """
 from contextlib import contextmanager
@@ -13,7 +13,7 @@ from unittest.mock import patch
 import uuid
 
 with tempfile.TemporaryDirectory(prefix='knowledge-pg-import-') as _bootstrap:
-    with patch.dict(os.environ, {'PI_SECRETARY_CONFIG_FILE': '/dev/null',
+    with patch.dict(os.environ, {'P_SECRETARY_CONFIG_FILE': '/dev/null',
                                 'DATA_DIR': _bootstrap, 'DATABASE_URL': ''}):
         from secretary.core import db, jobs
         from secretary.archive import knowledge as k, message_store
@@ -31,9 +31,9 @@ def validated_test_params(url):
 class KnowledgePostgresTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        url = os.environ.get('PI_SECRETARY_TEST_DATABASE_URL')
+        url = os.environ.get('P_SECRETARY_TEST_DATABASE_URL')
         if not url:
-            raise unittest.SkipTest('Set PI_SECRETARY_TEST_DATABASE_URL to opt in')
+            raise unittest.SkipTest('Set P_SECRETARY_TEST_DATABASE_URL to opt in')
         if db.psycopg is None:
             raise unittest.SkipTest('psycopg is not installed')
         cls.params = validated_test_params(url)

@@ -35,6 +35,10 @@ def persist(data):
                 pass
         finally:
             os.unlink(temporary)
+    else:
+        # Riuso di un file già presente: la data di modifica diventa ora, così la
+        # potatura (workflows/retention.py) non lo cancella mentre il riferimento è in commit.
+        os.utime(path)
     verify(path, data)
     # Also sync deduplicated entries: another writer may just have published it.
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)

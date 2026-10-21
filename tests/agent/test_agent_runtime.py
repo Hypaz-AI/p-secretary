@@ -1,8 +1,8 @@
 """Catena completa con il VERO Copilot SDK e un modello scriptato dietro il gateway.
 
 Opt-in (richiede il binario del runtime e un DB di test):
-    PI_SECRETARY_TEST_AGENT_RUNTIME=/percorso/copilot-runtime
-    PI_SECRETARY_TEST_DATABASE_URL=... (dbname che finisce in _test)
+    P_SECRETARY_TEST_AGENT_RUNTIME=/percorso/copilot-runtime
+    P_SECRETARY_TEST_DATABASE_URL=... (dbname che finisce in _test)
 
 Nessuna rete e nessun costo: l'upstream del gateway è sostituito da una funzione
 che risponde con chiamate agli strumenti predeterminate. Quello che si prova è
@@ -19,7 +19,7 @@ from secretary.archive import message_store
 from secretary.agent import gateway as gateway_module, runtime as runtime_module, turns
 from tests.agent.test_agent_postgres import AgentPostgresCase
 
-BINARY = os.environ.get('PI_SECRETARY_TEST_AGENT_RUNTIME', '')
+BINARY = os.environ.get('P_SECRETARY_TEST_AGENT_RUNTIME', '')
 OWNER = '101'
 
 
@@ -56,7 +56,7 @@ class Script:
         return out
 
 
-@unittest.skipUnless(BINARY and os.path.exists(BINARY), 'Set PI_SECRETARY_TEST_AGENT_RUNTIME to the copilot-runtime binary')
+@unittest.skipUnless(BINARY and os.path.exists(BINARY), 'Set P_SECRETARY_TEST_AGENT_RUNTIME to the copilot-runtime binary')
 class AgentRuntimeTests(AgentPostgresCase):
     def setUp(self):
         super().setUp()

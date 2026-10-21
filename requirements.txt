@@ -1,4 +1,4 @@
-# Pi Secretary — dipendenze
+# p-secretary — dipendenze
 # Connettore account personale Telegram (opzionale a runtime).
 Telethon>=1.36,<2
 qrcode>=7.4,<9

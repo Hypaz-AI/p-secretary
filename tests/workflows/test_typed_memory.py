@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 with tempfile.TemporaryDirectory(prefix='typed-memory-') as _bootstrap:
-    with patch.dict(os.environ, {'PI_SECRETARY_CONFIG_FILE': '/dev/null',
+    with patch.dict(os.environ, {'P_SECRETARY_CONFIG_FILE': '/dev/null',
                                  'DATA_DIR': _bootstrap, 'DATABASE_URL': ''}):
         from secretary.core import db, jobs
 

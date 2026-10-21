@@ -1,4 +1,4 @@
-/* Pi Secretary · dashboard. Sistema di design a variabili: tema scuro di default, chiaro con
+/* p-secretary · dashboard. Sistema di design a variabili: tema scuro di default, chiaro con
    `prefers-color-scheme` o con il pulsante in alto (data-theme). Nessuna risorsa esterna (CSP default-src 'self'). */
 
 /* ------------------------------------------------------------------ token */

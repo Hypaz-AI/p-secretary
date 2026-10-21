@@ -41,8 +41,8 @@ sul tetto notifiche (due `notify_urgent` parallele), corretta con un advisory lo
 ### Lavoro aperto e passi che richiedono il tuo consenso
 
 - **DBA (solo DB esterno senza `CREATEROLE`)**: eseguire una volta la PARTE 1 di `deploy/sql/agent_ro.sql` (due istruzioni) e riavviare; con il DB locale del compose il ruolo lo crea l'app. Finché manca, l'agente è protetto da AST + READ ONLY.
-- **Deploy**: ricostruire l'immagine **sul Raspberry** (il runtime è arm64) e ricreare il container; nulla è stato distribuito né toccato in produzione.
-- **Dati**: 97 allegati email su 196 avevano percorsi di un host precedente (la vista `rel_path` li risolve per nome della cartella). **Decisione dell'owner: i file davvero mancanti si considerano persi**, nessuna riparazione né riconciliazione. Il bridge WhatsApp era in crash-loop per `SingletonLock` (vedi `WHATSAPP_PROFILE_RECOVERY.md`): serve `./pi-secretary up` dal launcher.
+- **Deploy**: ricostruire l'immagine **sull'host di produzione** (il runtime segue l'architettura: arm64 su Raspberry Pi 4) e ricreare il container; nulla è stato distribuito né toccato in produzione.
+- **Dati**: 97 allegati email su 196 avevano percorsi di un host precedente (la vista `rel_path` li risolve per nome della cartella). **Decisione dell'owner: i file davvero mancanti si considerano persi**, nessuna riparazione né riconciliazione. Il bridge WhatsApp era in crash-loop per `SingletonLock` (vedi `WHATSAPP_PROFILE_RECOVERY.md`): serve `./p-secretary up` dal launcher.
 - **Media WhatsApp**: la causa della mancata persistenza **non è stata confermata**. Il fix aggiunge ritentativi con backoff, tracciamento degli esiti (`MEDIA_ERRORS`) e la colonna `messages.media_missing`, così il problema si vede invece di perdersi in silenzio.
 - **Pulizia DB**: `deploy/sql/drop_legacy_tables.sql` rimuove le tabelle del vecchio segretario; **non** è eseguito dall'app, solo dopo backup.
 - **Sicurezza**: ruotare la password di `svc_pi_secretary` (è stata incollata in chat).
@@ -67,7 +67,7 @@ sul tetto notifiche (due `notify_urgent` parallele), corretta con un advisory lo
 |---|---|
 | Codice della repo | **Nessuna modifica.** Impronta git (staged + unstaged + untracked) identica prima/dopo; gli unici file aggiunti da me sono questo report. Test eseguiti con `PYTHONDONTWRITEBYTECODE=1` |
 | DB di produzione | Solo `SELECT`, in transazione `read_only`, `statement_timeout` 20–30 s. Nessuna scrittura, nessun DDL |
-| Credenziali | Lette da `~/.local/share/pi-secretary/config/secretary.env` dagli script, mai stampate |
+| Credenziali | Lette da `~/.local/share/p-secretary/config/secretary.env` dagli script, mai stampate |
 | Spike | Tutto in `/tmp/spike` (venv `/tmp/venv-agent`, home runtime `/tmp/spike/home*`) |
 | Chiamate a pagamento | ~20 chiamate OpenRouter totali (spike), costo trascurabile (< $0.05 inclusa 1 ricerca web) |
 | Test Postgres | Contro il container usa-e-getta `pg-test-disposable` (porta 54329), **mai** la produzione |
@@ -101,7 +101,7 @@ La suite offline non li vede perché senza DB i test Postgres vengono saltati. Q
 | Messaggi | email 879 · whatsapp 1.561 · telegram ~520 (dal 01/10 al 20/10); ~300–500/giorno |
 | Allegati | 196 email (150 application, 46 image) + 22 telegram; **WhatsApp: 0 allegati** (nessun media archiviato: da verificare con te) |
 | Dimensione testo | email: 3,2 MB totali, p50 441 caratteri, p99 42k, max 57k |
-| FS (`/var/lib/pi-secretary`) | `email_attachments` 56 MB (48 file) · `wa_session` **507 MB (sessione WhatsApp: segreta)** · `tg_files` 616 KB · `ms_tokens.json`, `gcal_service_account.json` (segreti) |
+| FS (`/var/lib/p-secretary`) | `email_attachments` 56 MB (48 file) · `wa_session` **507 MB (sessione WhatsApp: segreta)** · `tg_files` 616 KB · `ms_tokens.json`, `gcal_service_account.json` (segreti) |
 | Consensi `data_policies` | tutti `allowed=true` (3 canali × text/media/history) dal 17/10 |
 | Ruolo applicativo | `svc_pi_secretary`: non superuser, **no CREATEROLE**, `CREATE` su DB e schema `public`, INSERT/DELETE/SELECT su tutte le 53 tabelle |
 | Estensioni | solo `plpgsql`; disponibili e *trusted*: `pg_trgm`, `unaccent` |
@@ -163,7 +163,7 @@ Modello usato: quello configurato in produzione, `deepseek/deepseek-v4.1-flash` 
 | **Gateway locale tra SDK e OpenRouter** | ✅ | Runtime puntato a `http://127.0.0.1:<porta>/v1` con chiave segnaposto; il proxy inoltra con la chiave vera e legge `usage` upstream: **8/8 risposte con token e costo**. Il runtime non vede mai la chiave reale |
 | Memoria/processi | ✅ ~ | Picco RSS ≈ **190 MB** per il runtime (il conteggio "178 pid" del mio script è un artefatto: contava anche i sottoprocessi `ps`/`ss` del campionatore). Container app oggi 179 MB; host 7,8 GB (4,4 GB disponibili) |
 | Rete del runtime | ✅ ~ | Unica connessione osservata: il gateway locale (campionamento 0,4 s, non esaustivo) |
-| Il binario parte nell'immagine di produzione | ✅ ~ | `copilot-runtime` si esegue nell'immagine `pi-secretary:local` (bookworm, utente 1000, `--cap-drop ALL`, `no-new-privileges`): stampa il proprio errore su `--version`. **Non ho testato la sessione completa nel container** |
+| Il binario parte nell'immagine di produzione | ✅ ~ | `copilot-runtime` si esegue nell'immagine `p-secretary:local` (bookworm, utente 1000, `--cap-drop ALL`, `no-new-privileges`): stampa il proprio errore su `--version`. **Non ho testato la sessione completa nel container** |
 | Ricerca web via OpenRouter | ✅ | Plugin `web` (Exa, 3 risultati): 3 citazioni `url_citation`, **$0,00705** contro **$0,0000085** senza plugin (≈ **×800** per una domanda banale) |
 
 ### 3.1 Risultati che cambiano il progetto
@@ -250,7 +250,7 @@ Server HTTP su `127.0.0.1:<porta effimera>` nello stesso processo (ThreadingHTTP
 
 ### 4.5 Tool filesystem
 
-Radice utente visibile: **`DATA_DIR/workspace/`** (host: `~/.local/share/pi-secretary/data/workspace/`), leggibile e scrivibile dall'agente, esplorabile da dashboard (`file_browser.py` già c'è).
+Radice utente visibile: **`DATA_DIR/workspace/`** (host: `~/.local/share/p-secretary/data/workspace/`), leggibile e scrivibile dall'agente, esplorabile da dashboard (`file_browser.py` già c'è).
 
 | Tool | Ambito |
 |---|---|
@@ -268,7 +268,7 @@ Il runtime Copilot **non** usa i suoi tool built-in (modalità `empty`): i tool 
 
 ### 4.7 Tool web
 
-`web_search(query, max_results≤5, include_domains?)` implementato **lato app** chiamando OpenRouter con il plugin `web` (engine Exa), non con `:online` sul modello principale: così costo, frequenza e query sono sotto controllo e loggati. Costo misurato ≈ **$0,007/ricerca**; tetto giornaliero dedicato (`agent_web`). Query ≤ 200 caratteri; in v1 **nessun `web_fetch`** (evita SSRF verso la LAN: il Raspberry espone dashboard :8080 e DB). Un eventuale `web_fetch` arriva in Fase 5 con blocco IP privati e rebinding.
+`web_search(query, max_results≤5, include_domains?)` implementato **lato app** chiamando OpenRouter con il plugin `web` (engine Exa), non con `:online` sul modello principale: così costo, frequenza e query sono sotto controllo e loggati. Costo misurato ≈ **$0,007/ricerca**; tetto giornaliero dedicato (`agent_web`). Query ≤ 200 caratteri; in v1 **nessun `web_fetch`** (evita SSRF verso la LAN: l'host espone dashboard :8080 e DB). Un eventuale `web_fetch` arriva in Fase 5 con blocco IP privati e rebinding.
 
 ### 4.8 Tool di scrittura (tipizzati, non SQL libero)
 
@@ -364,7 +364,7 @@ Flag di rilascio: `AGENT_MODE = off | canary | on` (default `off`). Il flusso le
 
 | Fase | Contenuto | Criterio di uscita |
 |---|---|---|
-| **0 · Fondamenta** (M) | (a) Fix `Permanent` in `safe_error` + correzione del test; commit del lavoro in stage. (b) PoC in container: `pip install` + runtime nell'immagine, sessione completa con gateway, 2 sessioni concorrenti, kill del runtime a metà turno. (c) Richiesta al DBA: ruolo `agent_ro` + grant; verifica `CREATE EXTENSION pg_trgm, unaccent` col ruolo applicativo. (d) **Riparazione allegati** (reversibile, con tua approvazione): riscrittura prefisso `/home/ale/pi-secretary/data` → `/var/lib/pi-secretary` e *resolver* per nome sha256; elenco dei 97 mancanti. (e) **Benchmark modelli** su ~30 domande reali con ground-truth SQL: accuratezza, latenza, costo, per scegliere `AGENT_MODEL`. (f) Test allegati immagine/audio via SDK | PoC verde in container; ruolo creato; ≥ 90% accuratezza sull'eval set col modello scelto; allegati risolvibili |
+| **0 · Fondamenta** (M) | (a) Fix `Permanent` in `safe_error` + correzione del test; commit del lavoro in stage. (b) PoC in container: `pip install` + runtime nell'immagine, sessione completa con gateway, 2 sessioni concorrenti, kill del runtime a metà turno. (c) Richiesta al DBA: ruolo `agent_ro` + grant; verifica `CREATE EXTENSION pg_trgm, unaccent` col ruolo applicativo. (d) **Riparazione allegati** (reversibile, con tua approvazione): riscrittura prefisso `/home/ale/pi-secretary/data` → `/var/lib/p-secretary` e *resolver* per nome sha256; elenco dei 97 mancanti. (e) **Benchmark modelli** su ~30 domande reali con ground-truth SQL: accuratezza, latenza, costo, per scegliere `AGENT_MODEL`. (f) Test allegati immagine/audio via SDK | PoC verde in container; ruolo creato; ≥ 90% accuratezza sull'eval set col modello scelto; allegati risolvibili |
 | **1 · Lettura** (L) | Schema `agent` + viste + indici FTS (migrazione additiva sotto advisory lock). Gateway + refactor `ai_budget` a contesto esplicito. `agent.runtime`, `db_schema/db_query/read_message`, `fs_list/read/find`, `attachment_text`. Owner turn **in canary**: comando `/agente <domanda>` instrada al nuovo flusso, il resto resta legacy. Tabella `agent_runs` + vista in dashboard (query eseguite, token, costo) | Domande di sola lettura corrette sull'eval set; nessun segreto raggiungibile (test); p50 < 25 s, p95 < 60 s; costo medio < $0,01/turno |
 | **2 · Strumenti completi** (L) | `mail_*` live, `web_search`, `fs_write` + quota, tool di scrittura tipizzati + `agent_effects`, `INSTRUCTIONS.md`, `/agente` diventa default per i messaggi owner (legacy come fallback con flag) | Suite red-team (iniezione) senza scritture non autorizzate; replay dopo crash senza effetti doppi; ricerca web dentro budget |
 | **3 · Inbox agent** (L) | Triage a lotti in **shadow** accanto a `analysis/reconcile/secretary_review`; confronto su ≥ 500 messaggi reali: priorità, task, notifiche urgenti, costo. Poi attivazione per canale | Concordanza con l'analisi attuale ≥ accordata con te; costo/giorno ≤ attuale; nessuna notifica urgente persa |
@@ -380,7 +380,7 @@ La suite del progetto è *offline-first* (rete e DB vietati) e questo resta vero
 - **Adapter `AgentSession`**: l'orchestrazione dipende da un'interfaccia sottile sopra l'SDK; i test usano un fake **scriptato** che emette tool call predeterminate. Zero rete, zero runtime.
 - **Tool come funzioni pure** testate direttamente (DB su Postgres usa-e-getta; FS in tmpdir): confinamento, consensi nelle viste, limiti, errori, path traversal/symlink, colonne escluse.
 - **Gateway** testato con upstream finto: budget, `max_tokens`, fail-closed, lease perso, normalizzazione parametri, assenza di segreti nei log.
-- **Test d'integrazione col runtime reale**: opt-in (`PI_SECRETARY_TEST_AGENT_RUNTIME=1`), non nella CI di default.
+- **Test d'integrazione col runtime reale**: opt-in (`P_SECRETARY_TEST_AGENT_RUNTIME=1`), non nella CI di default.
 - **Invarianti**: idempotenza dopo crash (`agent_effects`), revoca consenso a metà turno, nessuna scrittura da sessioni non-owner, nessun segreto enumerabile.
 - **Eval set di regressione** (~30 domande con SQL di verità) eseguibile a richiesta per confrontare modelli/prompt.
 - **Test esistenti**: ~410 toccano i flussi interessati (owner_dialogue 66, secretary_dialogue 57, owner_commitments 46, secretary_owner_controls 28, owner_instructions 26, owner_calendar_grants 25, owner_plan_provenance 24, owner_reminders 22, test_chat_egress 17, agent_tools 16, … ). Quelli su pratiche/revisioni/research seguono il ritiro; quelli su grant, promemoria, ordine risposte e `apply` restano.
@@ -390,7 +390,7 @@ La suite del progetto è *offline-first* (rete e DB vietati) e questo resta vero
 ## 8. Packaging e deploy
 
 - `requirements.txt`: `github-copilot-sdk==1.0.23` (pin esatto; rilascia quasi ogni giorno), `pydantic` (già dipendenza transitiva), eventuale `pglast`.
-- **Dockerfile**: ⚠️ copia i moduli **per nome**: i nuovi vanno aggiunti (`COPY agent/ ./agent/`). Runtime nell'immagine in fase di build (`python -m copilot download-runtime`, ~147 MB) con `COPILOT_CLI_PATH` e `COPILOT_SKIP_CLI_DOWNLOAD=1`: la `HOME` del container è sotto `/var/lib/pi-secretary/home` e `XDG_CACHE_HOME=/tmp/cache` è un tmpfs, quindi un download a runtime andrebbe perso a ogni riavvio. La CI builda solo `linux/amd64`: il downloader sceglie la piattaforma da solo, ma va aggiunta la build arm64 (o un controllo equivalente) perché la produzione è arm64.
+- **Dockerfile**: ⚠️ copia i moduli **per nome**: i nuovi vanno aggiunti (`COPY agent/ ./agent/`). Runtime nell'immagine in fase di build (`python -m copilot download-runtime`, ~147 MB) con `COPILOT_CLI_PATH` e `COPILOT_SKIP_CLI_DOWNLOAD=1`: la `HOME` del container è sotto `/var/lib/p-secretary/home` e `XDG_CACHE_HOME=/tmp/cache` è un tmpfs, quindi un download a runtime andrebbe perso a ogni riavvio. La CI builda solo `linux/amd64`: il downloader sceglie la piattaforma da solo, ma va aggiunta la build arm64 (o un controllo equivalente) perché la produzione è arm64.
 - Config nuova (via `admin_config`): `AGENT_MODE`, `AGENT_MODEL`, `AGENT_MAX_TOOL_CALLS`, `AGENT_TURN_TIMEOUT`, `AI_BUDGET_AGENT_*_DAILY_CALLS`, `WEB_SEARCH_ENABLED`, `AGENT_WORKSPACE_QUOTA_MB`.
 - Migrazioni: tutte additive e versionate col pattern esistente (`schema_migrations` + advisory lock). `CREATE INDEX CONCURRENTLY` non può stare in una transazione: va eseguito come passo separato.
 - Il `compose.yaml` resta (`cap_drop ALL`, `no-new-privileges`); il binario del runtime è risultato eseguibile con queste restrizioni.
@@ -441,6 +441,6 @@ La suite del progetto è *offline-first* (rete e DB vietati) e questo resta vero
 ## Appendice — riproducibilità
 
 - Spike e script: `/tmp/spike/` (`q.py`/`qb.py` query read-only; `spike.py`, `spike2.py` SDK + gateway + confinamento + resume; `web.py` ricerca web; `*.sql` analisi; `tests_offline.txt`, `tests_pg.txt` esiti test; `baseline.txt`/`after.txt` impronta git).
-- Test offline: `env -i PATH="$PATH" HOME=… PI_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" python -m unittest discover`.
-- Test Postgres: stesso comando con `PI_SECRETARY_TEST_DATABASE_URL="host=127.0.0.1 port=54329 dbname=secretary_test user=secretary_test password=disposable-ci-only"`, moduli: `test_owner_dialogue_postgres test_postgres_jobs test_secretary_postgres test_knowledge_postgres test_privacy_erase_postgres test_reconciliation_postgres`.
+- Test offline: `env -i PATH="$PATH" HOME=… P_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" python -m unittest discover`.
+- Test Postgres: stesso comando con `P_SECRETARY_TEST_DATABASE_URL="host=127.0.0.1 port=54329 dbname=secretary_test user=secretary_test password=disposable-ci-only"`, moduli: `test_owner_dialogue_postgres test_postgres_jobs test_secretary_postgres test_knowledge_postgres test_privacy_erase_postgres test_reconciliation_postgres`.
 - Fonti SDK: `github.com/github/copilot-sdk` (README Python, `docs/auth/byok.md`, `docs/setup/multi-tenancy.md`, `docs/features/session-persistence.md`); OpenRouter: `openrouter.ai/docs/features/web-search`.

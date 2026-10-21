@@ -344,8 +344,8 @@ def request_content(payload, timeout=90):
                 data=json.dumps(payload).encode(), headers={
                     'Authorization': f'Bearer {config.OPENROUTER_API_KEY}',
                     'Content-Type': 'application/json',
-                    'HTTP-Referer': 'https://pi-secretary.local',
-                    'X-Title': 'Pi Secretary'}, method='POST')
+                    'HTTP-Referer': 'https://p-secretary.local',
+                    'X-Title': 'p-secretary'}, method='POST')
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 result = json.loads(response.read().decode())
             if accounting is not None:

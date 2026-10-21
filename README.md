@@ -1,6 +1,6 @@
-# Pi Secretary · un agente per le tue comunicazioni
+# p-secretary · un agente per le tue comunicazioni
 
-Segretario personale per Linux (Raspberry Pi incluso): raccoglie email, WhatsApp e
+Segretario personale containerizzato (Docker, multi-piattaforma): raccoglie email, WhatsApp e
 Telegram, archivia tutto su PostgreSQL e **lascia che sia un agente a ragionare**.
 Non esistono pipeline di classificazione, schemi di piano o flussi fissi: quando
 scrivi al bot, o quando arriva un messaggio, un agente ([GitHub Copilot SDK](https://github.com/github/copilot-sdk),
@@ -111,7 +111,7 @@ secretary/        pacchetto Python (`python -m secretary`): core, archive, workf
 tests/            suite unittest, una cartella per pacchetto (`python -m unittest discover`)
 docs/             flussi, configurazione, operatività, guida Docker, note storiche
 deploy/           entrypoint Docker, manifest del ponte WhatsApp, SQL del DBA, unità systemd
-Dockerfile, compose*.yaml, pi-secretary (launcher), requirements.txt, .env.example
+Dockerfile, compose*.yaml, p-secretary (launcher), requirements.txt, .env.example
 ```
 
 ## Nuove installazioni e aggiornamenti
@@ -124,14 +124,14 @@ usate: restano nel DB finché non le rimuovi tu con
 
 # Importazione storica una tantum
 
-Il comando `sh ./pi-secretary import-history --days 30` importa nell'archivio DB
+Il comando `sh ./p-secretary import-history --days 30` importa nell'archivio DB
 le comunicazioni degli ultimi 30 giorni dalle connessioni abilitate. Omettendo
 `--days`, lo script chiede il numero di giorni (default 14; ammessi 1–3650).
 L'intervallo è calcolato al momento dell'avvio, include l'inizio ed esclude la fine.
 
 Il comando ferma l'app per liberare le sessioni Telegram/WhatsApp, ricostruisce
 l'immagine e avvia un container temporaneo. **Al termine l'app resta ferma**:
-riavviarla con `sh ./pi-secretary up`. Non eseguire altri runtime sulle stesse
+riavviarla con `sh ./p-secretary up`. Non eseguire altri runtime sulle stesse
 sessioni durante l'importazione. In installazioni Python dirette è disponibile
 `python -m secretary.archive.historical_import --days 30`, dopo aver fermato il runtime.
 
@@ -259,8 +259,8 @@ senza evento di prova: vedere [CONFIGURATION.md](docs/CONFIGURATION.md#setup-cal
 
 La chiave viene validata localmente e salvata atomicamente con permessi `0600`;
 ogni sostituzione richiede consenso. Il default Docker è
-`/var/lib/pi-secretary/gcal_service_account.json`, corrispondente a
-`PI_SECRETARY_HOME/data/gcal_service_account.json` sull’host. Il file da importare
+`/var/lib/p-secretary/gcal_service_account.json`, corrispondente a
+`P_SECRETARY_HOME/data/gcal_service_account.json` sull’host. Il file da importare
 deve essere visibile **dentro il container**: un percorso del PC non basta.
 L’incolla evita di dover trasferire il file. `GCAL_SERVICE_ACCOUNT_FILE` indica
 un percorso visibile sia al setup sia all’app; montare separatamente eventuali
@@ -275,7 +275,7 @@ Le vecchie variabili `GCAL_CLIENT_ID` / `GCAL_CLIENT_SECRET` e il file
 Google e rimuovere privatamente quei residui se non più necessari.
 L’OAuth delle **email Microsoft** rimane invariato.
 
-Segretario personale per Linux: raccoglie email, WhatsApp e Telegram, analizza
+Segretario personale containerizzato: raccoglie email, WhatsApp e Telegram, analizza
 con OpenRouter, prepara riepiloghi, archivia fatture e gestisce attività e
 proposte di appuntamento. Le integrazioni sono opzionali: l'AI richiede una
 chiave OpenRouter; dialogo e notifiche richiedono un bot Telegram.
@@ -283,9 +283,11 @@ I contenuti analizzati vengono inviati al servizio AI: valuta privacy e costi.
 
 ## Primo avvio con Docker
 
-Servono **Linux, Git, Python 3 sull'host, Docker e il plugin Docker Compose
-recente** con supporto a `up --wait`. Il tuo utente deve già avere accesso al
-daemon Docker: il launcher non usa sudo e non installa Docker. Serve Internet;
+Servono **Git, Python 3 sull'host, Docker e il plugin Docker Compose
+recente** con supporto a `up --wait`, più una shell POSIX (`sh`). L'immagine è
+multi-piattaforma: viene costruita per l'architettura dell'host (amd64 o arm64, per
+esempio un Raspberry Pi 4). Il tuo utente deve già avere accesso al daemon Docker:
+il launcher non usa sudo e non installa Docker. Serve Internet;
 Node e Chromium vengono installati nell'immagine, non sull'host.
 
 Sul computer che ospiterà il servizio:
@@ -293,7 +295,7 @@ Sul computer che ospiterà il servizio:
 ```sh
 git clone https://github.com/Hypaz-AI/p-secretary.git
 cd p-secretary
-sh ./pi-secretary setup
+sh ./p-secretary setup
 ```
 
 Se hai già il repository, entra nella sua directory invece di clonarlo.
@@ -315,9 +317,9 @@ poi accetta separatamente la verifica DB e l'avvio app, oppure rimandali.
 Per avviare dopo la conferma e controllare:
 
 ```sh
-sh ./pi-secretary up
-sh ./pi-secretary status
-sh ./pi-secretary logs
+sh ./p-secretary up
+sh ./p-secretary status
+sh ./p-secretary logs
 ```
 
 L'app inizializza/migra il DB configurato e può iniziare raccolta e invii:
@@ -337,9 +339,9 @@ Sostituisci `UTENTE` con l'utente SSH e `SERVER` con nome/IP del server;
 apri poi **http://127.0.0.1:18080** sul tuo PC. Non esporre HTTP su Internet.
 
 Al primo avvio della dashboard vengono generate credenziali dedicate in
-`~/.local/share/pi-secretary/config/dashboard.json`. Apri il file **privatamente
+`~/.local/share/p-secretary/config/dashboard.json`. Apri il file **privatamente
 sull'host con un editor locale** e leggi `username` e `password`. Non sono
-le credenziali Linux; non condividere il file. Con `PI_SECRETARY_HOME` diverso,
+le credenziali Linux; non condividere il file. Con `P_SECRETARY_HOME` diverso,
 cerca nella sua sottocartella `config/`.
 
 La pagina **File** permette navigazione/download di cartelle dati consentite e
@@ -350,7 +352,7 @@ la cancellazione è bloccata anche se il DB non è disponibile.
 
 ## Dati e gestione quotidiana
 
-Il default è `~/.local/share/pi-secretary/`, fuori dal repository:
+Il default è `~/.local/share/p-secretary/`, fuori dal repository:
 
 | Percorso host | Contenuto |
 |---|---|
@@ -359,17 +361,17 @@ Il default è `~/.local/share/pi-secretary/`, fuori dal repository:
 | `config/postgres.env` | Credenziali DB locale |
 | `data/` | Allegati, token, sessioni, stato e archivio `invoices/` |
 
-Il DB locale usa il volume Docker `pi-secretary_postgres`. `PI_SECRETARY_HOME`
+Il DB locale usa il volume Docker `p-secretary_postgres`. `P_SECRETARY_HOME`
 cambia i percorsi host, **non crea una seconda istanza**: progetto e volume
 restano gli stessi. Backup di DB e filesystem sono a tuo carico.
 
-- `sh ./pi-secretary configure`: ferma l'app dopo conferma, ripropone login e
+- `sh ./p-secretary configure`: ferma l'app dopo conferma, ripropone login e
   campi mancanti; **non sostituisce valori già presenti**.
 - Per cambiarli, modifica privatamente `config/secretary.env`, poi esegui
-  `sh ./pi-secretary down` e `sh ./pi-secretary up`: il file è letto all'avvio.
+  `sh ./p-secretary down` e `sh ./p-secretary up`: il file è letto all'avvio.
   Il solo `up` non forza il riavvio di un container già attivo.
-- `sh ./pi-secretary doctor`: prova connessione DB, senza avviarlo o migrare.
-- `sh ./pi-secretary down`: rimuove container/rete, **conserva il volume DB**.
+- `sh ./p-secretary doctor`: prova connessione DB, senza avviarlo o migrare.
+- `sh ./p-secretary down`: rimuove container/rete, **conserva il volume DB**.
 
 Per account, troubleshooting e migrazione leggi la [guida Docker](docs/DOCKER.md).
 [OPERATIONS.md](docs/OPERATIONS.md) è il riferimento tecnico per operatori, in inglese.

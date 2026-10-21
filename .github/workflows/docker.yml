@@ -16,7 +16,7 @@ jobs:
       - name: Explicit agent, dashboard and AI budget security contracts
         run: |
           env -i PATH="$PATH" HOME="$RUNNER_TEMP" \
-            PI_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
+            P_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
             python -m unittest -v tests.agent.test_agent_sqlguard tests.agent.test_agent_fsbox \
               tests.agent.test_agent_gateway tests.agent.test_agent_owner \
               tests.dashboard.test_dashboard_api tests.core.test_secretary_budget \
@@ -24,9 +24,9 @@ jobs:
       - name: Full offline discovery (no deployment dotenv or inherited credentials)
         run: |
           env -i PATH="$PATH" HOME="$RUNNER_TEMP" \
-            PI_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
+            P_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
             python -m unittest discover -v
-      - run: sh -n pi-secretary
+      - run: sh -n p-secretary
       - run: node --check secretary/dashboard/static/app.js
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
@@ -63,6 +63,6 @@ jobs:
         run: |
           mkdir -p /tmp/pg-test-sock
           env -i PATH="$PATH" HOME="$RUNNER_TEMP" \
-            PI_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
-            PI_SECRETARY_TEST_DATABASE_URL="host=/tmp/pg-test-sock dbname=secretary_test user=secretary_test password=disposable-ci-only" \
+            P_SECRETARY_CONFIG_FILE=/dev/null DATA_DIR="$(mktemp -d)" \
+            P_SECRETARY_TEST_DATABASE_URL="host=/tmp/pg-test-sock dbname=secretary_test user=secretary_test password=disposable-ci-only" \
             python -m unittest discover -v

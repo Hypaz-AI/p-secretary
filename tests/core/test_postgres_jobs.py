@@ -1,6 +1,6 @@
 """Opt-in integration in a disposable schema on a dedicated TEST database.
 
-Never uses config.DATABASE_URL. Set PI_SECRETARY_TEST_DATABASE_URL explicitly;
+Never uses config.DATABASE_URL. Set P_SECRETARY_TEST_DATABASE_URL explicitly;
 the database name MUST end in _test. Only this test's UUID schema is removed.
 """
 import os
@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from secretary.core import jobs
 
-URL = os.environ.get('PI_SECRETARY_TEST_DATABASE_URL','')
+URL = os.environ.get('P_SECRETARY_TEST_DATABASE_URL','')
 
 
 def _database_name(url):

@@ -14,7 +14,7 @@ def section(title, steps=()):
 
 
 GUIDES = {
-    'welcome': ('Configurazione guidata · PI-SECRETARY', (
+    'welcome': ('Configurazione guidata · p-secretary', (
         'Segretario personale con un agente che legge i tuoi messaggi e documenti, ricerca, tiene attività e note. Fatture e ZIP sono funzionalità opzionali.',
         'Prepara un browser sul PC o telefono: i link ufficiali sono indicati in ogni sezione.',
         'Inserisci segreti solo nei prompt nascosti del terminale o sui siti ufficiali, mai in chat o nei log.',
@@ -95,7 +95,7 @@ GUIDES = {
     'dashboard': ('Dashboard · primo accesso dopo l’avvio', (
         'Il launcher verifica automaticamente il DB scelto; l’app parte solo con il successivo consenso esplicito.',
         'Dopo l’avvio apri http://127.0.0.1:8080 sul server; da remoto usa un tunnel SSH come descritto nel README, non pubblicare HTTP su Internet.',
-        'Docker: apri privatamente PI_SECRETARY_HOME/config/dashboard.json sull’host con un editor locale e leggi username/password generati al primo avvio, poi inseriscili nella pagina login.',
+        'Docker: apri privatamente P_SECRETARY_HOME/config/dashboard.json sull’host con un editor locale e leggi username/password generati al primo avvio, poi inseriscili nella pagina login.',
         'Non stampare né condividere il file. Verifica gli interruttori dei connettori: configurazione completata non significa servizio pronto o login ancora valido.',
         'Apri Permessi AI e concedi i consensi che vuoi (default: tutto negato). Poi scrivi al bot: l’agente risponde usando solo ciò che hai autorizzato. Le email partono solo con il tuo /invia.',
         'Consenso AI separato per email/Telegram/WhatsApp e testo/media: nessun consenso automatico nel wizard. Telegram comprende bot e account personale.')),

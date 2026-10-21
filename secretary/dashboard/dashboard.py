@@ -15,7 +15,7 @@ from waitress import create_server
 
 from secretary.core import config, dashboard_owner as owners, db, flows
 
-CREDENTIAL_FILE = Path.home() / '.config' / 'pi-secretary' / 'dashboard.json'
+CREDENTIAL_FILE = Path.home() / '.config' / 'p-secretary' / 'dashboard.json'
 
 # Finite server contracts. No module, table, path or SQL arrives from the browser.
 STATIC_ASSETS = ('app.js', 'charts.js', 'style.css', 'favicon.svg')
@@ -277,7 +277,7 @@ def create_app(auth=None):
     @app.before_request
     def guard():
         host = request.host.rsplit(':', 1)[0] if request.host.count(':') == 1 else request.host
-        if host not in {'127.0.0.1', 'localhost', '[::1]', config.get('DASHBOARD_HOSTNAME', 'pi-secretary.local'), config.get('DASHBOARD_BIND', '127.0.0.1')}:
+        if host not in {'127.0.0.1', 'localhost', '[::1]', config.get('DASHBOARD_HOSTNAME', 'p-secretary.local'), config.get('DASHBOARD_BIND', '127.0.0.1')}:
             return jsonify(error='Host not allowed'), 400
         if request.method != 'GET':
             if request.headers.get('Sec-Fetch-Site') == 'cross-site':

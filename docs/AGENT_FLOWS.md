@@ -322,7 +322,9 @@ dell'owner; il retry automatico vale solo per errori **prima** dell'I/O.
 - **Capabilities** (`secretary/core/capabilities.py`): fatture/ZIP disattivati per default.
 - **Privacy**: `privacy.erase_message` cancella il messaggio e i dati derivati (anche
   `agent_*` collegati) con ricevuta; l'erase nei backup resta a carico dell'operatore.
-- **Retention**: `pipeline.schedule` pota ogni giorno audit e journal dell'agente.
+- **Retention**: `workflows/retention.py` (passata giornaliera dal loop principale) pota la storia scaduta
+  con i suoi file, i job conclusi (solo il payload), l'outbox email terminale e il ledger AI; `pipeline.schedule`
+  pota ogni giorno l'audit delle policy e il journal dell'agente. Dettagli in [OPERATIONS.md](OPERATIONS.md#retention).
 
 ## 13. Esempio end-to-end
 

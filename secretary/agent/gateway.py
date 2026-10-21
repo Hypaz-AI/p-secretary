@@ -49,7 +49,7 @@ def _upstream(payload):
         UPSTREAM, data=json.dumps(payload).encode(), method='POST', headers={
             'Authorization': f'Bearer {config.OPENROUTER_API_KEY}',
             'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://pi-secretary.local', 'X-Title': 'Pi Secretary'})
+            'HTTP-Referer': 'https://p-secretary.local', 'X-Title': 'p-secretary'})
     try:
         with urllib.request.urlopen(request, timeout=config.AGENT_LLM_TIMEOUT) as response:
             return response.status, response.read()

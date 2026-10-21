@@ -114,7 +114,7 @@ class ProfileRecoveryTests(unittest.TestCase):
         def run(command, **kwargs):
             events.append(command)
             return SimpleNamespace(returncode=0)
-        with patch.dict(os.environ, {'PI_SECRETARY_HOME': str(home)}), \
+        with patch.dict(os.environ, {'P_SECRETARY_HOME': str(home)}), \
              patch.object(installer.subprocess, 'run', side_effect=run), \
              patch.object(recovery, 'repair_docker_singletons', side_effect=lambda root: events.append('repair')):
             self.assertEqual(installer.launch(SimpleNamespace(command='up')), 0)

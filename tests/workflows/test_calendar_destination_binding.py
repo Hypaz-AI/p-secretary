@@ -1,6 +1,6 @@
 """Sealed Calendar destination/time regressions; real SQL, no network/secrets.
 
-SQL requires PI_SECRETARY_TEST_DATABASE_URL naming an explicit *_test database,
+SQL requires P_SECRETARY_TEST_DATABASE_URL naming an explicit *_test database,
 without libpq services. Never starts PostgreSQL or uses DATABASE_URL. Pure
 contracts run without a database; all provider boundaries are intercepted.
 """
@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import uuid
 
 with tempfile.TemporaryDirectory(prefix='calendar-import-') as _bootstrap:
-    with patch.dict(os.environ, {'PI_SECRETARY_CONFIG_FILE': '/dev/null',
+    with patch.dict(os.environ, {'P_SECRETARY_CONFIG_FILE': '/dev/null',
                                 'DATA_DIR': _bootstrap, 'DATABASE_URL': ''}):
         from secretary.core import config, db, jobs
         from secretary.archive import message_store
@@ -43,9 +43,9 @@ class _CalendarPostgresFixture(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        url = os.environ.get('PI_SECRETARY_TEST_DATABASE_URL')
+        url = os.environ.get('P_SECRETARY_TEST_DATABASE_URL')
         if not url:
-            raise unittest.SkipTest('Set PI_SECRETARY_TEST_DATABASE_URL to opt in')
+            raise unittest.SkipTest('Set P_SECRETARY_TEST_DATABASE_URL to opt in')
         if db.psycopg is None:
             raise unittest.SkipTest('psycopg is not installed')
         params = validated_test_params(url)
@@ -352,7 +352,7 @@ class CalendarTargetOfflineTests(unittest.TestCase):
         self.assertFalse(any('UPDATE appointments' in call.args[0] for call in self.conn.execute.call_args_list))
 
     def test_sql_requires_explicit_opt_in_even_with_configured_database(self):
-        with patch.dict(os.environ, {'PI_SECRETARY_TEST_DATABASE_URL': '',
+        with patch.dict(os.environ, {'P_SECRETARY_TEST_DATABASE_URL': '',
                                     'DATABASE_URL': 'postgresql://forbidden/production',
                                     'PGDATABASE': 'production', 'PGSERVICE': 'deployment'}):
             with self.assertRaises(unittest.SkipTest):
@@ -395,7 +395,7 @@ class CalendarTargetOfflineTests(unittest.TestCase):
                 autocommit=True, connect_timeout=5, prepare_threshold=None))
             self.assertFalse(any(key.startswith('PG') for key in os.environ))
             return conn
-        with patch.dict(os.environ, {'PI_SECRETARY_TEST_DATABASE_URL': 'host=/unused dbname=calendar_test',
+        with patch.dict(os.environ, {'P_SECRETARY_TEST_DATABASE_URL': 'host=/unused dbname=calendar_test',
                                     'PGSERVICE': 'deployment', 'PGDATABASE': 'production',
                                     'PGHOSTADDR': '192.0.2.1', 'PGOPTIONS': '-c search_path=public'}), \
              patch.object(db.psycopg, 'connect', side_effect=connect) as connection:

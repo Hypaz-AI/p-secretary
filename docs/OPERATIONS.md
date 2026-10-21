@@ -38,8 +38,8 @@ step grants consents or infers delegations.
 - The runtime binary is **baked into the Docker image** (`COPILOT_CLI_EXTRACT_DIR=/opt/copilot-runtime`,
   `COPILOT_SKIP_CLI_DOWNLOAD=1`) because the container's cache directory is a tmpfs; nothing is
   downloaded at start. Its version is fixed by the pinned `github-copilot-sdk` (arm64 and amd64
-  builds exist; the Raspberry Pi 4 needs the arm64 one, so build the image **on the Pi** or with
-  an arm64 builder).
+  builds exist; the runtime must match the host architecture (arm64 on a Raspberry Pi 4), so build the image **on the target host** or with
+  a multi-arch builder).
 
 ### Read-only database role
 
@@ -133,10 +133,10 @@ directory and no inherited credentials, plus `sh -n`, `node --check` and an imag
 a PostgreSQL job that repeats discovery against a disposable service with an explicit
 `secretary_test` database and Unix-socket URL. Neither job starts `python -m secretary` or touches
 production, and the real-runtime scenarios are skipped there unless
-`PI_SECRETARY_TEST_AGENT_RUNTIME` points to a runtime binary. These are workflow definitions,
+`P_SECRETARY_TEST_AGENT_RUNTIME` points to a runtime binary. These are workflow definitions,
 not a claim of a green CI run.
 
-Opt-in SQL classes need `PI_SECRETARY_TEST_DATABASE_URL` naming a disposable `_test` database
+Opt-in SQL classes need `P_SECRETARY_TEST_DATABASE_URL` naming a disposable `_test` database
 (no libpq service, random schemas, never `DATABASE_URL`); some need a Unix socket. Some
 `*PostgresTests` classes bootstrap their own temporary cluster even without the URL: run them
 by explicit class. Never point the test URL at a production cluster. See `AGENTS.md` for the
@@ -146,7 +146,7 @@ Frontend: `tests/dashboard/test_web_session_safety.py` runs the real `charts.js`
 a synthetic DOM (no browser): session fencing, confirmations, budget levels, configuration lifecycle and the
 overview. The fake DOM rejects `append(false/null)`, which a real browser would render as text. To look at the
 interface with fictitious data, create a disposable database whose name ends in `_demo` and run
-`PI_SECRETARY_DEMO_DATABASE_URL="host=... dbname=secretary_demo user=... password=..." python -m tests.demo_dashboard`
+`P_SECRETARY_DEMO_DATABASE_URL="host=... dbname=secretary_demo user=... password=..." python -m tests.demo_dashboard`
 (login `demo` / `demo`, port 8099). The runner refuses any other database name, uses placeholder tokens and
 never touches the network.
 
@@ -187,10 +187,8 @@ I/O. `jobs.assert_current` rechecks the lease before every effect. Use `POST /ap
 blocks. **Do not reset job rows with bulk SQL**: a reset renews no authorization and does not
 make an attempted/uncertain send safe; review native authority, leases and effect receipts first.
 
-No automatic deletion of jobs, messages or deduplication identities happens, except one daily
-retention pass that prunes the policy audit (`EFFECT_AUDIT_RETENTION_DAYS`, receipts are kept) and
-the agent run audit (`agent_runs` and their tool calls, 30 days). Plan storage capacity; any retention must archive source files and referenced
-rows together.
+Retention (see the section below) is the only automatic deletion: one daily pass prunes expired history, its files and
+operational data. Job rows and deduplication identities are never deleted. Plan storage capacity accordingly.
 
 Notifications, owner replies, ZIP sends and outgoing email commit an attempt **before** remote
 I/O. Attempted/uncertain non-idempotent effects stop for reconciliation: retries never blindly
@@ -271,10 +269,10 @@ platform-specific versions into a reviewed lock artifact (the repository pins ra
 exact `github-copilot-sdk`). **Download the agent runtime once**, as the service user:
 `COPILOT_CLI_EXTRACT_DIR=/opt/copilot-runtime python -m copilot download-runtime`, and run the
 service with `COPILOT_CLI_EXTRACT_DIR` set to the same directory and `COPILOT_SKIP_CLI_DOWNLOAD=1`.
-The runtime must be an arm64 build on a Raspberry Pi. WhatsApp requires Node + Chromium and
-`npm ci` using the reviewed `deploy/whatsapp/package-lock.json`; do not download x86 Chromium on ARM.
+The runtime must match the host architecture (arm64 on a Raspberry Pi 4). WhatsApp requires Node + Chromium and
+`npm ci` using the reviewed `deploy/whatsapp/package-lock.json`; do not mix architectures (x86 Chromium on an arm64 host, or vice versa).
 
-`deploy/systemd/pi-secretary.service` is a template; adjust user/paths before installing. Keep secrets
+`deploy/systemd/p-secretary.service` is a template; adjust user/paths before installing. Keep secrets
 and session files private (0700 directories, 0600 files). Do not expose the HTTP dashboard on the
 Internet: bind loopback:8080, terminate HTTPS with Caddy/nginx using a valid certificate, set
 `DASHBOARD_COOKIE_SECURE=true` and `DASHBOARD_HOSTNAME` to the public hostname, and configure
@@ -302,6 +300,39 @@ history conversion and `db.init` rejects resets. Back up and test the migration 
    repair or reconciliation is attempted and no rows are rewritten; `stored` and `media_missing`
    in the views tell which ones they are, so the agent says so instead of inventing content.
 
+## Retention
+
+One daily pass (`secretary/workflows/retention.py`, started by the main loop). If a backlog remains, the
+next periodic tick resumes the same day. Each batch is one transaction; files are removed only **after**
+the commit. Settings: `RETENTION_MESSAGES_DAYS` (default 730), `RETENTION_OPERATIONAL_DAYS` (90),
+`RETENTION_AI_USAGE_DAYS` (365); `0` disables a class, out-of-range values fall back to the default.
+
+| Class | Clock | Removed | Always kept |
+| --- | --- | --- | --- |
+| Messages | `acquired_at` (archive time, not message date) | Native rows of email/WhatsApp/Telegram, attachment rows, analysis, knowledge text/entries, owner dialogue rows | Anything still in use: task source/origin, task changes, notes, receipts `authorized`/`attempted`/`uncertain`, pending/running/blocked jobs, undecided or unsent email drafts, live Calendar grants, unexpired digest sources |
+| Files | Follow their rows | `email_attachments`, `tg_files`, `wa_media` files no longer referenced by any row, plus `email_attachments` orphans | Invoices, workspace, ZIPs, WhatsApp/Telegram spools and sessions are never swept. A file must be older than 30 days (modification time; deduplication reuse refreshes it) |
+| Finished jobs | `finished_at` | The `payload` of `done` jobs | The job row and its key: keys are deduplication identities (`analysis:<id>`, `task-reminder:<id>`, `digest:<day>`). Failed jobs stay for review |
+| Email outbox | `sent_at`/`decided_at` | `sent` and `rejected` drafts | `proposed`, `approved`, `uncertain`; effect receipts |
+| AI ledger | `usage_day` (UTC) | `completed` usage | `reserved` and `uncertain` entries |
+
+File references are matched by relative key (`email_attachments/<sha256>`, `tg_files/<name>`), not by absolute
+path, so a database migrated from another host still protects its files. A file is never removed while any row
+references that key.
+
+Never deleted by retention: `message_dedup`, `email_seen`, `effect_receipts`, `privacy_receipts`, notes, tasks,
+appointments, rules, invoices, monthly ZIP records, Calendar grants.
+
+Operational notes:
+
+- Take a database and data-folder backup before the first pass after lowering a window: removal is irreversible.
+- While `secretary_links` or `secretary_runtime_link_proposals` exist (legacy schema), message pruning is skipped and
+  logged as `saltato=legacy_tables`. Drop them with `deploy/sql/drop_legacy_tables.sql` after a backup.
+- A pruned message cannot be re-ingested by the connectors: its deduplication identity remains. Do not re-run a
+  historical import over a period that was already pruned, because it would archive those messages again.
+- Owner-requested erasure (`privacy.erase_message`) stays the explicit path with receipts; retention writes no receipt per message.
+- Backups are not pruned by this pass. Their retention remains an operator decision (see the drill below).
+- Logs contain only counters (`[retention] messages=… files=…`), never message content or paths.
+
 ## Backup and restore drill
 
 1. Stop ingestion/sends in a maintenance window; wait for workers to stop.
@@ -326,7 +357,7 @@ This is a drill procedure, not a record of a completed full restore or productio
 readiness. Record actual restore evidence and semantic checks separately.
 
 Validation targets: isolated unittest discovery, compileall and diagnostics.
-Opt-in PostgreSQL classes require PI_SECRETARY_TEST_DATABASE_URL naming a
+Opt-in PostgreSQL classes require P_SECRETARY_TEST_DATABASE_URL naming a
 disposable `_test` database and random test schemas, never DATABASE_URL fallback.
 Some existing auto-PG classes instead create their own temporary local clusters;
 absence of a test URL does not mean all SQL tests skip. Current full-validation

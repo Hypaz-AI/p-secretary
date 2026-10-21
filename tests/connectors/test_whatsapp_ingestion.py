@@ -272,6 +272,8 @@ const ok = {data, mimetype:'application/pdf', filename:'fattura.pdf'};
  // Errore di rete, contenuto vuoto, disco pieno: ognuno con il proprio motivo.
  await events.message_create(message('boom', () => {throw Error('private media URL');}));
  if (read('boom').media_error !== 'download_failed') throw Error('download error not tracked');
+ if (!emitted.some(e => e.type === 'media_error' && e.reason === 'download_failed' && e.cause === 'other'))
+   throw Error('media cause not emitted');
  await events.message_create(message('empty', () => ({data:'=', mimetype:'x', filename:'e'})));  // base64 senza byte
  if (read('empty').media_error !== 'empty') throw Error('empty not tracked');
  await events.message_create(message('blank', () => ({data:'', mimetype:'x', filename:'e'})));

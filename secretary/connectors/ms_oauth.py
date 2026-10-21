@@ -4,7 +4,7 @@ Microsoft ha disattivato l'autenticazione "basic" (indirizzo + password) su
 IMAP e SMTP: serve il meccanismo SASL XOAUTH2 con un token OAuth2.
 
 Questo modulo implementa:
-  - il flusso "device code" (ideale sul Raspberry: non serve un browser
+  - il flusso "device code" (ideale su host senza browser: non serve un browser
     locale, basta uno smartphone o un PC qualsiasi per il login);
   - il refresh automatico dei token in scadenza.
 

@@ -1,5 +1,5 @@
 'use strict';
-// Pi Secretary · dashboard. JavaScript senza dipendenze né build: ogni testo passa da textContent o da nodi DOM
+// p-secretary · dashboard. JavaScript senza dipendenze né build: ogni testo passa da textContent o da nodi DOM
 // (mai da markup), così nessun contenuto dell'archivio può diventare codice. I grafici sono in charts.js.
 let csrf = '';
 let sessionGeneration = 0;
@@ -296,7 +296,7 @@ const fieldNames = {AGENT_NAME: 'Nome assistente', OPENROUTER_API_KEY: 'Chiave A
   OPENROUTER_AUDIO_MODEL: 'Modello per l’audio', TELEGRAM_USER_DIALOG_LIMIT: 'Conversazioni lette per ciclo', TELEGRAM_USER_MESSAGE_LIMIT: 'Messaggi letti per conversazione', TELEGRAM_USER_RECOVERY_INTERVAL: 'Intervallo di recupero (secondi)', TELEGRAM_EXCLUDED_CHATS: 'Chat Telegram escluse (ID)', WHATSAPP_EXCLUDED_CHATS: 'Chat WhatsApp escluse (ID)',
   SECRETARY_MODE: 'Modalità del segretario', EFFECT_AUDIT_RETENTION_DAYS: 'Conservazione audit degli effetti (giorni)', DASHBOARD_BIND: 'Indirizzo di ascolto', DASHBOARD_COOKIE_SECURE: 'Cookie solo HTTPS',
   DASHBOARD_CREDENTIAL_FILE: 'File credenziali dashboard', DASHBOARD_HOSTNAME: 'Nome host', DASHBOARD_PORT: 'Porta', DATA_DIR: 'Cartella dati', GCAL_SERVICE_ACCOUNT_FILE: 'File service account', INVOICE_DIR: 'Cartella fatture',
-  PI_SECRETARY_CONFIG_FILE: 'File di configurazione', TELEGRAM_USER_SESSION: 'Sessione Telegram personale', WA_CHROMIUM_PATH: 'Percorso di Chromium'};
+  P_SECRETARY_CONFIG_FILE: 'File di configurazione', TELEGRAM_USER_SESSION: 'Sessione Telegram personale', WA_CHROMIUM_PATH: 'Percorso di Chromium'};
 const suffixNames = {NAME: 'Nome', PROVIDER: 'Provider', ADDRESS: 'Indirizzo email', PASSWORD: 'Password per app', AUTH: 'Metodo di accesso', CLIENT_ID: 'ID applicazione OAuth', IMAP_HOST: 'Server posta in arrivo', IMAP_PORT: 'Porta IMAP', SMTP_HOST: 'Server posta in uscita', SMTP_PORT: 'Porta SMTP', VAT: 'Partita IVA', DESC: 'Descrizione'};
 const fieldLabel = key => fieldNames[key] || suffixNames[key.replace(/^(EMAIL\d+|INVOICE_ENTITY\d+)_/, '')] || key.toLowerCase().replaceAll('_', ' ');
 let configRevision = '';
@@ -320,11 +320,11 @@ function terminalCommand(title, command) {
   return h('div', {class: 'terminal'}, h('h4', {text: title}), pre, h('div', {class: 'actions'}, copy, status));
 }
 function setupTools(group) {
-  const body = h('div', {}, h('p', {class: 'muted', text: 'Apri il terminale del server nella cartella che contiene pi-secretary. Questi comandi non contengono credenziali e non vengono eseguiti dal browser.'}),
-    terminalCommand('Riconfigura o collega un servizio', 'sh ./pi-secretary configure'),
+  const body = h('div', {}, h('p', {class: 'muted', text: 'Apri il terminale del server nella cartella che contiene p-secretary. Questi comandi non contengono credenziali e non vengono eseguiti dal browser.'}),
+    terminalCommand('Riconfigura o collega un servizio', 'sh ./p-secretary configure'),
     h('p', {class: 'muted', text: 'Conferma la pausa dell’app e scegli la sezione desiderata. Per Telegram e WhatsApp scegli i setup opzionali; per Microsoft scegli la sezione email.'}),
-    terminalCommand('Applica la configurazione e avvia l’app', 'sh ./pi-secretary up'),
-    terminalCommand('Controlla lo stato dei container', 'sh ./pi-secretary status'));
+    terminalCommand('Applica la configurazione e avvia l’app', 'sh ./p-secretary up'),
+    terminalCommand('Controlla lo stato dei container', 'sh ./p-secretary status'));
   body.hidden = true;
   const toggle = h('button', {type: 'button', class: 'tools-toggle', 'aria-expanded': 'false'}, icon('chevron'), 'Operazioni da terminale · Docker');
   toggle.onclick = () => {

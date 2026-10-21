@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 os.umask(0o077)
-home = Path(os.environ.get('HOME') or '/var/lib/pi-secretary/home')
+home = Path(os.environ.get('HOME') or '/var/lib/p-secretary/home')
 try:
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     if home.stat().st_uid != os.getuid() or not os.access(home, os.W_OK | os.X_OK):

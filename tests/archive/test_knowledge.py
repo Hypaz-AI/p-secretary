@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 with tempfile.TemporaryDirectory(prefix='knowledge-import-') as _bootstrap:
-    with patch.dict(os.environ, {'PI_SECRETARY_CONFIG_FILE': '/dev/null',
+    with patch.dict(os.environ, {'P_SECRETARY_CONFIG_FILE': '/dev/null',
                                 'DATA_DIR': _bootstrap, 'DATABASE_URL': ''}):
         from secretary.archive import knowledge as k
 

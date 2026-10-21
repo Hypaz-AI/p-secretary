@@ -5,7 +5,7 @@ chiede (decisione esplicita). Restano solo i limiti di sicurezza:
 
 * la query è testo del modello, non dati interi: massimo 200 caratteri e
   nessun URL né indirizzo email, così non si può usare per esfiltrare;
-* nessun `web_fetch`: l'agente non può chiedere pagine arbitrarie (il Raspberry
+* nessun `web_fetch`: l'agente non può chiedere pagine arbitrarie (l'host
   vede la LAN), riceve solo estratti e fonti dal motore di ricerca;
 * ogni ricerca è registrata nell'audit (agent_tool_calls) con la query.
 """
@@ -33,7 +33,7 @@ def _post(payload):
     request = urllib.request.Request(
         URL, data=json.dumps(payload).encode(), method='POST', headers={
             'Authorization': f'Bearer {config.OPENROUTER_API_KEY}', 'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://pi-secretary.local', 'X-Title': 'Pi Secretary'})
+            'HTTP-Referer': 'https://p-secretary.local', 'X-Title': 'p-secretary'})
     try:
         with urllib.request.urlopen(request, timeout=config.AGENT_LLM_TIMEOUT) as response:
             return json.loads(response.read().decode())

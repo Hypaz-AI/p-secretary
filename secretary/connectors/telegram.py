@@ -113,7 +113,7 @@ def send_document(path, caption: str = "") -> bool:
         return False
     try:
         import uuid
-        boundary = f"----pi-secretary-{uuid.uuid4().hex}"
+        boundary = f"----p-secretary-{uuid.uuid4().hex}"
         mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
         parts = []
         parts.append(

@@ -12,7 +12,7 @@ from tests.support import REPO_ROOT
 class ConfigPortabilityTests(unittest.TestCase):
     def run_code(self, code, extra=None):
         with tempfile.TemporaryDirectory() as tmp:
-            env = {'PATH': os.environ.get('PATH', ''), 'PI_SECRETARY_CONFIG_FILE': tmp + '/config.env',
+            env = {'PATH': os.environ.get('PATH', ''), 'P_SECRETARY_CONFIG_FILE': tmp + '/config.env',
                    'DATA_DIR': tmp + '/data', 'HOME': tmp}
             env.update(extra or {})
             result = subprocess.run([sys.executable, '-c', code], cwd=REPO_ROOT,

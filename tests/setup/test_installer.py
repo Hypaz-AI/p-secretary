@@ -70,11 +70,11 @@ class InstallerTests(unittest.TestCase):
                 prompt.assert_not_called()
 
     def test_launcher_exports_actual_identity_without_build(self):
-        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'PI_SECRETARY_HOME': temp}), \
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'P_SECRETARY_HOME': temp}), \
                 patch('secretary.setup.installer.subprocess.run') as run:
             installer.launch(SimpleNamespace(command='status'))
-            self.assertEqual(os.environ['PI_SECRETARY_UID'], str(os.getuid()))
-            self.assertEqual(os.environ['PI_SECRETARY_GID'], str(os.getgid()))
+            self.assertEqual(os.environ['P_SECRETARY_UID'], str(os.getuid()))
+            self.assertEqual(os.environ['P_SECRETARY_GID'], str(os.getgid()))
             self.assertFalse(any('build' in call.args[0] for call in run.call_args_list))
 
     def test_entrypoint_creates_home_for_current_identity(self):
@@ -215,8 +215,8 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('127.0.0.1:8080:8080', compose)
         self.assertNotIn('5432:5432', compose)
         self.assertNotIn('latest', compose)
-        self.assertIn('${PI_SECRETARY_UID:-1000}:${PI_SECRETARY_GID:-1000}', compose)
-        self.assertIn('/tmp:uid=${PI_SECRETARY_UID:-1000},gid=${PI_SECRETARY_GID:-1000}', compose)
+        self.assertIn('${P_SECRETARY_UID:-1000}:${P_SECRETARY_GID:-1000}', compose)
+        self.assertIn('/tmp:uid=${P_SECRETARY_UID:-1000},gid=${P_SECRETARY_GID:-1000}', compose)
 
 
 if __name__ == '__main__':

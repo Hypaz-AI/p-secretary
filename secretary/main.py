@@ -1,4 +1,4 @@
-"""PI-SECRETARY — segretario virtuale sempre attivo sul Raspberry.
+"""p-secretary — segretario virtuale sempre attivo, containerizzato.
 
 Il lavoro intelligente lo fa UN agente (Copilot SDK, LLM via OpenRouter) con
 strumenti tipizzati; qui restano solo il cablaggio e la raccolta dei dati:
@@ -249,7 +249,7 @@ def main():
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
     print("=" * 60)
-    print("  PI-SECRETARY — segretario virtuale (agentico)")
+    print("  p-secretary — segretario virtuale (agentico)")
     print(f"  Modello AI : {config.AGENT_MODEL} (OpenRouter, via Copilot SDK)")
     print(f"  Email      : {len(config.EMAIL_ACCOUNTS)} account")
     for acc in config.EMAIL_ACCOUNTS:
@@ -287,7 +287,7 @@ def main():
     state = actions.load_state()
     from secretary.core import jobs
     from secretary.archive import knowledge
-    from secretary.workflows import pipeline
+    from secretary.workflows import pipeline, retention
     from secretary.connectors import media_archive
     state['telegram_offset'] = jobs.cursor('telegram_bot_offset', state.get('telegram_offset', 0))
     flows.init()
@@ -335,6 +335,7 @@ def main():
                         launch('email', lambda: flows.run('email', lambda: check_emails(state)))
                     launch('digest', lambda: digest.maybe_send_digest(dict(state)))
                     launch('schedule', pipeline.schedule)
+                    launch('retention', retention.run_scheduled)
                     flows.mark('gcal', gcal.readiness() if flows.enabled('gcal') else 'paused')
             except Exception as exc:
                 print(f'[main] cycle failed ({type(exc).__name__})')

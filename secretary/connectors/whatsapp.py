@@ -43,7 +43,7 @@ if (MEDIA_DIR) fs.mkdirSync(MEDIA_DIR, { recursive: true });
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: process.env.WA_SESSION_DIR }),
   puppeteer: {
-    // Su Raspberry/ARM Chrome for Testing non esiste: usa Chromium di sistema
+    // Su ARM64 Chrome for Testing non esiste: usa Chromium di sistema
     executablePath: process.env.WA_CHROMIUM_PATH || undefined,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   },
@@ -99,18 +99,30 @@ function cutoff() {
 const MEDIA_ATTEMPTS = 3;
 const MEDIA_ENTRY_RETRIES = 6;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Causa diagnostica: solo codici noti, mai il testo dell'errore (può contenere URL o ID).
+function mediaCause(error) {
+  if (error && error.name === 'TypeError') return 'unexpected_state';
+  const text = String((error && (error.message || error.name)) || '').toLowerCase();
+  if (/decrypt|hmac|mediakey|media key/.test(text)) return 'decrypt_failed';
+  if (/\b(403|404|410)\b|expired|not found|direct ?path/.test(text)) return 'media_expired';
+  if (/timeout|timed out/.test(text)) return 'timeout';
+  if (/target closed|session closed|execution context|protocol error/.test(text)) return 'browser_unavailable';
+  if (/cannot read|undefined|is not a function/.test(text)) return 'unexpected_state';
+  return 'other';
+}
 async function fetchMedia(msg) {
-  let reason = 'download_failed';
+  let reason = 'download_failed', cause = 'none';
   for (let attempt = 0; attempt < MEDIA_ATTEMPTS; attempt++) {
     if (attempt) await sleep(1500 * attempt);
     try {
       const media = await msg.downloadMedia();
       if (media && media.data) return media;
-      reason = 'unavailable';
-    } catch (e) {reason = 'download_failed';}
+      reason = 'unavailable'; cause = 'no_data';
+    } catch (e) {reason = 'download_failed'; cause = mediaCause(e);}
   }
   const error = new Error(reason);
   error.reason = reason;
+  error.cause = cause;
   throw error;
 }
 function mediaFailure(entry, reason) {
@@ -182,6 +194,9 @@ async function archive(msg, recovered_cached=false) {
         entry.media_error = false;
       } catch(e) {
         mediaFailure(entry, e.reason || 'download_failed');
+        // Evento diagnostico: solo motivo, causa e tipo in codici noti; mai testo o ID.
+        if (!HISTORY_IMPORT) console.log(JSON.stringify({type:'media_error', reason:e.reason || 'download_failed',
+          cause:e.cause || 'unknown', media_type:typeof entry.media_type === 'string' ? entry.media_type : null}));
         if(HISTORY_IMPORT) throw e;
       }
     }
@@ -321,6 +336,8 @@ rl.on('line', async (line) => {
 
 
 MEDIA_ERRORS = frozenset(('download_failed', 'unavailable', 'empty', 'write_failed', 'storage_unavailable'))
+MEDIA_CAUSES = frozenset(('none', 'no_data', 'decrypt_failed', 'media_expired', 'timeout',
+                          'browser_unavailable', 'unexpected_state', 'other', 'unknown'))
 
 
 def media_metadata(entry):
@@ -347,7 +364,7 @@ def bridge_path():
   import os
   import hashlib
   from secretary.connectors.storage import FileLock, atomic_write
-  cache = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'pi-secretary'
+  cache = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'p-secretary'
   target = cache / ('wa_bridge-' + hashlib.sha256(NODE_BRIDGE.encode()).hexdigest()[:16] + '.js')
   with FileLock(str(target) + '.lock'):
     if not target.exists():
@@ -731,6 +748,13 @@ class WhatsAppBridge:
                         "text": event.get("text", ""),
                         "attachments": event.get("attachments", []),
                     })
+            elif etype == 'media_error':
+                # Solo codici noti: il testo dell'errore non entra mai nei log.
+                media_type = event.get('media_type')
+                media_type = media_type if (isinstance(media_type, str) and media_type.isascii()
+                    and media_type.replace('_', '').isalpha() and len(media_type) <= 40) else 'unknown'
+                cause = event.get('cause') if event.get('cause') in MEDIA_CAUSES else 'unknown'
+                print(f"[whatsapp] media non salvato: motivo={event.get('reason')} causa={cause} tipo={media_type}")
             elif etype == 'disconnected':
                 self.ready = False
 

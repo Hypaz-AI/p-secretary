@@ -1,9 +1,9 @@
 """Read-only history consent contracts; no production config, providers or I/O.
 
 Unit tests exercise real policy/provenance against a strict SQL double. Optional
-PostgreSQL tests use only an explicit PI_SECRETARY_TEST_DATABASE_URL naming a
+PostgreSQL tests use only an explicit P_SECRETARY_TEST_DATABASE_URL naming a
 Unix-socket *_test database, with a fresh private schema and no public fallback.
-Run with PI_SECRETARY_CONFIG_FILE=/dev/null and a temporary DATA_DIR.
+Run with P_SECRETARY_CONFIG_FILE=/dev/null and a temporary DATA_DIR.
 """
 from datetime import datetime, timezone
 import json
@@ -234,9 +234,9 @@ class HistoryContextPolicyTests(unittest.TestCase):
 class HistoryContextPostgresTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.url = os.environ.get('PI_SECRETARY_TEST_DATABASE_URL')
+        cls.url = os.environ.get('P_SECRETARY_TEST_DATABASE_URL')
         if not cls.url:
-            raise unittest.SkipTest('Set PI_SECRETARY_TEST_DATABASE_URL to opt in')
+            raise unittest.SkipTest('Set P_SECRETARY_TEST_DATABASE_URL to opt in')
         try:
             import psycopg
             from psycopg.conninfo import conninfo_to_dict

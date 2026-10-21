@@ -107,7 +107,7 @@ class WizardFixTests(unittest.TestCase):
 
     def test_launcher_selected_db_automatic_app_still_opt_in(self):
         for hostname in ('db', 'external.invalid'):
-            with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'PI_SECRETARY_HOME': temp}):
+            with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'P_SECRETARY_HOME': temp}):
                 directory = Path(temp) / 'config'
                 directory.mkdir()
                 installer.private_write(directory / 'secretary.env', 'DATABASE_URL=' + json.dumps(f'postgresql://u:p@{hostname}/db') + '\n')

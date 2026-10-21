@@ -36,10 +36,10 @@ def restart_requested():
 
 
 def automatic_restart():
-    return os.environ.get('PI_SECRETARY_CONTAINER') == '1'
+    return os.environ.get('P_SECRETARY_CONTAINER') == '1'
 
 DEPLOYMENT = {
-    'PI_SECRETARY_CONFIG_FILE', 'DATA_DIR', 'INVOICE_DIR', 'TELEGRAM_USER_SESSION',
+    'P_SECRETARY_CONFIG_FILE', 'DATA_DIR', 'INVOICE_DIR', 'TELEGRAM_USER_SESSION',
     'DASHBOARD_CREDENTIAL_FILE', 'DASHBOARD_BIND', 'DASHBOARD_PORT',
     'DASHBOARD_HOSTNAME', 'DASHBOARD_COOKIE_SECURE', 'WA_CHROMIUM_PATH',
     'GCAL_SERVICE_ACCOUNT_FILE',
@@ -109,11 +109,11 @@ def field_metadata(key):
         'POLL_INTERVAL': 'Secondi tra i controlli email; 300 corrisponde a 5 minuti.',
         'INVOICE_DIR': 'Cartella fatture: <entità>/<aaaa-mm>/<nome>.pdf; vuoto usa il percorso predefinito.',
         'DATA_DIR': 'Cartella dati persistenti per appuntamenti e note; vuoto usa il percorso predefinito.',
-        'PI_SECRETARY_CONFIG_FILE': 'Percorso del file di configurazione privato scelto dal deployment.',
+        'P_SECRETARY_CONFIG_FILE': 'Percorso del file di configurazione privato scelto dal deployment.',
         'DASHBOARD_CREDENTIAL_FILE': 'File privato delle credenziali dashboard; non contiene la password Linux.',
         'DASHBOARD_BIND': 'Indirizzo di ascolto; 0.0.0.0 espone sulla rete. HTTP solo su reti fidate.',
         'DASHBOARD_PORT': 'Porta HTTP dashboard; le porte privilegiate richiedono configurazione esterna.',
-        'DASHBOARD_HOSTNAME': 'Nome host della dashboard, ad esempio pi-secretary.local.',
+        'DASHBOARD_HOSTNAME': 'Nome host della dashboard, ad esempio p-secretary.local.',
         'DASHBOARD_COOKIE_SECURE': 'true solo con accesso HTTPS; false per HTTP locale.',
         'WA_CHROMIUM_PATH': 'Percorso del Chromium di sistema usato dal ponte WhatsApp.',
     }

@@ -391,7 +391,7 @@ class DashboardApiTests(unittest.TestCase):
             self.assertNotIn(removed, image)
         workflow = (root / '.github/workflows/docker.yml').read_text()
         self.assertIn('python -m unittest discover -v', workflow)
-        self.assertIn('PI_SECRETARY_CONFIG_FILE=/dev/null', workflow)
+        self.assertIn('P_SECRETARY_CONFIG_FILE=/dev/null', workflow)
         self.assertIn('POSTGRES_DB: secretary_test', workflow)
         self.assertNotIn('${{ secrets.', workflow)
 
@@ -403,7 +403,7 @@ class DashboardPostgresTests(unittest.TestCase):
     def setUpClass(cls):
         from tests.agent import test_agent_postgres
         if not test_agent_postgres.URL:
-            raise unittest.SkipTest('Set PI_SECRETARY_TEST_DATABASE_URL to opt in')
+            raise unittest.SkipTest('Set P_SECRETARY_TEST_DATABASE_URL to opt in')
 
     def test_real_consent_insert_update_stale_no_implicit_grant(self):
         from tests.agent import test_agent_postgres as helper

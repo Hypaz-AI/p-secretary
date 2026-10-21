@@ -1,6 +1,6 @@
 """Integrazione su PostgreSQL di test (mai produzione): viste, consensi, query, journal.
 
-Opt-in: PI_SECRETARY_TEST_DATABASE_URL con dbname che finisce in _test.
+Opt-in: P_SECRETARY_TEST_DATABASE_URL con dbname che finisce in _test.
 """
 import json
 import os
@@ -15,10 +15,10 @@ from unittest.mock import patch
 from secretary.core import config, db, jobs
 from secretary.agent import data, fsbox, journal, schema as agent_schema, sqlguard
 
-URL = os.environ.get('PI_SECRETARY_TEST_DATABASE_URL', '')
+URL = os.environ.get('P_SECRETARY_TEST_DATABASE_URL', '')
 
 
-@unittest.skipUnless(URL, 'Set PI_SECRETARY_TEST_DATABASE_URL to opt in')
+@unittest.skipUnless(URL, 'Set P_SECRETARY_TEST_DATABASE_URL to opt in')
 class AgentPostgresCase(unittest.TestCase):
     """Schema isolato per test; db.init() reale; nessuna rete."""
 
@@ -240,7 +240,7 @@ class QueryAndReadTests(AgentPostgresCase):
                     conn.execute('INSERT INTO notes(text) VALUES (%s)', ('x',))
 
     def test_read_message_returns_full_text_with_paging_and_attachments(self):
-        att = self.attachment(self.mid, path='/var/lib/pi-secretary/email_attachments/aaa')
+        att = self.attachment(self.mid, path='/var/lib/p-secretary/email_attachments/aaa')
         result = data.read_message(self.mid, max_chars=200)
         self.assertEqual(result['subject'], 'Fattura ottobre')
         self.assertTrue(result['truncated'])
@@ -406,7 +406,7 @@ class ReadonlyRoleIntegrationTests(AgentPostgresCase):
         self.assertEqual(data.readonly_role(), config.AGENT_DB_ROLE)
 
 
-@unittest.skipUnless(URL, 'Set PI_SECRETARY_TEST_DATABASE_URL to opt in')
+@unittest.skipUnless(URL, 'Set P_SECRETARY_TEST_DATABASE_URL to opt in')
 class ReadonlyRoleProvisioningTests(unittest.TestCase):
     """Chi può creare il ruolo lo crea; chi non può lo segnala senza rompere l'avvio.
 

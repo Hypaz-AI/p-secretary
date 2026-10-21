@@ -23,7 +23,7 @@ class LauncherRegression(unittest.TestCase):
             self.assertFalse(installer.valid_preference(key, bad))
 
     def test_external_selection_reloaded_after_wizard(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'PI_SECRETARY_HOME': tmp}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'P_SECRETARY_HOME': tmp}):
             def execute(cmd, **kwargs):
                 if '_wizard' in cmd:
                     (Path(tmp) / 'config/progress.json').write_text(json.dumps({'database': 'external', 'complete': True}))
@@ -34,7 +34,7 @@ class LauncherRegression(unittest.TestCase):
             self.assertIn(str(installer.ROOT / 'compose.external.yaml'), probe)
 
     def test_missing_key_prevents_database_start(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'PI_SECRETARY_HOME': tmp}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'P_SECRETARY_HOME': tmp}):
             directory = Path(tmp) / 'config'
             directory.mkdir()
             (directory / 'progress.json').write_text('{"complete":true}')
