@@ -18,7 +18,7 @@ from secretary.core import config, dashboard_owner as owners, db, flows
 CREDENTIAL_FILE = Path.home() / '.config' / 'p-secretary' / 'dashboard.json'
 
 # Finite server contracts. No module, table, path or SQL arrives from the browser.
-STATIC_ASSETS = ('app.js', 'charts.js', 'style.css', 'favicon.svg')
+STATIC_ASSETS = ('app.js', 'charts.js', 'style.css', 'logo.webp')
 TREND_DAYS = 14
 DATA_CHANNELS = ('email', 'telegram', 'whatsapp')
 DATA_EFFECTS = ('ai_text', 'ai_media', 'ai_history')

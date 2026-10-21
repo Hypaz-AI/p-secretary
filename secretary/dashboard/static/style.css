@@ -75,8 +75,8 @@ svg { flex: none; }
 .brand { display: flex; align-items: center; gap: 12px; padding: 4px 10px 20px; }
 .brand b { display: block; font-size: 15px; line-height: 1.2; }
 .brand span { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--faint); }
-.brand-mark { width: 30px; height: 30px; fill: none; stroke: var(--accent); stroke-width: 1.7; stroke-linejoin: round; }
-.brand-mark-lg { width: 44px; height: 44px; margin-bottom: 6px; }
+.brand-logo { width: 44px; height: 44px; flex: none; }
+.brand-logo-lg { width: 88px; height: 88px; align-self: center; margin-bottom: 6px; }
 .nav-link { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 12px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--muted); font-weight: 600; text-align: left; transition: background .15s, color .15s; }
 .nav-link:hover { background: var(--surface-2); color: var(--text); }
 .nav-link.active { background: var(--accent-soft); color: var(--accent); }

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="secretary/dashboard/static/logo.webp" alt="Logo p-secretary" width="200">
+</p>
+
 # P-Secretary · un agente per le tue comunicazioni
 
 Segretario personale containerizzato (Docker, multi-piattaforma): raccoglie email, WhatsApp e

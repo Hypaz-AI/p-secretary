@@ -334,7 +334,7 @@ class DashboardApiTests(unittest.TestCase):
         for identity in set(re.findall(r"el\('([a-z-]+)'\)", script)):
             self.assertIn(f'id="{identity}"', page, identity)
         # CSP default-src 'self': nessuna risorsa esterna; ogni asset della pagina e` servito dalla lista chiusa.
-        for name in ('index.html', 'style.css', 'app.js', 'charts.js', 'favicon.svg'):
+        for name in ('index.html', 'style.css', 'app.js', 'charts.js'):
             text = (STATIC_DIR / name).read_text().replace('http://www.w3.org/2000/svg', '')
             self.assertIsNone(re.search(r'https?://', text), name)
         for asset in re.findall(r'(?:href|src)="/([^"]+)"', page):
