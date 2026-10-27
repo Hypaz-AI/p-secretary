@@ -74,6 +74,12 @@ sessione entra in `requires_action` la delega viene rifiutata, mai approvata.
 | `NOTION_HTTP_TIMEOUT_SECONDS` | 15 (5–60) | Timeout di ogni chiamata HTTP a `api.notion.com` |
 | `NOTION_MAX_RUN_SECONDS` | 900 (60–7200) | Durata massima di una delega; oltre, il monitor la chiude come fallita |
 
+`NOTION_ENABLED`, `NOTION_API_KEY` e `NOTION_AGENT_ID` si modificano anche dalla dashboard
+(Impostazioni → gruppo *Notion (sola lettura)*). Al salvataggio con Notion attivo, token e ID
+vengono verificati su `api.notion.com`: l'agente deve comparire tra i Custom Agent attivi della
+connessione, altrimenti il salvataggio è rifiutato e il file resta invariato. Il token non viene
+mai mostrato di nuovo. I tre timeout restano modificabili solo in `config/secretary.env`.
+
 Ogni delega è una riga di `notion_delegations` committata **prima** della POST: un esito
 ambiguo (timeout, 5xx) marca `uncertain` e non viene mai rigiocato, così una ricerca non può
 duplicarsi. Le ricerche lente sono seguite dal worker durevole `notion` (polling ogni 60 s
