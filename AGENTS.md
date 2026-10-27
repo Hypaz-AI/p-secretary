@@ -75,10 +75,11 @@ secretary/            pacchetto Python (si avvia con `python -m secretary`)
                       flows, recovery, privacy, platform_health, actions, dashboard_owner
   archive/            message_store, email_attachments, documents, knowledge,
                       historical_import, file_browser
-  workflows/          pipeline, digest, invoices, task_reconciliation, owner_commitments
+  workflows/          pipeline, digest, invoices, task_reconciliation, owner_commitments,
+                      notion_delegations
   agent/              l'agente e i suoi strumenti (vedi sopra)
   connectors/         email, telegram, telegram_account, whatsapp(+profile), gcal, ms_oauth,
-                      media_archive, media_text, storage
+                      media_archive, media_text, storage, notion_agent
   dashboard/          dashboard.py (API), admin_config.py, static/ (index.html, app.js, style.css)
   setup/              installer (launcher), ui, ms_auth, telegram, telegram_account, whatsapp, gcal
   maintenance/        fix_communication_dates, migrate_email_attachments (mai dall'avvio)
@@ -89,8 +90,8 @@ Dockerfile, compose*.yaml, p-secretary (launcher), requirements.txt, .env.exampl
 ```
 
 ### Resto dell'applicazione
-- `main.py` — entrypoint: `db.init()` prima dei worker; sei worker durevoli
-  (`analysis`, `media`, `action`, `owner`, `digest`, `knowledge`); attività
+- `main.py` — entrypoint: `db.init()` prima dei worker; sette worker durevoli
+  (`analysis`, `media`, `action`, `owner`, `digest`, `knowledge`, `notion`); attività
   periodiche con un solo thread vivo per nome; `check_telegram` archivia +
   checkpointa il cursore nella stessa transazione.
 - `core/jobs.py` — coda durevole `work_jobs`: `SKIP LOCKED`, lease 15 min, heartbeat 30 s,
@@ -120,6 +121,14 @@ Dockerfile, compose*.yaml, p-secretary (launcher), requirements.txt, .env.exampl
 - `connectors/` — identità native verificate in ingresso (UIDVALIDITY email, forward
   metadata Telegram, version-ACK WhatsApp); tutti gli effetti in uscita.
   `whatsapp.py` ritenta il download dei media e traccia gli esiti (`MEDIA_ERRORS`).
+- `connectors/notion_agent.py` + `workflows/notion_delegations.py` — tool `notion_ask`
+  (solo modo `owner`, flag `NOTION_ENABLED`): delega ricerche in SOLA LETTURA a un Custom
+  Agent Notion via Agent APIs (urllib, nessuna dipendenza nuova). La riga
+  `notion_delegations` è committata PRIMA della POST; esito ambiguo = `uncertain` mai
+  rigiocato; `requires_action` sempre rifiutato; polling dal worker `notion` (Deferred, 60 s)
+  e una sola notifica Telegram (`notion-result:<id>`). `continue_previous` prosegue l'ultima
+  sessione conclusa (scelta dal server, un turno in volo per sessione, cursore
+  `last_event_sequence` per leggere solo i messaggi del turno).
 
 ## Invarianti da non rompere
 1. **Autorità owner** = solo testo nativo vivo, diretto, non inoltrato, in chat privata

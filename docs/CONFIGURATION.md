@@ -2,8 +2,8 @@
 
 Il servizio è **un agente con strumenti tipizzati** (vedi [AGENT_FLOWS.md](AGENT_FLOWS.md)),
 non un motore di workflow. `db.init()` applica le migrazioni additive prima dei flussi;
-`main()` avvia sei worker durevoli: `analysis`, `media`, `action`, `owner`, `digest`,
-`knowledge`. La dashboard non migra schemi e non avvia worker alla richiesta.
+`main()` avvia sette worker durevoli: `analysis`, `media`, `action`, `owner`, `digest`,
+`knowledge`, `notion`. La dashboard non migra schemi e non avvia worker alla richiesta.
 Non eseguire prove contro account, sessioni o DB di produzione.
 
 ## Variabili dell'agente
@@ -56,6 +56,36 @@ indipendente: `NOLOGIN`, nessun attributo, `SELECT` solo sulle viste `agent.*`.
 
 Da PostgreSQL 16 il ruolo va **assunto** con il privilegio `SET`, che chi lo crea con `CREATEROLE`
 non ha automaticamente: l'app lo concede con un `GRANT` esplicito e lo verifica a ogni avvio.
+
+## Notion (Custom Agent, sola lettura)
+
+Jarvis può delegare ricerche sul workspace Notion a un **Custom Agent** creato e configurato
+prima nella UI di Notion (piano Business/Enterprise), tramite le Agent APIs (public beta,
+`Notion-Version: 2026-03-11`). Un solo strumento, `notion_ask`, disponibile **solo nel modo
+owner** e solo con messaggio diretto nativo; nessuna scrittura su Notion passa da qui: se la
+sessione entra in `requires_action` la delega viene rifiutata, mai approvata.
+
+| Variabile | Default | Significato |
+| --- | --- | --- |
+| `NOTION_ENABLED` | `false` | Abilita lo strumento `notion_ask` |
+| `NOTION_API_KEY` | vuoto | Token della connessione interna con capacità «View sessions and interact with agents» e il solo Custom Agent in *Agent access* |
+| `NOTION_AGENT_ID` | vuoto | ID del Custom Agent (`agent_type=custom_agent`, `status=active`, da `POST /v1/agents/query`) |
+| `NOTION_FAST_WAIT_SECONDS` | 25 (0–60) | Attesa breve nel turno prima di rispondere «ricerca in corso» |
+| `NOTION_HTTP_TIMEOUT_SECONDS` | 15 (5–60) | Timeout di ogni chiamata HTTP a `api.notion.com` |
+| `NOTION_MAX_RUN_SECONDS` | 900 (60–7200) | Durata massima di una delega; oltre, il monitor la chiude come fallita |
+
+Ogni delega è una riga di `notion_delegations` committata **prima** della POST: un esito
+ambiguo (timeout, 5xx) marca `uncertain` e non viene mai rigiocato, così una ricerca non può
+duplicarsi. Le ricerche lente sono seguite dal worker durevole `notion` (polling ogni 60 s
+senza consumare tentativi) e il risultato arriva su Telegram con una sola notifica
+(`notion-result:<id>`). Il token non finisce mai in log o nel journal dell'agente.
+Se il proprietario insiste sulla stessa ricerca, Jarvis può proseguire la stessa sessione
+Notion (`continue_previous`): la sessione la sceglie il server (l'ultima conclusa), mai il
+modello, e c'è al massimo un turno in volo per sessione.
+
+Setup: creare il Custom Agent in Notion, condividere in *Tools and access* **solo** le pagine
+e i database da leggere (permesso «Can view», verificato con un test negativo), creare il
+token con l'accesso al solo agente e testarlo prima in Notion. Dettagli in `.env.example`.
 
 ## API HTTP locali
 

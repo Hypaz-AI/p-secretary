@@ -172,6 +172,18 @@ TELEGRAM_USER_DIALOG_LIMIT = int(get('TELEGRAM_USER_DIALOG_LIMIT', '100'))
 TELEGRAM_USER_MESSAGE_LIMIT = int(get('TELEGRAM_USER_MESSAGE_LIMIT', '200'))
 TELEGRAM_USER_RECOVERY_INTERVAL = int(get('TELEGRAM_USER_RECOVERY_INTERVAL', '900'))
 
+# --- Notion (Custom Agent via Agent APIs, in R1 SOLA LETTURA) ----------------
+# Jarvis delega una domanda allo specialista Notion del workspace e ne legge
+# l'esito; nessuna scrittura su Notion passa da qui. Disattivato di default.
+NOTION_ENABLED = get_bool("NOTION_ENABLED", False)
+NOTION_API_KEY = get("NOTION_API_KEY")
+NOTION_AGENT_ID = get("NOTION_AGENT_ID")
+# Attesa breve dentro il turno prima di rispondere "richiesta in corso".
+NOTION_FAST_WAIT_SECONDS = _bounded_int("NOTION_FAST_WAIT_SECONDS", 25, 0, 60)
+NOTION_HTTP_TIMEOUT_SECONDS = _bounded_int("NOTION_HTTP_TIMEOUT_SECONDS", 15, 5, 60)
+# Durata massima di una delega: oltre, il monitor la chiude come fallita.
+NOTION_MAX_RUN_SECONDS = _bounded_int("NOTION_MAX_RUN_SECONDS", 900, 60, 7200)
+
 # --- Google Calendar (solo service account IAM, vedi secretary/setup/gcal.py) ----
 GCAL_ENABLED = get_bool("GCAL_ENABLED", False)
 # ID esplicito del calendario condiviso; primary non è supportato.

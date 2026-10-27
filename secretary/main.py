@@ -257,6 +257,8 @@ def main():
     print(f"  Telegram   : {'attivo' if config.TELEGRAM_BOT_TOKEN else 'NON configurato'}")
     print(f"  WhatsApp   : {'attivo' if config.WHATSAPP_ENABLED else 'disattivato'}")
     print(f"  Calendar   : {'Google Calendar' if gcal.readiness() == 'ready' else gcal.readiness()}")
+    notion_on = config.NOTION_ENABLED and config.NOTION_API_KEY and config.NOTION_AGENT_ID
+    print(f"  Notion     : {'attivo (sola lettura)' if notion_on else 'disattivato'}")
     print(f"  Database   : {'Postgres OK' if db.available() else 'NON configurato'}")
     print(f"  Fatture    : {config.INVOICE_DIR}")
     print(f"  Digest     : ogni giorno alle {config.DIGEST_TIME}")
@@ -287,7 +289,7 @@ def main():
     state = actions.load_state()
     from secretary.core import jobs
     from secretary.archive import knowledge
-    from secretary.workflows import pipeline, retention
+    from secretary.workflows import notion_delegations, pipeline, retention
     from secretary.connectors import media_archive
     state['telegram_offset'] = jobs.cursor('telegram_bot_offset', state.get('telegram_offset', 0))
     flows.init()
@@ -302,7 +304,8 @@ def main():
                jobs.Worker('action', pipeline.action).start(),
                jobs.Worker('owner', _owner_job).start(),
                jobs.Worker('digest', digest.run).start(),
-               jobs.Worker('knowledge', knowledge.index_message).start()]
+               jobs.Worker('knowledge', knowledge.index_message).start(),
+               jobs.Worker('notion', notion_delegations.monitor).start()]
     periodic = {}
     def launch(name, callback):
         old = periodic.get(name)

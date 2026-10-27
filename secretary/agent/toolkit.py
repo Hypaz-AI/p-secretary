@@ -124,6 +124,16 @@ class WebArgs(Strict):
     max_results: int = 5
 
 
+class NotionAskArgs(Strict):
+    question: str = Field(
+        min_length=1, max_length=6000,
+        description='Domanda o ricerca da delegare allo specialista Notion, autosufficiente e testuale. '
+                    'Indica il risultato desiderato, NON i tool o le pagine interne da usare.')
+    continue_previous: bool = Field(
+        False, description='True solo per insistere o approfondire la ricerca Notion PRECEDENTE '
+                           '(lo specialista riprende la stessa conversazione). Per un argomento nuovo lascia False.')
+
+
 class TaskArgs(Strict):
     operation: Literal['create', 'update', 'complete', 'cancel']
     task_id: Optional[int] = Field(None, description='ID dell\'attività aperta (obbligatorio tranne per create).')
@@ -318,6 +328,13 @@ def t_web_search(state, p):
         return web.search(p.query, p.max_results)
     except web.WebError as exc:
         return dict(error=str(exc))
+
+
+def t_notion_ask(state, p):
+    """Delega in SOLA LETTURA al Custom Agent Notion: solo il proprietario, solo testo diretto."""
+    _require_owner(state)
+    from secretary.workflows import notion_delegations
+    return notion_delegations.delegate(state, p.question, continue_previous=p.continue_previous)
 
 
 # ------------------------------------------------------- scritture: proprietario
@@ -563,6 +580,10 @@ SPECS = [
     Spec('mail_read', 'Legge un messaggio direttamente dalla casella email (sola lettura).', MailReadArgs, t_mail_read, ('owner',)),
     Spec('web_search', 'Cerca sul web e riassume con le fonti. Usalo quando l\'informazione non è nei dati del proprietario.',
          WebArgs, t_web_search, ('owner',)),
+    Spec('notion_ask', 'Cerca e leggi nel workspace Notion del proprietario tramite il suo specialista interno '
+         '(SOLA LETTURA): trova pagine, note e documenti e rispondi con i link. Può richiedere minuti: se risponde '
+         '"in corso" il risultato arriverà con un messaggio dedicato. Solo per richieste che riguardano Notion.',
+         NotionAskArgs, t_notion_ask, ('owner',), write=True, enabled=lambda: _notion_on()),
     Spec('task_change', 'Crea, aggiorna, completa o annulla UNA attività del proprietario. Richiede la frase esatta '
          'del proprietario come evidence. Non creare duplicati: controlla prima agent.tasks.',
          TaskArgs, t_task_change, ('owner',), write=True),
@@ -596,6 +617,10 @@ def _invoices_on():
         return capabilities.enabled('invoices')
     except Exception:
         return False
+
+
+def _notion_on():
+    return bool(config.NOTION_ENABLED and config.NOTION_API_KEY and config.NOTION_AGENT_ID)
 
 
 def names(mode):

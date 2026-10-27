@@ -138,6 +138,8 @@ def init(approved_reset: bool = False) -> int:
             agent_schema.migrate(conn, config.AGENT_DB_SCHEMA)
             from secretary.workflows import retention
             retention.migrate(conn)
+            from secretary.workflows import notion_delegations
+            notion_delegations.migrate(conn)
             # Ruolo di sola lettura dell'agente: creato qui se l'utente applicativo può
             # (DB locale del compose), altrimenti lo segnala main() e lo crea il DBA.
             agent_schema.ensure_readonly_role(conn, config.AGENT_DB_SCHEMA, config.AGENT_DB_ROLE)
