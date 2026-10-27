@@ -17,10 +17,12 @@ import socket
 import ssl
 import threading
 import time
+from urllib.error import HTTPError
 from urllib.parse import urlsplit, quote, urlencode
 from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
 
 from secretary.core import config
+from secretary.connectors import notion_agent
 from secretary.connectors.storage import FileLock, atomic_write
 from secretary.setup.installer import read_env, valid_preference
 
@@ -98,6 +100,9 @@ def field_metadata(key):
         'WHATSAPP_ENABLED': 'Abilita il ponte whatsapp-web.js; autorizzazione QR da terminale.',
         'WHATSAPP_EXCLUDED_CHATS': 'ID WhatsApp di chat o gruppi da escludere, separati da virgole (es. 120363…@g.us). Messaggi in entrata e uscita di queste chat non vengono archiviati né analizzati. Effetto dopo il riavvio; i messaggi già archiviati restano.',
         'TELEGRAM_EXCLUDED_CHATS': 'ID Telegram di chat, gruppi o canali dell’account personale da escludere, separati da virgole (es. -1001234567890). Messaggi in entrata e uscita di queste chat non vengono archiviati né analizzati. Effetto dopo il riavvio; i messaggi già archiviati restano.',
+        'NOTION_ENABLED': 'Abilita lo strumento notion_ask: ricerche in sola lettura sul workspace Notion tramite il Custom Agent. Richiede token e ID verificati al salvataggio.',
+        'NOTION_API_KEY': 'Token della connessione interna Notion con «View sessions and interact with agents» e solo il Custom Agent in Agent access; vuoto mantiene quello salvato.',
+        'NOTION_AGENT_ID': 'ID del Custom Agent Notion (tipo custom_agent, stato active); verificato con Notion al salvataggio.',
         'GCAL_ENABLED': 'Abilita Google Calendar con service account IAM; nessun OAuth utente.',
         'GCAL_CALENDAR_ID': 'ID esplicito del calendario condiviso con client_email, permesso di modifica; non usare primary.',
         'GCAL_EVENT_DURATION': 'Durata predefinita degli appuntamenti, in minuti.',
@@ -159,7 +164,7 @@ def field_metadata(key):
             'VAT': 'Partita IVA come indizio per l’AI; formato consigliato IT + 11 cifre. È testo: conserva zeri iniziali e prefisso.',
             'DESC': 'Descrizione dell’entità per aiutare l’AI a classificare le fatture.',
         }[invoice[1]]
-    if key in ('GCAL_ENABLED', 'WHATSAPP_ENABLED', 'TELEGRAM_USER_ENABLED', 'DASHBOARD_COOKIE_SECURE'):
+    if key in ('GCAL_ENABLED', 'WHATSAPP_ENABLED', 'TELEGRAM_USER_ENABLED', 'DASHBOARD_COOKIE_SECURE', 'NOTION_ENABLED'):
         result.update(type='select', options=['true', 'false'])
     if key.endswith(('_PORT', '_LIMIT', '_INTERVAL', '_DURATION')) or key == 'TELEGRAM_API_ID':
         result.update(type='number', min=1, max=65535, step=1)
@@ -183,6 +188,7 @@ def schema():
             'TELEGRAM_USER_DIALOG_LIMIT', 'TELEGRAM_USER_MESSAGE_LIMIT', 'TELEGRAM_USER_RECOVERY_INTERVAL',
             'TELEGRAM_EXCLUDED_CHATS', 'WHATSAPP_EXCLUDED_CHATS'],
         'Calendar': ['GCAL_ENABLED', 'GCAL_CALENDAR_ID', 'GCAL_EVENT_DURATION', 'GCAL_SERVICE_ACCOUNT_JSON'],
+        'Notion (sola lettura)': ['NOTION_ENABLED', 'NOTION_API_KEY', 'NOTION_AGENT_ID'],
         'Preferenze': ['TIMEZONE', 'LANGUAGE', 'DIGEST_TIME', 'POLL_INTERVAL'],
         'Segretario · modalità e retention': list(SECRETARY_FIELDS),
         'Deployment (sola lettura)': sorted(DEPLOYMENT),
@@ -344,6 +350,25 @@ def verify_calendar(values, raw):
     return sa
 
 
+def verify_notion(values):
+    key, agent = values.get('NOTION_API_KEY', ''), values.get('NOTION_AGENT_ID', '')
+    if not key or not agent:
+        raise ValueError('Notion richiede token e ID del Custom Agent')
+    body = {'filter': {'and': [{'property': 'agent_type', 'string': {'equals': 'custom_agent'}},
+                               {'property': 'status', 'string': {'equals': 'active'}}]},
+            'page_size': 100}
+    headers = {'Authorization': 'Bearer ' + key, 'Notion-Version': notion_agent.API_VERSION,
+               'Content-Type': 'application/json'}
+    try:
+        result = remote_json(notion_agent.API_ROOT + '/agents/query', headers, json.dumps(body).encode())
+    except HTTPError:
+        raise ValueError('Token Notion non accettato: verificare la connessione interna') from None
+    agents = result.get('results') if isinstance(result, dict) else None
+    if not isinstance(agents, list) or not any(
+            isinstance(item, dict) and str(item.get('id', '')).lower() == agent.lower() for item in agents):
+        raise ValueError('Custom Agent Notion non trovato tra gli agenti attivi della connessione')
+
+
 def validate(changes, values):
     for key, value in changes.items():
         spec = field_metadata(key)
@@ -364,6 +389,8 @@ def validate(changes, values):
                 raise ValueError('Elenco chat escluse non valido: ID separati da virgole, massimo 200')
         if key == 'AGENT_NOTIFY_MAX_PER_DAY' and (not value.isdecimal() or not 0 <= int(value) <= 100):
             raise ValueError('Tetto notifiche fuori intervallo 0–100')
+        if key == 'NOTION_AGENT_ID' and value and not re.fullmatch(r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}', value):
+            raise ValueError('ID agente Notion non valido: deve essere un UUID')
         if key == 'EFFECT_AUDIT_RETENTION_DAYS' and (not value.isdecimal() or not 0 <= int(value) <= 3650):
             raise ValueError('Retention audit fuori intervallo 0–3650')
         if key == 'SECRETARY_MODE' and value not in ('observe', 'active'):
@@ -403,6 +430,8 @@ def validate(changes, values):
             raise ValueError('Cambio identità bot: usare python -m secretary.setup.telegram per autorizzare il proprietario')
     for prefix in sorted({m.group(0) for key in changes if (m := re.match(r'EMAIL\d+_', key))}):
         verify_email(values, prefix)
+    if values.get('NOTION_ENABLED') == 'true' and {'NOTION_ENABLED', 'NOTION_API_KEY', 'NOTION_AGENT_ID'} & changes.keys():
+        verify_notion(values)
     if 'GCAL_SERVICE_ACCOUNT_JSON' in changes or 'GCAL_CALENDAR_ID' in changes or changes.get('GCAL_ENABLED') == 'true':
         return verify_calendar(values, changes.get('GCAL_SERVICE_ACCOUNT_JSON'))
     return None

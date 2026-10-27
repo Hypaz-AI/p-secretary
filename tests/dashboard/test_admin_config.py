@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
+from urllib.error import HTTPError
 
 from secretary.dashboard import admin_config as admin
 from secretary.core import config
@@ -140,6 +141,61 @@ class AdminConfigTests(unittest.TestCase):
         self.assertEqual(before, self.path.read_bytes())
         self.assertNotIn('CANDIDATE', response.get_data(as_text=True))
         self.assertNotIn('network forbidden', response.get_data(as_text=True))
+
+    def test_notion_disabled_by_default_and_secret_redacted(self):
+        fields = {f['key']: f for f in self.client.get('/api/configuration').json['fields']}
+        self.assertEqual(fields['NOTION_ENABLED']['group'], 'Notion (sola lettura)')
+        self.assertEqual(fields['NOTION_ENABLED']['options'], ['true', 'false'])
+        self.assertEqual(fields['NOTION_API_KEY']['type'], 'password')
+        self.assertTrue(fields['NOTION_API_KEY']['secret'])
+        self.assertEqual(fields['NOTION_AGENT_ID']['type'], 'text')
+
+    def test_notion_disable_needs_no_network(self):
+        self.assertEqual(self.post({'NOTION_ENABLED': 'false'}).status_code, 200)
+        self.network.assert_not_called()
+
+    def test_notion_enable_verifies_active_custom_agent(self):
+        agent = '1f0c7c06-781b-4987-9986-5c8dd3028013'
+        self.network.side_effect = None
+        self.network.return_value = {'results': [{'id': agent, 'agent_type': 'custom_agent', 'status': 'active'}]}
+        response = self.post({'NOTION_ENABLED': 'true', 'NOTION_API_KEY': 'NOTION-SECRET', 'NOTION_AGENT_ID': agent})
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('NOTION-SECRET', response.get_data(as_text=True))
+        url, headers, body = self.network.call_args.args[0], self.network.call_args.args[1], self.network.call_args.args[2]
+        self.assertEqual(url, 'https://api.notion.com/v1/agents/query')
+        self.assertEqual(headers['Authorization'], 'Bearer NOTION-SECRET')
+        self.assertEqual(headers['Notion-Version'], '2026-03-11')
+        self.assertIn(b'custom_agent', body)
+        saved = admin.read_env(self.path)
+        self.assertEqual((saved['NOTION_ENABLED'], saved['NOTION_AGENT_ID']), ('true', agent))
+
+    def test_notion_unknown_agent_or_rejected_token_keeps_file(self):
+        agent = '1f0c7c06-781b-4987-9986-5c8dd3028013'
+        before = self.path.read_bytes()
+        self.network.side_effect = None
+        self.network.return_value = {'results': [{'id': '00000000-0000-4000-8000-000000000000', 'agent_type': 'custom_agent', 'status': 'active'}]}
+        self.assertEqual(self.post({'NOTION_ENABLED': 'true', 'NOTION_API_KEY': 'NOTION-SECRET', 'NOTION_AGENT_ID': agent}).status_code, 400)
+        self.network.side_effect = HTTPError('https://api.notion.com/v1/agents/query', 401, 'Unauthorized', {}, None)
+        response = self.post({'NOTION_ENABLED': 'true', 'NOTION_API_KEY': 'NOTION-SECRET', 'NOTION_AGENT_ID': agent})
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn('NOTION-SECRET', response.get_data(as_text=True))
+        self.assertEqual(before, self.path.read_bytes())
+
+    def test_notion_enable_requires_token_and_valid_agent_id_before_network(self):
+        self.network.side_effect = None
+        self.assertEqual(self.post({'NOTION_ENABLED': 'true', 'NOTION_AGENT_ID': '1f0c7c06-781b-4987-9986-5c8dd3028013'}).status_code, 400)
+        self.assertEqual(self.post({'NOTION_ENABLED': 'true', 'NOTION_API_KEY': 'NOTION-SECRET', 'NOTION_AGENT_ID': 'not-a-uuid'}).status_code, 400)
+        self.assertEqual(self.post({'NOTION_ENABLED': 'maybe'}).status_code, 400)
+        self.network.assert_not_called()
+
+    def test_notion_fields_are_saved_with_restart_and_no_live_mutation(self):
+        self.network.side_effect = None
+        self.network.return_value = {'results': [{'id': '1f0c7c06-781b-4987-9986-5c8dd3028013', 'agent_type': 'custom_agent', 'status': 'active'}]}
+        with patch.object(admin, 'automatic_restart', return_value=True):
+            response = self.post({'NOTION_ENABLED': 'true', 'NOTION_API_KEY': 'NOTION-SECRET', 'NOTION_AGENT_ID': '1f0c7c06-781b-4987-9986-5c8dd3028013'})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json['restart_scheduled'])
+        self.assertFalse(getattr(config, 'NOTION_ENABLED', False))
 
     def test_allowlist_immutable_and_interactive(self):
         before = self.path.read_bytes()
