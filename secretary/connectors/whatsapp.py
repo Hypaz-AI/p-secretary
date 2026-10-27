@@ -110,12 +110,42 @@ function mediaCause(error) {
   if (/cannot read|undefined|is not a function/.test(text)) return 'unexpected_state';
   return 'other';
 }
+// WhatsApp Web (2026) ha rinominato id._serialized in id.$1 e chiede il mimetype al download:
+// whatsapp-web.js 1.34.7 fallisce con un errore opaco. Se la libreria fallisce, ritento nella
+// pagina con lo stesso percorso, usando l'ID disponibile e il mimetype del messaggio.
+async function downloadMedia(msg) {
+  try {
+    return await msg.downloadMedia();
+  } catch (original) {
+    const serialized = msg.id && (msg.id._serialized || msg.id.$1);
+    if (!serialized || !client.pupPage) throw original;
+    const data = await client.pupPage.evaluate(async (msgId) => {
+      const WA = window.require('WAWebCollections');
+      const page = WA.Msg.get(msgId) || (await WA.Msg.getMessagesById([msgId]))?.messages?.[0];
+      if (!page || !page.mediaData || page.mediaData.mediaStage === 'REUPLOADING') return null;
+      if (page.mediaData.mediaStage !== 'RESOLVED') {
+        await page.downloadMedia({downloadEvenIfExpensive: true, rmrReason: 1});
+      }
+      if (page.mediaData.mediaStage.includes('ERROR') || page.mediaData.mediaStage === 'FETCHING') return undefined;
+      const decrypted = await window.require('WAWebDownloadManager').downloadManager.downloadAndMaybeDecrypt({
+        directPath: page.directPath, encFilehash: page.encFilehash, filehash: page.filehash,
+        mediaKey: page.mediaKey, mediaKeyTimestamp: page.mediaKeyTimestamp, type: page.type,
+        mimetype: page.mimetype, signal: new AbortController().signal,
+        downloadQpl: {addAnnotations() {return this;}, addPoint() {return this;}},
+      });
+      return {data: await window.WWebJS.arrayBufferToBase64Async(decrypted),
+        mimetype: page.mimetype, filename: page.filename, filesize: page.size};
+    }, serialized).catch(() => null);
+    if (!data || !data.data) throw original;
+    return data;
+  }
+}
 async function fetchMedia(msg) {
   let reason = 'download_failed', cause = 'none';
   for (let attempt = 0; attempt < MEDIA_ATTEMPTS; attempt++) {
     if (attempt) await sleep(1500 * attempt);
     try {
-      const media = await msg.downloadMedia();
+      const media = await downloadMedia(msg);
       if (media && media.data) return media;
       reason = 'unavailable'; cause = 'no_data';
     } catch (e) {reason = 'download_failed'; cause = mediaCause(e);}

@@ -300,6 +300,56 @@ const ok = {data, mimetype:'application/pdf', filename:'fattura.pdf'};
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """)
 
+    def test_library_failure_falls_back_to_page_download_with_current_id(self):
+        self.run_node(r"""
+const vm = require('vm');
+let files = {}, events = {}, emitted = [], pageCalls = [], pageMode = 'ok';
+class Client {
+ constructor() {
+   this.info = {wid:{_serialized:'self'}};
+   this.pupPage = {evaluate: async (fn, msgId) => {
+     pageCalls.push(msgId);
+     if (pageMode === 'fail') throw Error('page failed');
+     return {data: Buffer.from('foto').toString('base64'), mimetype:'image/jpeg', filename:'foto.jpg'};
+   }};
+ }
+ on(k, fn) {events[k] = fn;}
+ initialize() {return Promise.resolve();}
+}
+// WhatsApp Web 2026: l'ID è in $1, e la libreria fallisce con un errore opaco.
+function message(id, libraryFails) {return {id:{$1:id, id}, timestamp:200, from:'p@c.us', fromMe:false,
+ body:'', hasMedia:true, type:'image', getChat:async()=>({name:'Anna'}), getContact:async()=>({name:'Anna'}),
+ downloadMedia: async () => { if (libraryFails) throw 'r'; return {data: Buffer.from('lib').toString('base64'), mimetype:'image/jpeg', filename:'lib.jpg'}; }};}
+const fs = {mkdirSync(){},existsSync:p=>p in files,writeFileSync:(p,v)=>{files[p]=v;},
+ readFileSync:p=>files[p],renameSync:(a,b)=>{files[b]=files[a];delete files[a];}};
+const context = {Buffer, process:{on(){}, env:{WA_SPOOL_DIR:'/spool', WA_MEDIA_DIR:'/media', WA_HISTORY_CUTOFF:'100'},stdin:{}},
+ console:{log:v=>emitted.push(JSON.parse(v))},
+ setTimeout:fn=>{if(typeof fn==='function')Promise.resolve().then(fn);return {unref(){}};},setInterval:()=>({unref(){}}),
+ require:n=> n==='whatsapp-web.js'?{Client,LocalAuth:class{}}:
+ n==='fs'?fs:n==='path'?require('path'):n==='crypto'?require('crypto'):
+ n==='readline'?{createInterface:()=>({on(){}})}:{} };
+vm.createContext(context);
+vm.runInContext(JSON.parse(require('fs').readFileSync(0,'utf8')), context);
+const read = id => JSON.parse(files['/spool/'+Buffer.from(id).toString('hex')+'.json']);
+(async()=>{
+ // La libreria fallisce: il ponte ritenta nella pagina con l'ID $1 e salva il media.
+ await events.message_create(message('fallback', true));
+ let m = read('fallback');
+ if (m.attachments.length !== 1 || m.media_error !== false) throw Error('fallback did not store media: ' + JSON.stringify(m));
+ if (!pageCalls.includes('fallback') || !files['/media/fallback_foto.jpg']) throw Error('page download not used');
+ // La libreria funziona: nessuna chiamata alla pagina.
+ const before = pageCalls.length;
+ await events.message_create(message('library', false));
+ if (pageCalls.length !== before || !files['/media/library_lib.jpg']) throw Error('library path changed');
+ // Anche la pagina fallisce: l'errore originale resta tracciato come prima.
+ pageMode = 'fail';
+ await events.message_create(message('both', true));
+ m = read('both');
+ if (m.attachments.length || m.media_error !== 'download_failed') throw Error('double failure not tracked: ' + JSON.stringify(m));
+ console.log('PASS');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+""")
+
     def test_media_state_is_forwarded_as_closed_vocabulary_in_native_metadata(self):
         from secretary.connectors.whatsapp import media_metadata
         self.assertEqual(media_metadata({'text': 'solo testo'}), {})
