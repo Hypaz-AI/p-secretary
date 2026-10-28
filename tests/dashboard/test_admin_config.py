@@ -166,6 +166,7 @@ class AdminConfigTests(unittest.TestCase):
         self.assertEqual(headers['Authorization'], 'Bearer NOTION-SECRET')
         self.assertEqual(headers['Notion-Version'], '2026-03-11')
         self.assertIn(b'custom_agent', body)
+        self.assertEqual(json.loads(body)['filter']['and'][1], {'property': 'status', 'status': {'in': ['active']}})
         saved = admin.read_env(self.path)
         self.assertEqual((saved['NOTION_ENABLED'], saved['NOTION_AGENT_ID']), ('true', agent))
 

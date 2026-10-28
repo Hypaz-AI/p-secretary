@@ -92,6 +92,8 @@ modello, e c'è al massimo un turno in volo per sessione.
 Setup: creare il Custom Agent in Notion, condividere in *Tools and access* **solo** le pagine
 e i database da leggere (permesso «Can view», verificato con un test negativo), creare il
 token con l'accesso al solo agente e testarlo prima in Notion. Dettagli in `.env.example`.
+Per diagnosticare la connessione fuori dalla dashboard: `python -m secretary.maintenance.debug_notion`
+(usa la stessa configurazione e le stesse chiamate del salvataggio; non stampa il token).
 
 ## API HTTP locali
 

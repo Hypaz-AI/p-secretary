@@ -350,19 +350,26 @@ def verify_calendar(values, raw):
     return sa
 
 
+def notion_active_agents(key):
+    """Custom Agent attivi visibili al token. Usata da verify_notion e dalla diagnostica manuale."""
+    body = {'filter': {'and': [{'property': 'agent_type', 'string': {'equals': 'custom_agent'}},
+                               {'property': 'status', 'status': {'in': ['active']}}]},
+            'page_size': 100}
+    headers = {'Authorization': 'Bearer ' + key, 'Notion-Version': notion_agent.API_VERSION,
+               'Content-Type': 'application/json'}
+    return remote_json(notion_agent.API_ROOT + '/agents/query', headers, json.dumps(body).encode())
+
+
 def verify_notion(values):
     key, agent = values.get('NOTION_API_KEY', ''), values.get('NOTION_AGENT_ID', '')
     if not key or not agent:
         raise ValueError('Notion richiede token e ID del Custom Agent')
-    body = {'filter': {'and': [{'property': 'agent_type', 'string': {'equals': 'custom_agent'}},
-                               {'property': 'status', 'string': {'equals': 'active'}}]},
-            'page_size': 100}
-    headers = {'Authorization': 'Bearer ' + key, 'Notion-Version': notion_agent.API_VERSION,
-               'Content-Type': 'application/json'}
     try:
-        result = remote_json(notion_agent.API_ROOT + '/agents/query', headers, json.dumps(body).encode())
-    except HTTPError:
-        raise ValueError('Token Notion non accettato: verificare la connessione interna') from None
+        result = notion_active_agents(key)
+    except HTTPError as exc:
+        if exc.code in (401, 403):
+            raise ValueError('Token Notion non accettato: verificare la connessione interna') from None
+        raise ValueError(f'Notion ha rifiutato la verifica (HTTP {exc.code})') from None
     agents = result.get('results') if isinstance(result, dict) else None
     if not isinstance(agents, list) or not any(
             isinstance(item, dict) and str(item.get('id', '')).lower() == agent.lower() for item in agents):
