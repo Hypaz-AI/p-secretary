@@ -97,6 +97,36 @@ def notify(text: str, html: bool = True) -> bool:
         return False
 
 
+def chat_action(action: str = "typing") -> bool:
+    """Indicatore «sta scrivendo» nella chat dell'owner: dura pochi secondi, va rinnovato."""
+    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+        return False
+    _call("sendChatAction", {"chat_id": config.TELEGRAM_CHAT_ID, "action": action})
+    return True
+
+
+def send_status(text: str) -> int:
+    """Messaggio di stato silenzioso (senza suono): ritorna il message_id per modificarlo."""
+    result = _call("sendMessage", {
+        "chat_id": config.TELEGRAM_CHAT_ID,
+        "text": text[:4000],
+        "disable_notification": True,
+    })
+    return int(result["result"]["message_id"])
+
+
+def edit_status(message_id: int, text: str) -> None:
+    _call("editMessageText", {
+        "chat_id": config.TELEGRAM_CHAT_ID,
+        "message_id": message_id,
+        "text": text[:4000],
+    })
+
+
+def delete_message(message_id: int) -> None:
+    _call("deleteMessage", {"chat_id": config.TELEGRAM_CHAT_ID, "message_id": message_id})
+
+
 def escape_html(text: str) -> str:
     """Escape dei caratteri speciali per il parse_mode HTML di Telegram."""
     return html_mod.escape(str(text or ""))

@@ -99,12 +99,14 @@ sequenceDiagram
         T->>T: owner.begin (scambio idempotente, ordine rispettato)
         T->>T: owner.authorize(ai=True) → consenso ai_text/ai_media
         T->>R: prompt + conversazione recente
+        Note over T: presenza: «sta scrivendo» ogni 4 s; dopo 8 s un messaggio di stato col passo corrente
         loop fino a AGENT_MAX_TOOL_CALLS
             R->>K: strumento (db_query, mail_search, task_change, ...)
             K->>K: lease + audit (+ journal.once se scrittura)
             K-->>R: risultato JSON
         end
         R-->>T: testo finale
+        T->>T: presenza chiusa (messaggio di stato cancellato)
         T->>T: owner.complete: risposta + ricevute, stessa transazione
         T-->>A: owner-reply:ID:n
     end
@@ -123,6 +125,11 @@ Punti da ricordare:
   prompt gli effetti già committati, e `journal.once` non ne ripete nessuno.
 - **Richiesta identica**: entro `REUSE_MINUTES` una seconda copia dello stesso testo non
   innesca un secondo ciclo AI (riusa la risposta o si rimanda).
+- **Feedback in chat** (`agent/presence.py`): mentre il turno è in corso il bot mostra
+  «sta scrivendo» (rinnovato ogni 4 s). Se il turno dura più di 8 s compare un messaggio
+  di stato silenzioso con il passo corrente (etichette fisse per strumento, nessun
+  contenuto), aggiornato ogni 20 s o al cambio di passo e cancellato prima della
+  risposta. È best effort: un errore di Telegram non fa fallire il turno.
 - Comandi: `/start /stop /appuntamenti /note /regole /fatture /task /attivita /fatto
   /conferma /annulla /invia /scarta`, tutti deterministici.
 - Strumenti del turno owner: `db_schema`, `db_query`, `read_message`, `attachment_text`,

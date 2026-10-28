@@ -66,6 +66,9 @@ non è mai un confine di sicurezza.
 - `prompts.py` — prompt di sistema per modalità (`owner`, `inbox`, `digest`).
 - `turns.py` — i tre modi di lavorare: `owner_turn`, `inbox_job` (lotti fino a
   `AGENT_INBOX_BATCH`), `digest_text`.
+- `presence.py` — feedback in chat durante `owner_turn`: «sta scrivendo» e un messaggio di
+  stato (passo corrente, cancellato a fine turno). Best effort, nessun effetto durevole né
+  contenuto nei messaggi; i passi arrivano da `toolkit.call` tramite `TurnState.progress`.
 
 ### Alberatura del repository
 ```

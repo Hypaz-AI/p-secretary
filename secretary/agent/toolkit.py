@@ -47,6 +47,7 @@ class TurnState:
         self.calls = 0
         self.touched = set()      # messaggi letti (per sigillare le fonti del digest)
         self.failure = None       # lease perso / budget: ferma il turno
+        self.progress = None      # callback(nome_strumento): feedback in chat, best effort
         self.lock = threading.Lock()
 
 
@@ -645,6 +646,8 @@ def call(spec, state, params):
         seq = state.calls
     if seq > config.AGENT_MAX_TOOL_CALLS:
         return dict(error='Limite di chiamate agli strumenti raggiunto: concludi con quanto raccolto')
+    if state.progress is not None:
+        state.progress(spec.name)
     try:
         with jobs.bind(state.context):
             jobs.assert_current()

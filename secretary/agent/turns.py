@@ -8,6 +8,7 @@ from datetime import timezone
 
 from secretary.core import config, db, flows, jobs, policy
 from secretary.agent import journal, owner, prompts, runtime as runtime_module, toolkit
+from secretary.agent.presence import Presence
 
 logger = logging.getLogger(__name__)
 BODY_EXCERPT = 1500
@@ -79,12 +80,15 @@ def owner_turn(mid, *, runtime=None):
         lines.append(note)
     system = prompts.system_prompt('owner', effects=journal.executed(turn_key))
     error = None
+    presence = Presence().start()
+    state.progress = presence.step
     try:
         text = runtime.run(state, system, '\n'.join(lines), 'agent_owner', config.AGENT_OWNER_TIMEOUT)
     except BaseException as exc:
         error = exc
         raise
     finally:
+        presence.close()
         audit.done(state, error)
     receipts = [(e.get('result') or {}).get('receipt') for e in journal.executed(turn_key)]
     receipts = [r for r in receipts if r]
