@@ -362,6 +362,32 @@ fatture. Upload solo in `uploads/`, massimo **20 MiB**, senza sovrascrittura e
 token, sessioni e spool sono esclusi. File referenziati dal DB non sono eliminabili;
 la cancellazione è bloccata anche se il DB non è disponibile.
 
+## Aggiornare il container Docker
+
+Dopo un `git pull` nella directory del repository il container in esecuzione non cambia
+da solo: va ricostruito e ricreato con il launcher.
+
+```sh
+cd p-secretary
+git pull
+sh ./p-secretary up
+sh ./p-secretary status
+sh ./p-secretary logs
+```
+
+`up` ricostruisce l'immagine con il codice nuovo, verifica il DB, ferma il container e lo
+ricrea; la configurazione in `config/secretary.env` viene riletta all'avvio. Le migrazioni
+del DB girano all'avvio dell'app. Servono un setup già completato e `OPENROUTER_API_KEY`
+impostata. Durante la ricreazione l'app è ferma per pochi secondi.
+
+Prima di aggiornare:
+
+- fai un backup: dump PostgreSQL, `config/` e `data/` (vedi la [guida Docker](docs/DOCKER.md));
+  `down` conserva il volume ma **non è un backup**;
+- se il commit aggiunge variabili a [`.env.example`](.env.example) (per esempio `NOTION_*`),
+  aggiungile a mano in `config/secretary.env`: il file esistente non viene sovrascritto.
+  Le variabili mancanti usano il default del codice, in genere disattivato.
+
 ## Dati e gestione quotidiana
 
 Il default è `~/.local/share/p-secretary/`, fuori dal repository:
