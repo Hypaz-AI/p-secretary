@@ -337,6 +337,29 @@ select option { background: var(--surface); color: var(--text); }
 .call-head b { font-family: var(--mono); font-size: 13px; }
 .call-head small { margin-left: auto; color: var(--faint); }
 .call pre { padding: 10px 12px; border-top: 1px solid var(--border); background: var(--bg); max-height: 240px; overflow: auto; }
+
+/* ------------------------------------------------------- comunicazioni */
+.comm-channel { white-space: nowrap; }
+.comm-sender, .comm-subject { max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comm-when { white-space: nowrap; color: var(--muted); }
+.comm-attachments { white-space: nowrap; }
+@media (max-width: 860px) {
+  /* Su schermi stretti restano canale, direzione, oggetto e azione. */
+  .comm-sender, .comm-attachments { display: none; }
+  .comm-subject { max-width: 22ch; }
+}
+.detail-body { display: flex; flex-direction: column; gap: 14px; margin-top: 12px; }
+.detail-head { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border); }
+.detail-head > div { min-width: 0; flex: 1; }
+.detail-head strong { display: block; font-size: 14px; }
+.detail-head small { color: var(--faint); font-size: 12px; overflow-wrap: anywhere; }
+.detail-rows { display: flex; flex-direction: column; }
+.detail-row { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 12px; padding: 8px 0; border-top: 1px solid var(--border); font-size: 13px; }
+.detail-row:first-child { border-top: 0; }
+.detail-label { color: var(--faint); font-weight: 600; font-size: 12px; }
+.detail-value { min-width: 0; overflow-wrap: anywhere; }
+.detail-title { font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin-top: 6px; }
+.detail-body-text { padding: 12px 14px; border-radius: var(--radius-sm); background: var(--bg); border: 1px solid var(--border); max-height: 340px; overflow: auto; }
 .overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; background: rgba(4, 8, 13, .62); }
 .dialog { width: min(480px, 100%); padding: 24px; border-radius: 18px; background: var(--surface); border: 1px solid var(--border-strong); box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 12px; animation: rise .18s ease-out; }
 .dialog .actions { justify-content: flex-end; margin-top: 8px; }

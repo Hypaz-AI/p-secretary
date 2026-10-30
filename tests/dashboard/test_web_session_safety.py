@@ -362,6 +362,60 @@ async function budgetRender() {
   assert.ok(element('toasts').textContent.includes('Slot liberati: 1'));
 }
 
+// ------------------------------------------------------------ comunicazioni
+function communicationsFixture() {
+  return {available: true, limit: 100, communications: [
+    {id: 7, ts: '2099-01-01T10:00:00Z', acquired_at: '2099-01-01T10:00:01Z', channel: 'email',
+      direction: 'in', sender: 'mario@example.invalid', subject: 'Fattura di gennaio', preview: 'Anteprima',
+      needs_action: true, category: 'lavoro', priority: 'alta', attachments: 2},
+    {id: 6, ts: null, acquired_at: '2099-01-01T09:00:00Z', channel: 'telegram',
+      direction: 'out', sender: 'io', subject: null, preview: 'Ciao',
+      needs_action: false, category: null, priority: null, attachments: 0}]};
+}
+function communicationDetail() {
+  return {id: 7, ts: '2099-01-01T10:00:00Z', day: '2099-01-01', acquired_at: '2099-01-01T10:00:01Z',
+    channel: 'email', account: 'owner@example.invalid', sender: 'mario@example.invalid',
+    subject: 'Fattura di gennaio', body: 'DETAIL_PRIVATE corpo completo', direction: 'in',
+    author: null, folder: 'INBOX', summary: 'DETAIL_PRIVATE riepilogo', category: 'lavoro',
+    priority: 'alta', needs_action: true, action: 'rispondere', needs_reply: true,
+    reply_hint: 'chiedi conferma', notified: false,
+    attachments: [{id: 3, filename: 'fattura.pdf', content_type: 'application/pdf', size: 2048, stored: true}],
+    transcripts: [{kind: 'audio', text: 'DETAIL_PRIVATE trascrizione'}]};
+}
+async function communications() {
+  const loading = run('loadCommunications()');
+  respond(take('/api/communications'), communicationsFixture());
+  await loading;
+  const list = element('communications-list');
+  assert.ok(list.textContent.includes('Fattura di gennaio'));
+  assert.ok(list.textContent.includes('in entrata') && list.textContent.includes('in uscita'));
+  assert.ok(element('communications-status').textContent.includes('2 comunicazioni'));
+  // Filtro per direzione: nessuna richiesta al server, solo la vista.
+  element('communications-direction').querySelectorAll('button')[1].onclick();
+  assert.ok(!list.textContent.includes('Ciao'), 'Il filtro in entrata nasconde le uscite');
+  element('communications-direction').querySelectorAll('button')[0].onclick();
+  // Filtro testuale su mittente/oggetto.
+  element('communications-search').value = 'mario';
+  element('communications-search').oninput();
+  assert.ok(list.textContent.includes('Fattura di gennaio') && !list.textContent.includes('Ciao'));
+  element('communications-search').value = '';
+  element('communications-search').oninput();
+  // Dettaglio: una sola richiesta, testo e allegati nel drawer.
+  const open = list.querySelector('button');
+  assert.ok(open, 'Missing open button');
+  const opening = open.onclick();
+  respond(take('/api/communications/7'), communicationDetail());
+  await opening;
+  assert.equal(element('communication-detail').hidden, false);
+  const detail = element('communication-detail-body');
+  assert.ok(detail.textContent.includes('DETAIL_PRIVATE corpo completo'));
+  assert.ok(detail.textContent.includes('fattura.pdf'));
+  assert.ok(detail.textContent.includes('DETAIL_PRIVATE trascrizione'));
+  assert.ok(!detail.textContent.includes('path'));
+  element('communication-detail-close').onclick();
+  assert.equal(element('communication-detail').hidden, true);
+}
+
 // ------------------------------------------------------------------ consensi
 function policies(allowedFirst) {
   const rows = [];
@@ -567,6 +621,7 @@ async function overview() {
   else if (scenario === 'stale_media') await staleMediaRetry();
   else if (scenario === 'budget_levels') budgetLevels();
   else if (scenario === 'budget_render') await budgetRender();
+  else if (scenario === 'communications') await communications();
   else if (scenario === 'consent') await consent();
   else if (scenario === 'config') await configLifecycle();
   else if (scenario === 'overview') await overview();
@@ -636,6 +691,9 @@ class WebSessionSafetyTests(unittest.TestCase):
 
     def test_budget_page_shows_levels_flags_edit_links_and_repair_actions(self):
         self.run_scenario('budget_render')
+
+    def test_communications_page_lists_filters_and_opens_the_detail(self):
+        self.run_scenario('communications')
 
     def test_consent_switch_needs_explicit_confirmation_and_sends_an_exact_request(self):
         for dialog in ('ok', 'cancel'):

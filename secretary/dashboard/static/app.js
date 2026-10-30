@@ -77,8 +77,9 @@ const monthName = month => new Date(`${month}-01T12:00:00`).toLocaleDateString('
 // ------------------------------------------------------------ stato e sessione
 const state = {};
 function resetState() {
-  Object.assign(state, {dashboard: null, trends: null, budget: null, agent: null, hiddenChannels: new Set(),
-    direction: 'all', metric: 'tokens', runFilter: 'all', runsShown: 10, activityShown: 8, files: [], filesShown: 25,
+  Object.assign(state, {dashboard: null, trends: null, budget: null, agent: null, communications: null,
+    hiddenChannels: new Set(), direction: 'all', metric: 'tokens', runFilter: 'all', runsShown: 10,
+    activityShown: 8, files: [], filesShown: 25, communicationsDirection: 'all', communicationsTerm: '',
     healthAt: 0, configLoaded: false, budgetAt: 0, tick: 0});
 }
 resetState();
@@ -102,9 +103,10 @@ el('theme-toggle').onclick = () => {
 };
 
 // Navigazione multi-pagina: una sola pagina visibile alla volta.
-const PAGES = ['overview', 'agent', 'ai-permissions', 'budget', 'integration-settings', 'archive'];
+const PAGES = ['overview', 'communications', 'agent', 'ai-permissions', 'budget', 'integration-settings', 'archive'];
 const PAGE_INFO = {
   overview: ['Panoramica', 'Cosa sta succedendo adesso, in un colpo d’occhio'],
+  communications: ['Comunicazioni', 'Ultime 100 comunicazioni in entrata e in uscita'],
   agent: ['Agente', 'Esecuzioni, strumenti usati e bozze di email'],
   'ai-permissions': ['Permessi AI', 'Quali dati può leggere l’intelligenza artificiale'],
   budget: ['Budget AI', 'Consumo giornaliero, limiti e saturazione'],
@@ -125,6 +127,8 @@ function showPage(name) {
   });
   el('page-title').textContent = PAGE_INFO[name][0];
   el('page-subtitle').textContent = PAGE_INFO[name][1];
+  // Il dettaglio di una comunicazione non resta aperto cambiando pagina.
+  if (name !== 'communications') el('communication-detail').hidden = true;
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
   window.scrollTo({top: 0});
   if (!el('dashboard').hidden) loadPageData(name);
@@ -137,6 +141,7 @@ function renderCharts(name) {
 }
 function loadPageData(name) {
   renderCharts(name);
+  if (name === 'communications') loadCommunications();
   if (name === 'budget' && Date.now() - state.budgetAt > 15000) loadBudget();
   if (name === 'integration-settings' && !state.configLoaded) loadConfiguration();
 }
@@ -165,7 +170,7 @@ async function api(path, data) {
 const PRIVATE_IDS = ['kpis', 'messages-chart', 'messages-legend', 'overview-budget', 'overview-agent', 'flows', 'jobs-chart',
   'jobs-list', 'traffic', 'calendar-pending', 'activity', 'health-results', 'agent-runs', 'agent-emails', 'agent-calls',
   'agent-runs-chart', 'agent-run-filters', 'data-policies', 'ai-budget', 'budget-chart', 'invoices', 'invoice-chart',
-  'zips', 'file-list', 'config-fields', 'config-groups'];
+  'zips', 'file-list', 'config-fields', 'config-groups', 'communications-list', 'communication-detail-body'];
 function show(connected) {
   el('login').hidden = connected; el('dashboard').hidden = !connected; el('logout').hidden = !connected;
   el('refresh-now').hidden = !connected;
@@ -175,8 +180,10 @@ function show(connected) {
     resetState();
     PRIVATE_IDS.forEach(id => el(id).replaceChildren());
     el('config-form').hidden = true; el('config-save').hidden = true; configRevision = '';
-    el('agent-detail').hidden = true; el('media-retry-status').textContent = '';
-    ['messages-readout', 'budget-readout', 'agent-draft-count', 'health-status', 'policy-status', 'file-status'].forEach(id => {el(id).textContent = '';});
+    el('agent-detail').hidden = true; el('communication-detail').hidden = true;
+    el('media-retry-status').textContent = '';
+    ['messages-readout', 'budget-readout', 'agent-draft-count', 'health-status', 'policy-status', 'file-status',
+      'communications-status'].forEach(id => {el(id).textContent = '';});
     el('status').textContent = 'Accesso protetto alla dashboard locale'; el('status').dataset.state = '';
     el('page-title').textContent = 'Control room'; el('page-subtitle').textContent = 'Accesso protetto alla dashboard locale';
   }
@@ -920,6 +927,122 @@ function renderOverviewAgent() {
   if (failed) box.append(h('div', {}, badge(`${failed} fallite tra le ultime ${runs.length}`, 'bad')));
 }
 
+// ------------------------------------------------------------ comunicazioni
+const DIRECTION_LABELS = {in: 'in entrata', out: 'in uscita'};
+const directionLabel = value => DIRECTION_LABELS[value] || 'direzione ignota';
+const directionBadge = value => badge(directionLabel(value), value === 'in' ? 'info' : value === 'out' ? 'ok' : '');
+function closeCommunication() {el('communication-detail').hidden = true;}
+el('communication-detail-close').onclick = closeCommunication;
+window.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !el('communication-detail').hidden && el('dialog').hidden) closeCommunication();
+});
+function detailRow(label, value) {
+  return h('div', {class: 'detail-row'}, h('span', {class: 'detail-label', text: label}), h('div', {class: 'detail-value', text: value}));
+}
+function renderCommunicationDetail(item) {
+  const body = el('communication-detail-body');
+  const parts = [
+    h('div', {class: 'detail-head'}, icon(channelIcon(item.channel)), h('div', {},
+      h('strong', {text: channelName(item.channel)}), h('small', {text: item.account || 'account non indicato'})), directionBadge(item.direction)),
+    h('div', {class: 'detail-rows'},
+      detailRow('Quando', localDate(item.ts || item.acquired_at)),
+      detailRow('Archiviata', localDate(item.acquired_at)),
+      detailRow('Mittente', item.sender || '—'),
+      detailRow('Oggetto', item.subject || '—'))];
+  if (item.author) parts.push(detailRow('Autore', item.author));
+  if (item.folder) parts.push(detailRow('Cartella', item.folder));
+  parts.push(h('h4', {class: 'detail-title', text: 'Testo'}), h('pre', {class: 'detail-body-text', text: item.body || 'Nessun testo conservato.'}));
+  if (item.summary || item.category || item.priority) {
+    parts.push(h('h4', {class: 'detail-title', text: 'Analisi'}));
+    const analysis = h('div', {class: 'detail-rows'});
+    if (item.summary) analysis.append(detailRow('Riepilogo', item.summary));
+    if (item.category) analysis.append(detailRow('Categoria', item.category));
+    if (item.priority) analysis.append(detailRow('Priorità', item.priority));
+    if (item.action) analysis.append(detailRow('Azione', item.action));
+    if (item.reply_hint) analysis.append(detailRow('Suggerimento risposta', item.reply_hint));
+    analysis.append(detailRow('Richiede azione', item.needs_action ? 'sì' : 'no'));
+    analysis.append(detailRow('Richiede risposta', item.needs_reply ? 'sì' : 'no'));
+    parts.push(analysis);
+  }
+  parts.push(h('h4', {class: 'detail-title', text: `Allegati · ${item.attachments.length}`}));
+  parts.push(item.attachments.length ? h('div', {class: 'detail-rows'}, item.attachments.map(att =>
+    h('div', {class: 'detail-row'}, h('span', {class: 'detail-label', text: att.filename || `Allegato #${att.id}`}),
+      h('div', {class: 'detail-value'}, `${att.content_type || 'tipo ignoto'} · ${sizeLabel(att.size)}`, ' ',
+        badge(att.stored ? 'conservato' : 'non conservato', att.stored ? 'ok' : 'warn')))))
+    : emptyState('Nessun allegato.') );
+  if (item.transcripts.length) {
+    parts.push(h('h4', {class: 'detail-title', text: 'Trascrizioni'}));
+    parts.push(h('div', {class: 'detail-rows'}, item.transcripts.map(t =>
+      h('div', {class: 'detail-row'}, h('span', {class: 'detail-label', text: t.kind}), h('div', {class: 'detail-value', text: t.text})))));
+  }
+  body.replaceChildren(...parts);
+}
+async function openCommunication(item) {
+  const generation = sessionGeneration;
+  try {
+    const result = await api(`/api/communications/${item.id}`);
+    if (generation !== sessionGeneration) return;
+    el('communication-detail-title').textContent = `Comunicazione #${result.id}`;
+    renderCommunicationDetail(result);
+    el('communication-detail').hidden = false;
+    el('communication-detail-close').focus();
+  } catch (error) {
+    if (generation === sessionGeneration) el('communications-status').textContent = error.message;
+  }
+}
+function renderCommunications() {
+  const box = el('communications-list');
+  const result = state.communications;
+  if (!result) {skeleton(box); return;}
+  segmented(el('communications-direction'), [['all', 'Tutte'], ['in', 'In entrata'], ['out', 'In uscita']],
+    state.communicationsDirection, value => {state.communicationsDirection = value; renderCommunications();});
+  const term = state.communicationsTerm.toLocaleLowerCase('it');
+  const rows = result.communications.filter(item =>
+    (state.communicationsDirection === 'all' || item.direction === state.communicationsDirection)
+    && (!term || `${item.sender || ''} ${item.subject || ''}`.toLocaleLowerCase('it').includes(term)));
+  if (!rows.length) {
+    box.replaceChildren(emptyState(term || state.communicationsDirection !== 'all'
+      ? 'Nessuna comunicazione corrisponde al filtro.' : 'Nessuna comunicazione archiviata.'));
+    return;
+  }
+  const body = h('tbody');
+  rows.forEach(item => {
+    const open = h('button', {type: 'button', class: 'btn btn-ghost btn-sm', text: 'Apri'});
+    open.onclick = () => openCommunication(item);
+    body.append(h('tr', {}, h('td', {class: 'comm-channel'}, h('div', {class: 'name'}, icon(channelIcon(item.channel)), channelName(item.channel))),
+      h('td', {class: 'comm-direction'}, directionBadge(item.direction)),
+      h('td', {class: 'comm-sender', text: item.sender || '—'}),
+      h('td', {class: 'comm-subject', text: item.subject || item.preview || '—'}),
+      h('td', {class: 'comm-when', title: localDate(item.ts || item.acquired_at), text: ago(item.ts || item.acquired_at)}),
+      h('td', {class: 'num comm-attachments', text: item.attachments ? String(item.attachments) : ''}),
+      h('td', {class: 'actions-cell'}, open)));
+  });
+  const headers = [['Canale', 'comm-channel'], ['Direzione', 'comm-direction'], ['Mittente', 'comm-sender'],
+    ['Oggetto', 'comm-subject'], ['Quando', 'comm-when'], ['Allegati', 'comm-attachments num'], ['', '']];
+  box.replaceChildren(h('table', {class: 'tbl'},
+    h('thead', {}, h('tr', {}, headers.map(([text, cls]) => h('th', {class: cls || false, text})))), body));
+}
+async function loadCommunications() {
+  const generation = sessionGeneration;
+  el('communications-refresh').disabled = true;
+  try {
+    const result = await api('/api/communications');
+    if (generation !== sessionGeneration) return;
+    state.communications = result;
+    renderCommunications();
+    el('communications-status').textContent = result.communications.length
+      ? `Mostrate ${result.communications.length} comunicazioni su un massimo di ${result.limit}.`
+      : 'Nessuna comunicazione archiviata.';
+  } catch (error) {
+    if (generation === sessionGeneration) {
+      el('communications-status').textContent = `${error.message}. Elenco non disponibile.`;
+      el('communications-list').replaceChildren();
+    }
+  } finally {if (generation === sessionGeneration) el('communications-refresh').disabled = false;}
+}
+el('communications-refresh').onclick = loadCommunications;
+el('communications-search').oninput = () => {state.communicationsTerm = el('communications-search').value; renderCommunications();};
+
 // ------------------------------------------------------------------ panoramica
 async function loadTrends() {
   const generation = sessionGeneration;
@@ -1098,11 +1221,11 @@ async function refresh() {
     el('status').textContent = e.message; el('status').dataset.state = 'bad';
   }
 }
-el('refresh-now').onclick = () => {refresh(); loadTrends(); loadBudget(); loadAgent();};
+el('refresh-now').onclick = () => {refresh(); loadTrends(); loadBudget(); loadAgent(); loadCommunications();};
 
 // ------------------------------------------------------------ avvio e sessione
 function loadWorkspace() {
-  return Promise.all([loadTrends(), loadAgent(), loadPolicies(), loadBudget(), browseFiles()]);
+  return Promise.all([loadTrends(), loadAgent(), loadPolicies(), loadBudget(), browseFiles(), loadCommunications()]);
 }
 el('login').onsubmit = async e => {
   e.preventDefault(); el('error').textContent = '';
@@ -1123,4 +1246,5 @@ setInterval(() => {
   refresh();
   state.tick += 1;
   if (state.tick % 3 === 0) {loadTrends(); loadBudget(); loadAgent();}
+  if (currentPage === 'communications' && state.tick % 3 === 0) loadCommunications();
 }, 10000);

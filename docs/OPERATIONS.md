@@ -143,8 +143,9 @@ by explicit class. Never point the test URL at a production cluster. See `AGENTS
 exact commands.
 
 Frontend: `tests/dashboard/test_web_session_safety.py` runs the real `charts.js` + `app.js` in a Node VM with
-a synthetic DOM (no browser): session fencing, confirmations, budget levels, configuration lifecycle and the
-overview. The fake DOM rejects `append(false/null)`, which a real browser would render as text. To look at the
+a synthetic DOM (no browser): session fencing, confirmations, budget levels, configuration lifecycle, the
+communications list/detail and the overview. The fake DOM rejects `append(false/null)`, which a real browser
+would render as text. To look at the
 interface with fictitious data, create a disposable database whose name ends in `_demo` and run
 `P_SECRETARY_DEMO_DATABASE_URL="host=... dbname=secretary_demo user=... password=..." python -m tests.demo_dashboard`
 (login `demo` / `demo`, port 8099). The runner refuses any other database name, uses placeholder tokens and

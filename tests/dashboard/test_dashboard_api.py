@@ -34,6 +34,7 @@ class DashboardApiTests(unittest.TestCase):
     def test_every_api_requires_authentication_and_same_origin(self):
         anonymous = dashboard.create_app({'username': 'owner', 'password': 'offline'}).test_client()
         for path in ('/api/agent', '/api/agent/runs/1', '/api/budget', '/api/budget/limits', '/api/trends',
+                     '/api/communications', '/api/communications/1',
                      '/api/data-policies', '/api/capabilities', '/api/privacy/messages/1/export'):
             with self.subTest(path=path):
                 self.assertEqual(anonymous.get(path).status_code, 401)
@@ -136,6 +137,59 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/agent/runs/0').status_code, 400)
         self.assertEqual(self.client.get('/api/agent/runs/5?x=1').status_code, 400)
         self.assertEqual(self.client.get('/api/agent/runs/abc').status_code, 404)
+
+    # ------------------------------------------------------- comunicazioni
+    def test_communications_list_is_bounded_and_preview_only(self):
+        at = datetime(2026, 10, 20, 12, tzinfo=timezone.utc)
+        self.conn.execute.return_value.fetchall.return_value = [
+            (7, at, at, 'email', 'in', 'mario@example.test', 'Oggetto', 'Anteprima', True, 'lavoro', 'alta', 2),
+            (6, None, at, 'telegram', 'out', 'io', None, 'Ciao', False, None, None, 0)]
+        response = self.client.get('/api/communications')
+        self.assertEqual(response.status_code, 200)
+        body = response.json
+        self.assertEqual(body['limit'], dashboard.COMMUNICATIONS_LIMIT)
+        self.assertEqual([item['id'] for item in body['communications']], [7, 6])
+        self.assertEqual(body['communications'][0]['direction'], 'in')
+        self.assertEqual(body['communications'][0]['attachments'], 2)
+        self.assertIsNone(body['communications'][1]['ts'])
+        statement, parameters = self.conn.execute.call_args.args
+        self.assertTrue(statement.lstrip().startswith('SELECT'))
+        self.assertIn('left(c.body,240)', statement)
+        self.assertIn('LIMIT %s', statement)
+        self.assertEqual(parameters, (dashboard.COMMUNICATIONS_LIMIT,))
+        for forbidden in ('metadata', 'uidvalidity', 'source_id', 'chat_id'):
+            self.assertNotIn(forbidden, statement)
+        self.assertEqual(self.client.get('/api/communications?x=1').status_code, 400)
+        self.assertEqual(self.post('/api/communications', {}).status_code, 405)
+
+    def test_communication_detail_exposes_text_analysis_and_attachments_without_paths(self):
+        at = datetime(2026, 10, 20, 12, tzinfo=timezone.utc)
+        row = (7, at, at.date(), at, 'email', 'owner@example.test', 'mario@example.test', 'Oggetto',
+               'Corpo completo', 'in', None, 'INBOX', 'Riepilogo', 'lavoro', 'alta', True, 'rispondere',
+               True, 'chiedi conferma', False)
+        self.conn.execute.return_value.fetchone.return_value = row
+        self.conn.execute.return_value.fetchall.side_effect = [
+            [(3, 'fattura.pdf', 'application/pdf', 2048, True)],
+            [('audio', 'trascrizione del vocale')]]
+        response = self.client.get('/api/communications/7')
+        self.assertEqual(response.status_code, 200)
+        body = response.json
+        self.assertEqual(body['body'], 'Corpo completo')
+        self.assertEqual(body['summary'], 'Riepilogo')
+        self.assertTrue(body['needs_action'])
+        self.assertEqual(body['attachments'], [dict(id=3, filename='fattura.pdf', content_type='application/pdf',
+                                                    size=2048, stored=True)])
+        self.assertEqual(body['transcripts'], [dict(kind='audio', text='trascrizione del vocale')])
+        self.assertNotIn('path', response.get_data(as_text=True))
+        self.assertEqual(self.client.get('/api/communications/0').status_code, 400)
+        self.assertEqual(self.client.get('/api/communications/7?x=1').status_code, 400)
+        self.assertEqual(self.client.get('/api/communications/abc').status_code, 404)
+
+    def test_communication_detail_unknown_id_is_not_found(self):
+        self.conn.execute.return_value.fetchone.return_value = None
+        response = self.client.get('/api/communications/99')
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json['error'], 'Comunicazione non trovata')
 
     # -------------------------------------------------------------- tendenze
     def test_trends_are_aggregate_counts_aligned_to_days_without_content(self):
@@ -309,7 +363,8 @@ class DashboardApiTests(unittest.TestCase):
         scripts = {name: (STATIC_DIR / name).read_text() for name in ('app.js', 'charts.js')}
         script = scripts['app.js']
         page = (STATIC_DIR / 'index.html').read_text()
-        for label in ('Agente', 'Permessi AI', 'Budget AI', 'Impostazioni', 'Archivio e file', 'Panoramica'):
+        for label in ('Agente', 'Permessi AI', 'Budget AI', 'Impostazioni', 'Archivio e file', 'Panoramica',
+                      'Comunicazioni'):
             self.assertIn(label, page)
         for name, source in scripts.items():
             for forbidden in ('innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'localStorage',

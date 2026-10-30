@@ -20,11 +20,16 @@ CREDENTIAL_FILE = Path.home() / '.config' / 'p-secretary' / 'dashboard.json'
 # Finite server contracts. No module, table, path or SQL arrives from the browser.
 STATIC_ASSETS = ('app.js', 'charts.js', 'style.css', 'logo.webp')
 TREND_DAYS = 14
+COMMUNICATIONS_LIMIT = 100
 DATA_CHANNELS = ('email', 'telegram', 'whatsapp')
 DATA_EFFECTS = ('ai_text', 'ai_media', 'ai_history')
 
 
 class Unsupported(RuntimeError):
+    pass
+
+
+class NotFound(RuntimeError):
     pass
 
 
@@ -415,6 +420,52 @@ def agent_run_view(identity):
                                              duration_ms=r[5], at=r[6].isoformat()) for r in rows])
 
 
+def communications_view():
+    """Ultime comunicazioni native (entrata e uscita): anteprima limitata, nessun percorso fisico."""
+    with db._conn() as conn:
+        rows = conn.execute('''SELECT c.id,c.ts,c.acquired_at,c.channel,c.direction,c.sender,
+                c.subject,left(c.body,240),c.needs_action,c.category,c.priority,
+                (SELECT count(*) FROM attachments a WHERE a.message_id=c.id)
+            FROM communications c
+            ORDER BY COALESCE(c.ts,c.acquired_at) DESC, c.id DESC LIMIT %s''',
+            (COMMUNICATIONS_LIMIT,)).fetchall()
+    return dict(available=True, limit=COMMUNICATIONS_LIMIT,
+                communications=[dict(id=r[0], ts=r[1].isoformat() if r[1] else None,
+                    acquired_at=r[2].isoformat() if r[2] else None, channel=r[3],
+                    direction=r[4], sender=r[5], subject=r[6], preview=r[7],
+                    needs_action=bool(r[8]), category=r[9], priority=r[10],
+                    attachments=r[11]) for r in rows])
+
+
+def communication_view(identity):
+    """Dettaglio di una comunicazione: testo, analisi, allegati e trascrizioni (mai byte o percorsi)."""
+    with db._conn() as conn:
+        row = conn.execute('''SELECT id,ts,day,acquired_at,channel,account,sender,subject,body,
+                direction,author,folder,summary,category,priority,needs_action,action,
+                needs_reply,reply_hint,notified
+            FROM communications WHERE id=%s''', (identity,)).fetchone()
+        if not row:
+            raise NotFound('Unknown communication')
+        attachments = conn.execute('''SELECT id,filename,content_type,
+                COALESCE(length(data),0),(path IS NOT NULL OR data IS NOT NULL)
+            FROM attachments WHERE message_id=%s ORDER BY id LIMIT 50''', (identity,)).fetchall()
+        transcripts = conn.execute('''SELECT t.kind,t.text FROM media_transcripts t
+                JOIN attachments a ON a.id=t.attachment_id
+            WHERE a.message_id=%s ORDER BY t.attachment_id LIMIT 20''', (identity,)).fetchall()
+    return dict(
+        id=row[0], ts=row[1].isoformat() if row[1] else None,
+        day=row[2].isoformat() if row[2] else None,
+        acquired_at=row[3].isoformat() if row[3] else None,
+        channel=row[4], account=row[5], sender=row[6], subject=row[7], body=row[8],
+        direction=row[9], author=row[10], folder=row[11],
+        summary=row[12], category=row[13], priority=row[14],
+        needs_action=bool(row[15]), action=row[16], needs_reply=bool(row[17]),
+        reply_hint=row[18], notified=bool(row[19]),
+        attachments=[dict(id=a[0], filename=a[1], content_type=a[2], size=a[3], stored=bool(a[4]))
+                     for a in attachments],
+        transcripts=[dict(kind=t[0], text=t[1]) for t in transcripts])
+
+
 def register_api(app):
     """Tutti i gestori ereditano autenticazione, CSRF e same-origin dell'app."""
     from functools import wraps
@@ -429,6 +480,8 @@ def register_api(app):
                 raise
             except Unsupported:
                 return jsonify(available=False, error='Servizio opzionale non installato'), 501
+            except NotFound:
+                return jsonify(error='Comunicazione non trovata'), 404
             except PermissionError:
                 return jsonify(error='Proprietario configurato richiesto'), 403
             except (ValueError, TypeError) as exc:
@@ -450,6 +503,21 @@ def register_api(app):
         if request.args:
             raise ValueError('Unknown parameter')
         return agent_run_view(identity)
+
+    @app.get('/api/communications')
+    @bounded
+    def communications():
+        if request.args:
+            raise ValueError('Unknown parameter')
+        return communications_view()
+
+    @app.get('/api/communications/<int:identity>')
+    @bounded
+    def communication(identity):
+        _positive(identity)
+        if request.args:
+            raise ValueError('Unknown parameter')
+        return communication_view(identity)
 
     @app.get('/api/privacy/messages/<int:identity>/export')
     @bounded
