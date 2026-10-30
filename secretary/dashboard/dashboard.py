@@ -396,7 +396,8 @@ def agent_view():
         runs = conn.execute('''SELECT id,kind,state,tool_calls,error,model,started_at,finished_at
             FROM agent_runs ORDER BY id DESC LIMIT 30''').fetchall()
         drafts = conn.execute('''SELECT id,account,recipient,subject,left(body,2000),state,
-                created_at,decided_at,sent_at FROM agent_email_outbox ORDER BY id DESC LIMIT 20''').fetchall()
+                created_at,decided_at,sent_at,draft_state,draft_folder,draft_error,source_message
+                FROM agent_email_outbox ORDER BY id DESC LIMIT 20''').fetchall()
     return dict(
         available=True, model=config.AGENT_MODEL,
         readonly_role=agent_data.readonly_role() is not None,
@@ -408,7 +409,8 @@ def agent_view():
               for r in runs],
         emails=[dict(id=r[0], account=r[1], recipient=r[2], subject=r[3], body=r[4], state=r[5],
                      created_at=r[6].isoformat(), decided_at=r[7].isoformat() if r[7] else None,
-                     sent_at=r[8].isoformat() if r[8] else None) for r in drafts])
+                     sent_at=r[8].isoformat() if r[8] else None, draft_state=r[9],
+                     draft_folder=r[10], draft_error=r[11], source_message=r[12]) for r in drafts])
 
 
 def agent_run_view(identity):

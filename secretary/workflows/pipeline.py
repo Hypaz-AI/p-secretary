@@ -381,6 +381,27 @@ def action(payload):
                 raise jobs.Permanent('Promemoria senza provenienza nativa notificabile')
             _effect(_notification_key(payload), origin[0], 'notify',
                     dict(text=prefix+row[0]+label, html=False, recipient=str(config.TELEGRAM_CHAT_ID)), remind)
+    elif kind == 'email_draft_cleanup':
+        # Rimuove la copia remota di una bozza scartata: nessun invio. La provenienza
+        # è il messaggio nativo dell'owner che l'aveva proposta; la ricevuta rende
+        # l'effetto idempotente e verificabile come ogni altro effetto esterno.
+        from secretary.agent import outbox
+        origin = payload.get('evidence_message_id')
+        if origin is None:
+            return
+        with db._conn() as conn:
+            jobs.assert_current(conn)
+            row = conn.execute('''SELECT account,draft_folder,draft_uid FROM agent_email_outbox
+                WHERE id=%s AND state='rejected' ''', (payload['id'],)).fetchone()
+        if not row or not row[1] or not row[2]:
+            return  # nulla da rimuovere: già inviata/cancellata dal client
+        effect_payload = dict(account=row[0], folder=row[1], uid=row[2])
+
+        def remove():
+            jobs.assert_current()
+            return outbox.cleanup_remote(payload['id'])
+        _effect(f"email-draft-cleanup:{payload['id']}", origin, 'email_draft_cleanup',
+                effect_payload, remove)
     elif kind == 'email':
         from secretary.agent import outbox
         from secretary.connectors import email as mail
@@ -391,6 +412,15 @@ def action(payload):
             return  # già inviata, scartata o mai approvata: nessun effetto
         if not outbox.sends_allowed():
             raise jobs.Deferred('Invio a terzi disattivato (modalità observe)')
+        # Se il proprietario ha già inviato o cancellato la bozza dal suo client,
+        # inviare di nuovo creerebbe un duplicato: si ferma prima dell'I/O.
+        guard = outbox.draft_guard(payload['id'])
+        if guard is None:
+            raise jobs.Deferred('Stato della bozza remota non verificabile: invio rinviato')
+        if guard is False:
+            with db._conn() as conn:
+                outbox.mark(conn, payload['id'], 'failed')
+            raise jobs.Permanent('La bozza non è più nella cartella Bozze: invio annullato per non duplicare')
         account = outbox.account_for(draft['account'])
         effect_payload = dict(account=draft['account'], recipient=draft['recipient'],
                               subject=draft['subject'],
@@ -408,6 +438,12 @@ def action(payload):
             raise
         with db._conn() as conn:
             outbox.mark(conn, payload['id'], 'sent')
+        # La bozza remota è ormai inviata: rimuovere la copia evita un doppione
+        # nella cartella Bozze del client. Best effort, dopo la ricevuta.
+        try:
+            outbox.cleanup_remote(payload['id'])
+        except Exception:
+            pass
     elif kind == 'zip':
         if not capabilities.enabled('monthly_zip') or not flows.enabled('monthly_zip'):
             raise jobs.Deferred('ZIP paused')

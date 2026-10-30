@@ -258,6 +258,49 @@ class TelegramMediaTests(unittest.TestCase):
         download.assert_not_called()
         self.assertIn('limite', messages[0]['text'])
 
+    def test_unsupported_owner_content_is_archived_not_silently_dropped(self):
+        # Nella chat privata owner↔bot ogni input riceve una risposta: uno
+        # sticker/video/posizione non scaricabile resta un messaggio visibile.
+        for key, label in (('sticker', 'sticker'), ('video', 'video'),
+                           ('location', 'posizione'), ('contact', 'contatto'),
+                           ('poll', 'sondaggio')):
+            with self.subTest(key=key):
+                (messages, offset), download = self.fetch(
+                    {'chat': {'id': 7, 'type': 'private'}, key: {'file_id': 'x'}})
+                self.assertEqual(offset, 6)
+                self.assertEqual(len(messages), 1)
+                self.assertEqual(messages[0]['text'], f'[Contenuto non supportato: {label}]')
+                self.assertEqual(messages[0]['attachments'], [])
+                download.assert_not_called()
+
+    def test_unsupported_content_placeholder_is_never_command_authority(self):
+        # Il segnaposto è testo sintetico: non deve diventare `direct_text`,
+        # ma il messaggio deve comunque arrivare al worker owner (risposta).
+        from secretary import main
+        from secretary.core import db, jobs, policy
+        message = {'update_id': 8, 'from': 'owner',
+                   'text': '[Contenuto non supportato: sticker]',
+                   'source_id': json.dumps(['bot', '123', '7', 42]),
+                   'chat_id': '7', 'chat_type': 'private',
+                   'msg_date': '2026-10-14T11:38:00+02:00',
+                   'metadata': {'account': 'bot:123', 'update_id': 8, 'message_id': 42,
+                                'chat_id': '7', 'chat_type': 'private', 'chat_name': 'owner',
+                                'author': 7, 'direction': 'in'},
+                   'attachments': []}
+        with patch.object(main, 'running', True), \
+             patch.object(config, 'TELEGRAM_CHAT_ID', '7'), \
+             patch.object(config, 'TELEGRAM_BOT_TOKEN', '123:test'), \
+             patch.object(main.flows, 'enabled', return_value=True), \
+             patch.object(telegram, 'fetch_new_messages', return_value=([message], 9)), \
+             patch.object(db, '_conn') as connect, \
+             patch.object(db.message_store, 'store', return_value=42) as store, \
+             patch.object(policy, 'can_operate', return_value=True), \
+             patch.object(jobs, 'enqueue') as enqueue:
+            main.check_telegram({})
+        metadata = store.call_args.kwargs['metadata']
+        self.assertEqual(metadata['content_origin'], 'attachment')
+        self.assertEqual(enqueue.call_args.args[1], 'owner')
+
 
 class OwnerMediaTests(unittest.TestCase):
     """Il worker del proprietario: comando slash solo da testo nativo diretto, altrimenti l'agente."""
@@ -276,7 +319,7 @@ class OwnerMediaTests(unittest.TestCase):
         connect = self.enterContext(patch('secretary.core.db._conn'))
         connect.return_value.__enter__.return_value = self.conn
         self.enterContext(patch('secretary.core.policy.can_operate', side_effect=lambda conn, mid, effect, **kw:
-            mid == 42 and effect in {'owner_command', 'ai_text', 'ai_media'}))
+            mid == 42 and effect in {'owner_command', 'owner_dialogue', 'ai_text', 'ai_media'}))
         self.enterContext(patch('secretary.core.policy.metadata_for', return_value=dict(metadata=dict(
             content_origin='direct_text', is_forwarded=False))))
         self.enterContext(patch('secretary.core.jobs.assert_current'))

@@ -251,7 +251,17 @@ budget proprio, non la finestra di contesto né una spesa fissa:
   in `TELEGRAM_CHAT_ID` è accettata dal bot; senza proprietario configurato nessun messaggio lo è.
   Chat estranee, gruppi e canali sono ignorati prima di download, archiviazione o analisi,
   senza risposta (gli update sono comunque consumati).
-- Il testo di un'immagine o di un vocale non è mai interpretato come comando.
+- **Nella chat privata owner↔bot ogni input va valutato e riceve una risposta**:
+  testo, vocale, immagine o documento. Nessuno di questi input viene ignorato.
+  L'autorità di *dialogo* (`owner_dialogue`) ammette `direct_text`, `direct_audio`
+  e `attachment`; l'autorità di *comando* e ogni scrittura (`owner_command`,
+  `task_apply`, `memory_write`, `email_send`, …) richiede solo `direct_text`.
+- Il testo di un'immagine o di un vocale non è mai interpretato come comando: al
+  massimo l'agente risponde e chiede al proprietario di scrivere l'azione.
+- Anche un contenuto che il connettore non sa scaricare (sticker, video, GIF,
+  posizione, contatto, sondaggio…) viene archiviato con un segnaposto
+  `[Contenuto non supportato: …]` e riceve una risposta: non viene mai scartato
+  in silenzio. Il segnaposto è testo sintetico e non vale come comando.
 - L'estrazione generica PDF/XML resta separata. L'account personale Telegram resta in sola
   lettura (niente invii né ricevute di lettura), ma scarica vocali e immagini.
 

@@ -120,6 +120,33 @@ class AuthorityTests(IsolatedTests):
             with self.subTest(origin=origin):
                 self.assertFalse(self.allowed(native(metadata={'content_origin': origin})))
 
+    def test_voice_image_and_document_get_dialogue_but_never_command_authority(self):
+        # Nella chat privata owner↔bot ogni input va valutato e riceve risposta;
+        # solo il testo scritto può però eseguire comandi o autorizzare scritture.
+        for origin in ('direct_audio', 'attachment'):
+            with self.subTest(origin=origin):
+                values = native(metadata={'content_origin': origin})
+                self.assertTrue(self.allowed(values, 'owner_dialogue', owner_required=True))
+                self.assertFalse(self.allowed(values, 'owner_command', owner_required=True))
+                for effect in ('task_apply', 'task_create', 'memory_write', 'email_send',
+                               'reminder_create'):
+                    self.assertFalse(self.allowed(values, effect))
+                self.assertTrue(self.allowed(values, 'task_propose'))
+        # Il testo scritto resta l'unica autorità di comando.
+        self.assertTrue(self.allowed(native(), 'owner_command', owner_required=True))
+        self.assertTrue(self.allowed(native(), 'owner_dialogue', owner_required=True))
+
+    def test_dialogue_authority_still_requires_the_private_owner_chat(self):
+        for change in ({'channel': 'telegram (account)'}, {'channel': 'whatsapp'},
+                       {'account': 'bot:999'}, {'author': '8'}, {'chat_id': '8'},
+                       {'direction': 'out'}, {'metadata': {'chat_type': 'group'}},
+                       {'metadata': {'is_forwarded': True}},
+                       {'metadata': {'historical': True}}):
+            with self.subTest(change=change):
+                values = native(metadata={'content_origin': 'direct_audio'})
+                values.update(change)
+                self.assertFalse(self.allowed(values, 'owner_dialogue', owner_required=True))
+
     def test_metadata_identity_and_native_source_must_agree(self):
         for field, value in (('account', 'bot:999'), ('chat_id', '8'), ('author', '8'),
                              ('direction', 'out'), ('message_id', '42'), ('message_id', True),

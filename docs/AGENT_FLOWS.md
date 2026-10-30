@@ -72,10 +72,21 @@ WhatsApp) e, **nella stessa transazione**, accoda **un solo** job `analysis:{id}
 `policy.can_operate(..., 'extract')` lo consente. Lo storico importato (`historical`)
 è archivio e contesto read-only: non genera mai job operativi.
 
-Il bot accetta solo la chat privata dell'owner configurato; ogni suo messaggio diretto
-diventa un job `owner:{id}` (con ordine rispettato: una risposta alla volta).
+Il bot accetta solo la chat privata dell'owner configurato; **ogni** suo input
+diretto diventa un job `owner:{id}` (con ordine rispettato: una risposta alla
+volta): testo, vocale, immagine o documento. Nessun input diretto viene ignorato.
 Ogni messaggio dell'owner porta con sé la provenienza (`content_origin`,
 `is_forwarded`) che il server rivaluta; il modello non la vede come argomento.
+
+L'autorità è separata in due livelli:
+
+| Effetto | Origini ammesse |
+|---|---|
+| `owner_dialogue` (rispondere, leggere) | `direct_text`, `direct_audio`, `attachment` |
+| `owner_command` e ogni scrittura (`task_apply`, `memory_write`, `email_send`, …) | solo `direct_text` |
+
+Quindi un vocale o una foto ricevono sempre una risposta, ma non possono mai
+autorizzare una modifica: in quel caso l'agente risponde e chiede di scriverla.
 
 ## 3. Il turno dell'owner (dialogo)
 
@@ -253,26 +264,39 @@ L'agente **non può** scrivere su Calendar: crea soltanto la proposta. Il grant 
 payload esatto e la destinazione; un replay non lo rinnova. Annullare un evento remoto
 richiede un nuovo gesto esplicito (`/annulla N`): chiudere un'attività non basta.
 
-## 9. Email in uscita: bozza → `/invia`
+## 9. Email in uscita: bozza nella casella → `/invia`
 
 ```mermaid
 sequenceDiagram
     participant AG as Agente
     participant OB as agent_email_outbox
+    participant IM as IMAP (cartella Bozze)
     participant O as Owner
     participant A as Worker action
     participant S as SMTP
-    AG->>OB: email_propose (account, destinatario, oggetto, testo) → «proposed»
-    OB-->>O: la bozza con il suo ID e l'invito a rispondere /invia ID o /scarta ID
+    AG->>OB: email_propose (account, destinatario, oggetto, testo, reply_to_message_id?)
+    OB->>OB: riga «proposed», draft_state='pending' (attempt PRIMA dell'I/O)
+    OB->>IM: APPEND (\Draft) nella cartella Bozze
+    IM-->>OB: cartella + UID + Message-ID (o errore bounded)
+    OB-->>O: Telegram: «bozza pronta nella cartella Bozze», /invia ID o /scarta ID
     O->>OB: /invia N (testo nativo, SECRETARY_MODE=active)
     OB->>A: job action (email)
+    A->>IM: la copia remota è ancora una bozza? (flag \Draft)
     A->>A: tentativo committato PRIMA dell'I/O
     A->>S: invio
     S-->>A: accettato / fallito / incerto
+    A->>IM: rimozione della copia remota (best effort)
 ```
 
+La bozza è **vera**: il proprietario la vede e la modifica dal suo mail client. Il thread
+(`In-Reply-To`/`References`) è ricavato dal server dal messaggio archiviato indicato con
+`reply_to_message_id`, mai dal modello; il destinatario deve essere il mittente di quel
+messaggio. Se il proprietario ha già inviato o cancellato la bozza dal client, il flag
+`\Draft` non c'è più e l'invio si ferma (fallimento permanente) invece di duplicare.
+`/scarta` rimuove la copia remota solo finché è ancora una bozza.
+
 Vincoli: un solo destinatario, indirizzo nudo (niente nome visualizzato), nessun
-allegato né intestazione, account dalla configurazione. `/invia` è rifiutato se
+allegato né intestazione arbitraria, account dalla configurazione. `/invia` è rifiutato se
 `SECRETARY_MODE='observe'`. Un esito incerto non viene mai rinviato alla cieca.
 
 ## 10. Gateway LLM e budget

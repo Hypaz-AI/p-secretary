@@ -24,11 +24,12 @@ class OwnerCommandCase(AgentPostgresCase):
         self.enterContext(patch.object(config, 'TELEGRAM_BOT_TOKEN', '777:offline'))
         self.enterContext(patch.object(config, 'TIMEZONE', 'Europe/Rome'))
 
-    def owner_message(self, text, *, direct=True, forwarded=False, author=OWNER, historical=False):
+    def owner_message(self, text, *, direct=True, forwarded=False, author=OWNER, historical=False,
+                      origin=None):
         number = int(uuid.uuid4().hex[:8], 16) + 1
         metadata = dict(account='bot:777', chat_id=OWNER, author=author, direction='in', chat_type='private',
-                        content_origin='direct_text' if direct else 'forwarded', is_forwarded=forwarded,
-                        message_id=number)
+                        content_origin=origin or ('direct_text' if direct else 'forwarded'),
+                        is_forwarded=forwarded, message_id=number)
         return message_store.store(self.conn, 'telegram', 'Mario', '', text, ts='2026-10-20T10:00:00+00:00',
                                    source_id=json.dumps(['bot', '777', author, number]), metadata=metadata,
                                    historical=historical)
@@ -137,6 +138,34 @@ class CommandAuthorityTests(OwnerCommandCase):
         self.assertTrue(self.command(mid))
         self.assertEqual(self.conn.execute('SELECT count(*) FROM tasks').fetchone()[0], 1)
         self.assertEqual(len(self.keys(f'owner-reply:{mid}:%')), 1)
+
+    def test_two_distinct_voice_messages_are_not_deduplicated(self):
+        # Un vocale ha body vuoto: due vocali diversi sono richieste distinte e
+        # non devono ricevere la stessa risposta (né rimandarsi a vicenda).
+        first = self.owner_message('', origin='direct_audio')
+        second = self.owner_message('', origin='direct_audio')
+        # Dentro la finestra di riuso (REUSE_MINUTES): è lì che la deduplica per
+        # testo identico potrebbe scambiare due vocali diversi per la stessa richiesta.
+        self.conn.execute("UPDATE telegram_messages SET ts=now() WHERE id IN (%s,%s)",
+                          (first, second))
+        with db._conn() as conn:
+            jobs.enqueue(conn, 'owner', f'owner:{first}', dict(message_id=first, text=''))
+            jobs.enqueue(conn, 'owner', f'owner:{second}', dict(message_id=second, text=''))
+        worker = jobs.Worker('owner', lambda payload: None)
+        job = jobs.claim('owner')
+        with worker._execution(job):
+            self.assertEqual(owner.begin(first, '', False)[1], None)
+            # Il primo vocale è già stato evaso: la sua risposta NON deve essere
+            # riusata per il secondo vocale solo perché entrambi hanno body vuoto.
+            owner.complete(first, 'Risposta al primo vocale')
+        jobs.finish(job)
+        job = jobs.claim('owner')
+        with worker._execution(job):
+            self.assertEqual(owner.begin(second, '', False)[1], None)
+        jobs.finish(job)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM owner_exchanges').fetchone()[0], 2)
+        self.assertEqual(self.conn.execute(
+            'SELECT response FROM owner_exchanges WHERE message_id=%s', (second,)).fetchone()[0], None)
 
     def test_replies_are_delivered_in_request_order(self):
         first = self.owner_message('/task Primo')
@@ -249,6 +278,114 @@ class EmailDraftCommandTests(OwnerCommandCase):
             self.command(mid)
         self.assertEqual(self.keys('email-send:%'), [])
         self.assertEqual(self.conn.execute('SELECT state FROM agent_email_outbox').fetchone()[0], 'rejected')
+
+    def test_a_new_draft_starts_pending_and_is_published_into_the_mailbox(self):
+        identity = self.draft()
+        self.assertEqual(self.conn.execute('SELECT draft_state FROM agent_email_outbox').fetchone()[0], 'pending')
+        with patch('secretary.connectors.email.save_draft',
+                   return_value=dict(folder='Drafts', uid='12', message_id='<d@example.test>')) as save:
+            result = outbox.publish_draft(identity)
+        save.assert_called_once()
+        self.assertEqual(result['draft_state'], 'saved')
+        row = self.conn.execute('''SELECT draft_state,draft_folder,draft_uid,draft_message_id
+            FROM agent_email_outbox''').fetchone()
+        self.assertEqual(row, ('saved', 'Drafts', '12', '<d@example.test>'))
+        # La notifica dice dove trovarla e come deciderne l'invio.
+        text = self.conn.execute("SELECT payload->>'text' FROM work_jobs WHERE key=%s",
+                                 (f'email-draft:{identity}',)).fetchone()[0]
+        self.assertIn('cartella Bozze', text)
+        self.assertIn(f'/invia {identity}', text)
+        self.assertEqual(self.keys('email-send:%'), [])
+
+    def test_a_crashed_save_is_recovered_by_the_periodic_retry(self):
+        identity = self.draft()
+        # Simula un crash tra il commit e l'IMAP: la riga resta `pending` e vecchia.
+        self.conn.execute("UPDATE agent_email_outbox SET created_at=now()-interval '10 minutes'")
+        with patch('secretary.connectors.email.save_draft',
+                   return_value=dict(folder='Drafts', uid='12', message_id='<d@example.test>')):
+            results = outbox.retry_pending()
+        self.assertEqual([r['draft_id'] for r in results], [identity])
+        self.assertEqual(self.conn.execute('SELECT draft_state FROM agent_email_outbox').fetchone()[0], 'saved')
+
+    def test_a_recent_pending_row_is_not_retried_yet(self):
+        self.draft()
+        with patch('secretary.connectors.email.save_draft',
+                   side_effect=AssertionError('Troppo presto: il turno potrebbe essere ancora in corso')):
+            self.assertEqual(outbox.retry_pending(), [])
+
+    def test_publishing_twice_never_creates_a_second_remote_draft(self):
+        identity = self.draft()
+        with patch('secretary.connectors.email.save_draft',
+                   return_value=dict(folder='Drafts', uid='12', message_id='<d@example.test>')) as save:
+            outbox.publish_draft(identity)
+            outbox.publish_draft(identity)
+        self.assertEqual(save.call_count, 1)
+
+    def test_a_failed_remote_save_keeps_the_draft_and_reports_it(self):
+        identity = self.draft()
+        with patch('secretary.connectors.email.save_draft',
+                   side_effect=__import__('secretary.connectors.email', fromlist=['DraftError'])
+                   .DraftError('Cartella Bozze non trovata')):
+            result = outbox.publish_draft(identity)
+        self.assertEqual(result['draft_state'], 'failed')
+        row = self.conn.execute('SELECT draft_state,draft_error FROM agent_email_outbox').fetchone()
+        self.assertEqual(row[0], 'failed')
+        self.assertIn('Cartella Bozze', row[1])
+        # La bozza locale resta decidibile: nessun invio è stato tentato.
+        self.assertEqual(self.conn.execute('SELECT state FROM agent_email_outbox').fetchone()[0], 'proposed')
+
+    def test_discarding_a_saved_draft_queues_the_remote_cleanup(self):
+        identity = self.draft()
+        with patch('secretary.connectors.email.save_draft',
+                   return_value=dict(folder='Drafts', uid='12', message_id='<d@example.test>')):
+            outbox.publish_draft(identity)
+        self.command(self.owner_message(f'/scarta {identity}'))
+        self.assertEqual(self.keys('email-draft-cleanup:%'), [f'email-draft-cleanup:{identity}'])
+
+    def test_the_send_guard_stops_when_the_owner_already_sent_it_from_the_client(self):
+        identity = self.draft()
+        with patch('secretary.connectors.email.save_draft',
+                   return_value=dict(folder='Drafts', uid='12', message_id='<d@example.test>')):
+            outbox.publish_draft(identity)
+        with patch('secretary.connectors.email.draft_exists', return_value=True):
+            self.assertTrue(outbox.draft_guard(identity))
+        with patch('secretary.connectors.email.draft_exists', return_value=False):
+            self.assertFalse(outbox.draft_guard(identity))
+        # Un errore IMAP è incerto: non si invia alla cieca, ma si può ritentare.
+        with patch('secretary.connectors.email.draft_exists', side_effect=OSError('rete')):
+            self.assertIsNone(outbox.draft_guard(identity))
+
+    def test_a_draft_never_saved_remotely_does_not_block_the_send(self):
+        identity = self.draft()
+        with patch('secretary.connectors.email.draft_exists',
+                   side_effect=AssertionError('Nessun controllo remoto senza bozza salvata')):
+            self.assertTrue(outbox.draft_guard(identity))
+
+    def test_replying_uses_the_archived_thread_and_the_sender_as_recipient(self):
+        source = self.message(subject='Preventivo', body='Mi confermi?', sender='Mario <mario@example.test>')
+        self.conn.execute("UPDATE email_messages SET metadata=%s WHERE id=%s",
+                          (json.dumps(dict(message_id='<orig@example.test>',
+                                           references='<a@example.test>')), source))
+        self.consent('email', 'ai_text')
+        mid = self.owner_message('Rispondi a Mario')
+        with db._conn() as conn, conn.transaction():
+            with patch('secretary.core.jobs.assert_current'):
+                identity = outbox.propose(conn, 'me@example.test', 'mario@example.test', 'Re: Preventivo',
+                                          'Confermo', mid, source_message=source)['draft_id']
+        row = self.conn.execute('''SELECT in_reply_to,references_header,source_message
+            FROM agent_email_outbox WHERE id=%s''', (identity,)).fetchone()
+        self.assertEqual(row, ('<orig@example.test>', '<a@example.test> <orig@example.test>', source))
+
+    def test_replying_to_a_different_recipient_is_refused(self):
+        source = self.message(subject='Preventivo', body='Mi confermi?', sender='Mario <mario@example.test>')
+        self.consent('email', 'ai_text')
+        mid = self.owner_message('Rispondi a Mario')
+        with db._conn() as conn, conn.transaction():
+            with patch('secretary.core.jobs.assert_current'):
+                with self.assertRaises(outbox.OutboxError):
+                    outbox.propose(conn, 'me@example.test', 'anna@example.test', 'Re: Preventivo',
+                                   'Confermo', mid, source_message=source)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM agent_email_outbox').fetchone()[0], 0)
 
 
 class OfflineCommandTests(unittest.TestCase):

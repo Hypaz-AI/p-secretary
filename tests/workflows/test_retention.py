@@ -176,10 +176,10 @@ class ProtectionContractTests(unittest.TestCase):
         clause = retention._protected('m')
         for needle in ('tasks t', 'task_changes', 'notes n', 'effect_receipts',
                        "'authorized', 'attempted', 'uncertain'", 'agent_email_outbox',
-                       "'proposed', 'approved', 'uncertain'", 'calendar_effect_grants',
+                       'o.source_message', "'proposed', 'approved', 'uncertain'", 'calendar_effect_grants',
                        'system_notifications', 'source_ids', 'media_source_ids',
                        "'pending', 'running', 'blocked'", "j.payload->>'message_id'",
-                       "j.payload->>'attachment_id'"):
+                       "j.payload->>'evidence_message_id'", "j.payload->>'attachment_id'"):
             with self.subTest(reference=needle):
                 self.assertIn(needle, clause)
 

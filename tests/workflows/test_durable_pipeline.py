@@ -117,6 +117,75 @@ assert signal.getsignal(signal.SIGTERM) == before, 'importing main registered a 
         self.assertFalse(any('UPDATE message_analysis' in call.args[0]
                              for call in self.conn.execute.call_args_list))
 
+    def test_email_send_is_blocked_when_the_owner_already_sent_the_draft(self):
+        """La bozza remota non è più una bozza: inviare di nuovo duplicherebbe."""
+        from secretary.agent import outbox
+        draft = dict(account='me@example.test', recipient='luca@example.test', subject='Ciao',
+                     body='Testo', approved_by_message=42)
+        with patch.object(outbox, 'load_approved', return_value=draft), \
+                patch.object(outbox, 'sends_allowed', return_value=True), \
+                patch.object(outbox, 'account_for', return_value=dict(address='me@example.test')), \
+                patch.object(outbox, 'draft_guard', return_value=False), \
+                patch.object(outbox, 'mark') as mark, \
+                patch('secretary.connectors.email.send_with_attachments') as send:
+            with self.assertRaisesRegex(jobs.Permanent, 'non è più nella cartella Bozze'):
+                pipeline.action({'type': 'email', 'id': 1})
+        send.assert_not_called()
+        mark.assert_called_once_with(self.conn, 1, 'failed')
+
+    def test_email_send_is_deferred_when_the_remote_draft_state_is_unknown(self):
+        from secretary.agent import outbox
+        draft = dict(account='me@example.test', recipient='luca@example.test', subject='Ciao',
+                     body='Testo', approved_by_message=42)
+        with patch.object(outbox, 'load_approved', return_value=draft), \
+                patch.object(outbox, 'sends_allowed', return_value=True), \
+                patch.object(outbox, 'account_for', return_value=dict(address='me@example.test')), \
+                patch.object(outbox, 'draft_guard', return_value=None), \
+                patch.object(outbox, 'mark') as mark, \
+                patch('secretary.connectors.email.send_with_attachments') as send:
+            with self.assertRaises(jobs.Deferred):
+                pipeline.action({'type': 'email', 'id': 1})
+        send.assert_not_called()
+        mark.assert_not_called()
+
+    def test_email_send_proceeds_when_the_draft_is_still_a_draft(self):
+        from secretary.agent import outbox
+        draft = dict(account='me@example.test', recipient='luca@example.test', subject='Ciao',
+                     body='Testo', approved_by_message=42)
+        with patch.object(outbox, 'load_approved', return_value=draft), \
+                patch.object(outbox, 'sends_allowed', return_value=True), \
+                patch.object(outbox, 'account_for', return_value=dict(address='me@example.test')), \
+                patch.object(outbox, 'draft_guard', return_value=True), \
+                patch.object(outbox, 'mark') as mark, \
+                patch.object(outbox, 'cleanup_remote') as cleanup, \
+                patch.object(pipeline.policy, 'prepare_effect', return_value=True), \
+                patch.object(pipeline.policy, 'record_receipt', return_value=True), \
+                patch.object(pipeline.policy, 'effect_allowed', return_value=True), \
+                patch('secretary.connectors.email.send_with_attachments', return_value=True) as send:
+            pipeline.action({'type': 'email', 'id': 1})
+        send.assert_called_once()
+        mark.assert_called_once_with(self.conn, 1, 'sent')
+        cleanup.assert_called_once_with(1)
+
+    def test_discarded_draft_cleanup_removes_the_remote_copy_with_a_receipt(self):
+        from secretary.agent import outbox
+        self.conn.execute.return_value.fetchone.return_value = ('me@example.test', 'Drafts', '12')
+        with patch.object(outbox, 'cleanup_remote', return_value=True) as cleanup, \
+                patch.object(pipeline.policy, 'prepare_effect', return_value=True), \
+                patch.object(pipeline.policy, 'record_receipt', return_value=True), \
+                patch.object(pipeline.policy, 'effect_allowed', return_value=True):
+            pipeline.action({'type': 'email_draft_cleanup', 'id': 3, 'evidence_message_id': 42})
+        cleanup.assert_called_once_with(3)
+
+    def test_cleanup_without_a_remote_copy_does_nothing(self):
+        from secretary.agent import outbox
+        self.conn.execute.return_value.fetchone.return_value = ('me@example.test', None, None)
+        with patch.object(outbox, 'cleanup_remote') as cleanup, \
+                patch.object(pipeline.policy, 'prepare_effect') as prepare:
+            pipeline.action({'type': 'email_draft_cleanup', 'id': 3, 'evidence_message_id': 42})
+        cleanup.assert_not_called()
+        prepare.assert_not_called()
+
     def test_reminder_without_native_origin_fails_permanently(self):
         # A task without any native origin can never pass the notify gate.
         # reminder_is_current passes, the task row exists (deliverable in

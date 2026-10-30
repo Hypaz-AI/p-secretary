@@ -139,7 +139,9 @@ def check_telegram(state: dict):
         # Attest transport text/caption, never extracted document text or a placeholder.
         # New connectors supply this directly; this adapter supports older transports.
         if 'content_origin' not in metadata:
-            synthetic = text.startswith(('(file:', '\n[Media non scaricato:', '\n[Documento non scaricato:'))
+            synthetic = text.startswith(('(file:', '\n[Media non scaricato:',
+                                          '\n[Documento non scaricato:',
+                                          '[Contenuto non supportato:'))
             metadata['content_origin'] = ('forwarded' if indirect else 'direct_text'
                 if text.strip() and not synthetic else 'direct_audio' if audio else 'attachment')
         chat_name = metadata.get('chat_name') or 'bot'
@@ -147,11 +149,12 @@ def check_telegram(state: dict):
             mid = db.message_store.store(conn, 'telegram', m['from'], f'Telegram · {chat_name}', text,
                 ts=m.get('msg_date'), source_id=m.get('source_id'), metadata=metadata,
                 attachments=attachments)
-            owner = policy.can_operate(conn, mid, 'owner_command', owner_required=True)
-            route_dialogue = metadata.get('content_origin') in ('direct_text', 'direct_audio')
-            route_dialogue = route_dialogue or any(media_text.kind(a) == 'image' for a in attachments)
-            if owner and not indirect and route_dialogue:
-                # Any direct caption (PDF/XML/video/etc.), not just voice/photo.
+            # Nella chat privata owner↔bot OGNI input va valutato e riceve una
+            # risposta: testo, vocale, immagine o documento. L'autorità di
+            # dialogo è distinta da quella di comando: solo il testo scritto
+            # può eseguire comandi o autorizzare scritture.
+            owner = policy.can_operate(conn, mid, 'owner_dialogue', owner_required=True)
+            if owner and not indirect:
                 jobs.enqueue(conn, 'owner', f'owner:{mid}',
                              dict(text=text, message_id=mid, media=bool(attachments)))
             else:
@@ -225,7 +228,7 @@ def _owner_job(payload):
     from secretary.agent import owner, turns
     mid = payload['message_id']
     try:
-        owner.authorize(mid)
+        owner.authorize(mid, dialogue=True)
         row, attachments = pipeline.load_message(mid)
         text = row[3]
         with db._conn() as conn:
@@ -242,6 +245,12 @@ def _analysis_job(payload):
     """Posta in arrivo: l'agente fa il triage (anche per altri messaggi in attesa)."""
     from secretary.agent import turns
     return turns.inbox_job(payload)
+
+
+def _retry_drafts():
+    """Recupera i salvataggi di bozze interrotti da un crash (righe `pending`)."""
+    from secretary.agent import outbox
+    outbox.retry_pending()
 
 
 def main():
@@ -339,6 +348,8 @@ def main():
                     launch('digest', lambda: digest.maybe_send_digest(dict(state)))
                     launch('schedule', pipeline.schedule)
                     launch('retention', retention.run_scheduled)
+                    # Bozze rimaste `pending` per un crash tra commit e IMAP.
+                    launch('email-drafts', _retry_drafts)
                     flows.mark('gcal', gcal.readiness() if flows.enabled('gcal') else 'paused')
             except Exception as exc:
                 print(f'[main] cycle failed ({type(exc).__name__})')

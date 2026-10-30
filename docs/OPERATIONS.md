@@ -18,9 +18,10 @@ lifecycle, media, capabilities (with legacy provenance captured **first**), poli
 knowledge, AI budget, the `agent_*` tables and the `agent` views (`secretary/agent/schema.py`).
 It then starts six durable workers, one job at a time per kind: `analysis` (incoming
 triage), `owner` (dialogue), `digest`, `action` (the only place with external effects),
-`media` and `knowledge`. Named periodic activities have at most one live launcher thread
-each, in addition to the workers and their lease-heartbeat threads. **Run one
-scheduler/owner instance per deployment.** HTTP reads never bootstrap or migrate.
+`media` and `knowledge`. Named periodic activities (`email`, `digest`, `schedule`,
+`retention`, `email-drafts`) have at most one live launcher thread each, in addition to the
+workers and their lease-heartbeat threads. **Run one scheduler/owner instance per
+deployment.** HTTP reads never bootstrap or migrate.
 
 Verify upgrades on an isolated clone, not on live accounts or user data. No startup
 step grants consents or infers delegations.
@@ -101,13 +102,26 @@ backoff and records the outcome instead of silently dropping the attachment.
 
 ### Outgoing email
 
-The agent only **drafts** (`email_propose` → `agent_email_outbox`, state `proposed`).
+The agent only **drafts** (`email_propose` → `agent_email_outbox`, state `proposed`). The
+draft is a **real draft in the mailbox**: after the row is committed (`draft_state='pending'`,
+the attempt before I/O) the server appends it to the account's Drafts folder with
+`IMAP APPEND (\Draft)`, so the owner sees and edits it from his own mail client. The folder
+is resolved from the server's `\Drafts` special-use flag, falling back to known names
+(`[Gmail]/Drafts`, `Drafts`, `Bozze`, …). A failed append is reported (`draft_state='failed'`
+plus a bounded reason) and never blocks the local draft; a crash between commit and IMAP is
+recovered by `outbox.retry_pending()` (periodic task `email-drafts`).
+
 `/invia ID` (current native owner text, `SECRETARY_MODE=active`) approves it; the `action`
-worker then sends one text-only message to one bare address from a configured account. An
-attempt is committed before SMTP; a timeout, crash or false return is `uncertain` and is
-**never** resent automatically. `accepted` means the SMTP server accepted the message, not
-that it was delivered or read; revoking cannot recall a send already in flight. No
-attachments, threads/Message-ID, display names, lists or custom headers.
+worker then sends one text-only message to one bare address from a configured account. Before
+SMTP it re-checks that the remote copy is **still a draft** (`\Draft` flag): if the owner
+already sent or deleted it from his client, the job fails permanently instead of duplicating
+the message. An attempt is committed before SMTP; a timeout, crash or false return is
+`uncertain` and is **never** resent automatically. `accepted` means the SMTP server accepted
+the message, not that it was delivered or read; revoking cannot recall a send already in
+flight. `/scarta ID` also queues removal of the remote copy (only while it still carries
+`\Draft`). No attachments, display names, lists or custom headers; `In-Reply-To`/`References`
+are derived server-side from the archived message (`reply_to_message_id`), never supplied by
+the model, and the recipient must be that message's sender.
 
 ### Real AI caps (not a money budget)
 

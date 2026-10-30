@@ -117,6 +117,23 @@ class SchemaAndConsentTests(AgentPostgresCase):
             'SELECT table_name FROM information_schema.views WHERE table_schema=%s', (self.views,))}
         self.assertEqual(names, {n for n, _ in agent_schema.views(self.views)})
 
+    def test_the_draft_columns_are_added_to_an_already_migrated_installation(self):
+        """v2 additiva: una installazione v1 riceve le colonne della bozza remota."""
+        agent_schema.migrate(self.conn, self.views)
+        self.conn.execute('DELETE FROM schema_migrations WHERE version=%s',
+                          (f'{agent_schema.VERSION_V2}:{self.views}',))
+        for column in ('draft_state', 'draft_folder', 'draft_uid', 'draft_message_id',
+                       'draft_error', 'in_reply_to', 'references_header', 'source_message'):
+            self.conn.execute(f'ALTER TABLE agent_email_outbox DROP COLUMN {column}')
+        agent_schema.migrate(self.conn, self.views)
+        columns = {r[0] for r in self.conn.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='agent_email_outbox'")}
+        self.assertTrue({'draft_state', 'draft_folder', 'draft_uid', 'draft_message_id',
+                         'draft_error', 'in_reply_to', 'references_header', 'source_message'} <= columns)
+        self.assertEqual(self.conn.execute(
+            'SELECT count(*) FROM schema_migrations WHERE version=%s',
+            (f'{agent_schema.VERSION_V2}:{self.views}',)).fetchone()[0], 1)
+
     def test_without_any_consent_nothing_is_visible(self):
         self.message()
         self.assertEqual(data.db_query(f'SELECT id FROM {self.views}.messages')['rows'], [])

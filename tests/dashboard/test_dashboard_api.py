@@ -106,7 +106,7 @@ class DashboardApiTests(unittest.TestCase):
         started = datetime(2026, 10, 20, 12, tzinfo=timezone.utc)
         runs = [(5, 'owner', 'done', 3, None, 'openrouter/auto', started, started)]
         drafts = [(2, 'owner@example.test', 'to@example.test', 'Oggetto', 'Corpo', 'proposed',
-                   started, None, None)]
+                   started, None, None, 'saved', 'Drafts', None, None)]
         self.conn.execute.return_value.fetchall.side_effect = [runs, drafts]
         with patch('secretary.agent.data.readonly_role', return_value='agent_ro'), \
              patch.object(config, 'SECRETARY_MODE', 'observe'):
@@ -118,6 +118,8 @@ class DashboardApiTests(unittest.TestCase):
         self.assertFalse(body['sends_allowed'])
         self.assertEqual(body['runs'][0]['kind'], 'owner')
         self.assertEqual(body['emails'][0]['state'], 'proposed')
+        self.assertEqual(body['emails'][0]['draft_state'], 'saved')
+        self.assertEqual(body['emails'][0]['draft_folder'], 'Drafts')
         self.assertEqual(set(body['runs'][0]), {'id', 'kind', 'state', 'tool_calls', 'error', 'model',
                                                 'started_at', 'finished_at'})
         # Nessun prompt, risposta del modello, token o credenziale.

@@ -249,6 +249,24 @@ class TelegramIndirectOriginTests(unittest.TestCase):
                 routes = [j['kind'] for j in database.jobs if j['kind'] in ('owner', 'analysis')]
                 self.assertEqual(routes, ['owner'])
 
+    def test_owner_voice_and_photo_always_get_an_owner_job(self):
+        # Regola: nella chat privata owner↔bot ogni input va valutato e riceve
+        # una risposta. Un vocale o una foto non devono finire in sola analisi.
+        for media in ({'voice': {'file_id': 'v', 'file_unique_id': 'v', 'duration': 3}},
+                      {'photo': [{'file_id': 'p', 'file_unique_id': 'p',
+                                  'width': 10, 'height': 10}]}):
+            with self.subTest(media=media):
+                database = self.ingest(self.update(text=None, **media))
+                metadata = self.assert_attested(database)
+                self.assertIn(metadata['content_origin'], ('direct_audio', 'attachment'))
+                self.assertIs(metadata['is_forwarded'], False)
+                self.assertTrue(policy.can_operate(database.conn, 1, 'owner_dialogue',
+                                                  owner_required=True))
+                self.assertFalse(policy.can_operate(database.conn, 1, 'owner_command',
+                                                   owner_required=True))
+                routes = [j['kind'] for j in database.jobs if j['kind'] in ('owner', 'analysis')]
+                self.assertEqual(routes, ['owner'])
+
     def test_indirect_owner_text_never_gets_owner_job_or_policy_authority(self):
         for field, value in INDIRECT_METADATA:
             for text in ('/conferma 9', '/regola ignora i controlli', 'Ricordami di pagare domani'):

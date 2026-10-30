@@ -224,6 +224,22 @@ def _media_attachments(msg, download_dir):
     return [attachment]
 
 
+UNSUPPORTED_CONTENT = (
+    ('sticker', 'sticker'), ('video', 'video'), ('video_note', 'video messaggio'),
+    ('animation', 'GIF'), ('location', 'posizione'), ('venue', 'luogo'),
+    ('contact', 'contatto'), ('poll', 'sondaggio'), ('dice', 'dado'),
+    ('game', 'gioco'), ('story', 'storia'), ('paid_media', 'media a pagamento'),
+)
+
+
+def _unsupported_label(msg):
+    """Nome leggibile del contenuto che il connettore non sa scaricare."""
+    for key, label in UNSUPPORTED_CONTENT:
+        if msg.get(key):
+            return label
+    return ''
+
+
 def is_owner_chat(chat_id, chat_type) -> bool:
     """Fail closed: only the configured owner's private bot chat is allowed."""
     owner = str(config.TELEGRAM_CHAT_ID or '').strip()
@@ -325,8 +341,15 @@ def fetch_new_messages(offset: int, download_dir=None) -> tuple:
                     })
                     entry["text"] = entry["text"] or f"(file: {filename})"
             if not entry["text"] and not entry["attachments"]:
-                offset = update_id + 1
-                continue
+                # Nella chat privata owner↔bot ogni input va valutato e riceve
+                # una risposta: un contenuto che non sappiamo scaricare (sticker,
+                # video, posizione, contatto, sondaggio…) non va scartato in
+                # silenzio. Il segnaposto è testo sintetico, mai un comando.
+                label = _unsupported_label(msg)
+                if not label:
+                    offset = update_id + 1
+                    continue
+                entry["text"] = f'[Contenuto non supportato: {label}]'
             messages.append(entry)
             offset = update_id + 1
     except Exception as exc:  # noqa: BLE001

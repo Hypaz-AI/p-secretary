@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from secretary.core import config
 from secretary.agent import mail, outbox, prompts, web
+from secretary.connectors import email as mailbox
 
 
 class FakeConn:
@@ -38,6 +39,9 @@ class FakeConn:
         elif 'agent_email_outbox' in sql:
             cursor.fetchone.return_value = (41,)
         return cursor
+
+    def transaction(self):
+        return self
 
 
 def reply(content='Risposta', annotations=(), cost=0.002):
@@ -289,6 +293,114 @@ class MailImapTests(unittest.TestCase):
         self.assertTrue(self.imap.logged_out)
 
 
+class FakeDraftImap:
+    """IMAP finto per le bozze: registra APPEND/STORE e simula i flag."""
+
+    def __init__(self, folders=None, flags=b'1 (FLAGS (\\Draft))', append_status='OK'):
+        self.folders = folders if folders is not None else [
+            b'(\\HasNoChildren \\Drafts) "/" "Drafts"', b'(\\HasNoChildren) "/" "INBOX"']
+        self.flags, self.append_status = flags, append_status
+        self.appended, self.stored, self.selected, self.expunged = [], [], [], False
+        self.logged_out = False
+
+    def list(self):
+        return 'OK', self.folders
+
+    def select(self, folder, readonly=False):
+        self.selected.append((folder, readonly))
+        return 'OK', [b'1']
+
+    def append(self, folder, flags, date_time, message):
+        self.appended.append((folder, flags, message))
+        return self.append_status, [b'APPEND completed']
+
+    def uid(self, command, *args):
+        if command == 'search':
+            return 'OK', [b'12']
+        if command == 'fetch':
+            return 'OK', [self.flags]
+        if command == 'store':
+            self.stored.append(args)
+            return 'OK', [b'1']
+        return 'NO', [None]
+
+    def expunge(self):
+        self.expunged = True
+        return 'OK', [b'1']
+
+    def logout(self):
+        self.logged_out = True
+
+
+class DraftMailboxTests(unittest.TestCase):
+    """La bozza è una VERA bozza IMAP: APPEND con flag \\Draft, mai un invio."""
+
+    def setUp(self):
+        self.imap = FakeDraftImap()
+        for target in (patch.object(config, 'EMAIL_ACCOUNTS', [dict(ACCOUNT)]),
+                       patch.object(mailbox, '_connect', return_value=self.imap)):
+            target.start()
+            self.addCleanup(target.stop)
+
+    def test_the_draft_folder_is_resolved_from_the_special_use_flag(self):
+        self.assertEqual(mailbox._draft_folder(self.imap), 'Drafts')
+
+    def test_a_known_folder_name_is_used_when_the_server_declares_no_special_use(self):
+        self.imap.folders = [b'(\\HasNoChildren) "/" "INBOX"']
+        self.assertEqual(mailbox._draft_folder(self.imap), '[Gmail]/Drafts')
+
+    def test_no_draft_folder_is_an_explicit_error_not_a_silent_success(self):
+        self.imap.folders = [b'(\\HasNoChildren) "/" "INBOX"']
+        self.imap.select = lambda folder, readonly=False: ('NO', [None])
+        with self.assertRaises(mailbox.DraftError):
+            mailbox._draft_folder(self.imap)
+
+    def test_saving_appends_a_draft_with_the_draft_flag_and_no_send(self):
+        result = mailbox.save_draft(ACCOUNT, 'luca@example.test', 'Preventivo', 'Ciao Luca',
+                                    in_reply_to='<orig@example.test>',
+                                    references='<a@example.test> <orig@example.test>')
+        folder, flags, raw = self.imap.appended[0]
+        self.assertEqual((folder, flags), ('"Drafts"', r'(\Draft)'))
+        message = __import__('email').message_from_bytes(raw)
+        self.assertEqual(message['To'], 'luca@example.test')
+        self.assertEqual(message['Subject'], 'Preventivo')
+        self.assertEqual(message['In-Reply-To'], '<orig@example.test>')
+        self.assertEqual(message['References'], '<a@example.test> <orig@example.test>')
+        self.assertEqual(message.get_payload().strip(), 'Ciao Luca')
+        self.assertEqual(result['folder'], 'Drafts')
+        self.assertEqual(result['uid'], '12')
+        self.assertTrue(self.imap.logged_out)
+
+    def test_a_refused_append_is_reported(self):
+        self.imap.append_status = 'NO'
+        with self.assertRaises(mailbox.DraftError):
+            mailbox.save_draft(ACCOUNT, 'luca@example.test', 'Oggetto', 'Corpo')
+
+    def test_draft_exists_requires_the_draft_flag(self):
+        self.assertTrue(mailbox.draft_exists(ACCOUNT, 'Drafts', '12'))
+        self.imap.flags = b'1 (FLAGS (\\Seen))'
+        self.assertFalse(mailbox.draft_exists(ACCOUNT, 'Drafts', '12'))
+        self.imap.flags = b'1 (FLAGS ())'
+        self.assertFalse(mailbox.draft_exists(ACCOUNT, 'Drafts', '12'))
+
+    def test_deleting_only_touches_a_message_that_is_still_a_draft(self):
+        self.assertTrue(mailbox.delete_draft(ACCOUNT, 'Drafts', '12'))
+        self.assertEqual(self.imap.stored[0][:2], ('12', '+FLAGS'))
+        self.assertTrue(self.imap.expunged)
+        self.imap.stored.clear()
+        self.imap.flags = b'1 (FLAGS (\\Seen))'
+        self.assertFalse(mailbox.delete_draft(ACCOUNT, 'Drafts', '12'))
+        self.assertEqual(self.imap.stored, [])
+
+    def test_draft_references_are_validated(self):
+        for bad in ('', None, 12, 'a\x00b', 'x' * 201):
+            with self.subTest(folder=bad), self.assertRaises(mailbox.DraftError):
+                mailbox.draft_exists(ACCOUNT, bad, '12')
+        for bad in ('', '12; DELETE', None, 12, '１２'):
+            with self.subTest(uid=bad), self.assertRaises(mailbox.DraftError):
+                mailbox.draft_exists(ACCOUNT, 'Drafts', bad)
+
+
 class PromptTests(unittest.TestCase):
     def build(self, mode='owner', **kwargs):
         with patch.object(prompts.db, '_conn', return_value=self.conn), \
@@ -410,6 +522,40 @@ class OutboxValidationTests(unittest.TestCase):
                     outbox.account_for('me@example.test')
                 self.assertNotIn('segreto-imap', str(caught.exception))
 
+    def thread_conn(self, row):
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = row
+        return conn
+
+    def test_the_thread_comes_from_the_archived_message_never_from_the_model(self):
+        conn = self.thread_conn(('Luca <luca@example.test>', 'in',
+                                 dict(message_id='<orig@example.test>', references='<a@example.test>')))
+        with patch.object(outbox.policy, 'can_read_context', return_value=True):
+            self.assertEqual(outbox._thread(conn, 7, 'luca@example.test'),
+                             ('<orig@example.test>', '<a@example.test> <orig@example.test>'))
+        # Nessun messaggio di origine: nessun thread inventato.
+        self.assertEqual(outbox._thread(conn, None, 'luca@example.test'), (None, None))
+
+    def test_the_thread_is_refused_without_consent_or_for_a_different_recipient(self):
+        conn = self.thread_conn(('Luca <luca@example.test>', 'in', dict(message_id='<orig@example.test>')))
+        with patch.object(outbox.policy, 'can_read_context', return_value=False):
+            with self.assertRaises(outbox.OutboxError):
+                outbox._thread(conn, 7, 'luca@example.test')
+        with patch.object(outbox.policy, 'can_read_context', return_value=True):
+            with self.assertRaises(outbox.OutboxError):
+                outbox._thread(conn, 7, 'anna@example.test')
+        conn = self.thread_conn(('Luca <luca@example.test>', 'out', dict(message_id='<orig@example.test>')))
+        with patch.object(outbox.policy, 'can_read_context', return_value=True):
+            with self.assertRaises(outbox.OutboxError):
+                outbox._thread(conn, 7, 'luca@example.test')
+
+    def test_a_message_without_a_valid_message_id_gets_no_thread(self):
+        with patch.object(outbox.policy, 'can_read_context', return_value=True):
+            for metadata in ({}, dict(message_id='non-un-id'), dict(message_id='<a@b>\r\nBcc: x@y')):
+                conn = self.thread_conn(('luca@example.test', 'in', metadata))
+                with self.subTest(metadata=metadata):
+                    self.assertEqual(outbox._thread(conn, 7, 'luca@example.test'), (None, None))
+
     def test_subject_and_body_are_validated_and_trimmed(self):
         self.assertEqual(outbox._clean('  Preventivo  ', '\n Ciao\n '), ('Preventivo', 'Ciao'))
         for subject in ('', '   ', 'riga\ncon a capo', 'Bcc: x\r\nSubject: y', 'x' * (outbox.MAX_SUBJECT + 1), None, 4):
@@ -436,23 +582,74 @@ class OutboxValidationTests(unittest.TestCase):
                     outbox.propose(conn, *args, proposed_by_message=5)
         self.assertEqual(conn.statements, [])
 
-    def test_a_proposal_is_stored_and_shown_to_the_owner_without_sending(self):
+    def test_a_proposal_is_stored_as_pending_without_any_io(self):
         conn = FakeConn()
-        queued = []
         with patch.object(config, 'EMAIL_ACCOUNTS', [dict(ACCOUNT)]), \
-                patch.object(outbox.jobs, 'enqueue', side_effect=lambda *a: queued.append(a)):
+                patch.object(outbox.jobs, 'enqueue', side_effect=AssertionError('Nessuna notifica qui')):
             result = outbox.propose(conn, 'me@example.test', 'luca@example.test', 'Preventivo', 'x' * 2000, 5)
         self.assertEqual(result['draft_id'], 41)
         self.assertEqual(result['state'], 'proposed')
+        self.assertEqual(result['draft_state'], 'pending')
         self.assertEqual(len(conn.statements), 1)
         self.assertIn('INSERT INTO agent_email_outbox', conn.statements[0][0])
+        self.assertIn("'pending'", conn.statements[0][0])
+        self.assertNotIn('email_send', str(conn.statements))
+
+    def publish_conn(self, row):
+        """Connessione finta per publish_draft: una riga in lettura, poi gli UPDATE."""
+        conn = MagicMock()
+        conn.__enter__.return_value = conn
+        conn.__exit__.return_value = False
+        conn.transaction.return_value = conn
+        conn.execute.return_value.fetchone.return_value = row
+        return conn
+
+    def test_publishing_saves_a_real_draft_in_the_mailbox_and_notifies(self):
+        conn = self.publish_conn((
+            'me@example.test', 'luca@example.test', 'Preventivo', 'x' * 2000, 'pending', None, None,
+            None, None, 5))
+        queued = []
+        with patch.object(config, 'EMAIL_ACCOUNTS', [dict(ACCOUNT)]), \
+                patch.object(outbox.db, '_conn', return_value=conn), \
+                patch('secretary.connectors.email.save_draft',
+                      return_value=dict(folder='Drafts', uid='12', message_id='<x@y>')) as save, \
+                patch.object(outbox.jobs, 'enqueue', side_effect=lambda *a: queued.append(a)):
+            result = outbox.publish_draft(41)
+        save.assert_called_once()
+        self.assertEqual(result['draft_state'], 'saved')
+        self.assertEqual(result['folder'], 'Drafts')
         _, kind, key, payload = queued[0][0], queued[0][1], queued[0][2], queued[0][3]
         self.assertEqual((kind, key, payload['type']), ('action', 'email-draft:41', 'notify'))
         self.assertIn('/invia 41', payload['text'])
         self.assertIn('/scarta 41', payload['text'])
         self.assertIn('A: luca@example.test', payload['text'])
+        self.assertIn('cartella Bozze', payload['text'])
         self.assertLess(len(payload['text']), 1800)  # anteprima limitata
         self.assertNotIn('email_send', str(queued))
+
+    def test_a_failed_remote_save_is_reported_and_never_blocks_the_local_draft(self):
+        conn = self.publish_conn((
+            'me@example.test', 'luca@example.test', 'Preventivo', 'Corpo', 'pending', None, None,
+            None, None, 5))
+        queued = []
+        with patch.object(config, 'EMAIL_ACCOUNTS', [dict(ACCOUNT)]), \
+                patch.object(outbox.db, '_conn', return_value=conn), \
+                patch('secretary.connectors.email.save_draft',
+                      side_effect=mailbox.DraftError('Cartella Bozze non trovata')), \
+                patch.object(outbox.jobs, 'enqueue', side_effect=lambda *a: queued.append(a)):
+            result = outbox.publish_draft(41)
+        self.assertEqual(result['draft_state'], 'failed')
+        self.assertIn('Non sono riuscito', queued[0][3]['text'])
+
+    def test_publishing_is_idempotent_and_never_repeats_a_saved_draft(self):
+        conn = self.publish_conn((
+            'me@example.test', 'luca@example.test', 'Preventivo', 'Corpo', 'saved', 'Drafts', '12',
+            None, None, 5))
+        with patch.object(outbox.db, '_conn', return_value=conn), \
+                patch('secretary.connectors.email.save_draft',
+                      side_effect=AssertionError('Nessun secondo salvataggio')):
+            result = outbox.publish_draft(41)
+        self.assertEqual((result['draft_state'], result['folder'], result['uid']), ('saved', 'Drafts', '12'))
 
 
 if __name__ == '__main__':

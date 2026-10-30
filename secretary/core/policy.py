@@ -115,7 +115,14 @@ def metadata_for(conn, message_id):
     return {}
 
 
-def _owner(meta):
+# Un vocale, un'immagine o un documento nella chat privata del proprietario sono
+# input da valutare e a cui rispondere, ma non testo scritto: valgono solo per il
+# dialogo in sola lettura, mai per un comando o una scrittura.
+DIALOGUE_ORIGINS = frozenset(('direct_text', 'direct_audio', 'attachment'))
+COMMAND_ORIGINS = frozenset(('direct_text',))
+
+
+def _owner(meta, *, origins=COMMAND_ORIGINS):
     owner = str(config.TELEGRAM_CHAT_ID or '').strip()
     bot = str(config.TELEGRAM_BOT_TOKEN or '').split(':', 1)[0]
     native = meta.get('metadata')
@@ -125,7 +132,7 @@ def _owner(meta):
             or str(meta.get('author')) != owner or meta.get('direction') != 'in'
             or native.get('chat_type') != 'private'
             or native.get('historical', False) is not False
-            or native.get('content_origin') != 'direct_text'
+            or native.get('content_origin') not in origins
             or native.get('is_forwarded') is not False):
         return False
     if any(native.get(key) is not None and native.get(key) is not False for key in (
@@ -155,7 +162,8 @@ ALIASES = {'analysis': 'ai_text', 'ai': 'ai_text', 'media': 'ai_media',
            'zip': 'zip_send', 'invoice': 'extract'}
 LOCAL_EFFECTS = frozenset(('archive', 'extract', 'reconcile', 'task_propose', 'notify', 'zip_send'))
 OWNER_EFFECTS = frozenset(('owner_command', 'owner_dialogue', 'task_apply',
-                           'task_create', 'reminder_create', 'memory_write', 'email_send'))
+                           'task_create', 'reminder_create', 'memory_write', 'email_send',
+                           'email_draft_cleanup'))
 DATA_EFFECTS = frozenset(('ai_text', 'ai_media', 'ai_history'))
 
 
@@ -224,7 +232,9 @@ def can_operate(conn, message_id, effect, owner_required=False):
     if meta:
         if meta.get('metadata', {}).get('historical', False) is not False:
             reason = 'historical'
-        elif (owner_required or effect in OWNER_EFFECTS) and not _owner(meta):
+        elif (owner_required or effect in OWNER_EFFECTS) and not _owner(
+                meta, origins=(DIALOGUE_ORIGINS if effect == 'owner_dialogue'
+                               else COMMAND_ORIGINS)):
             reason = 'owner_required'
         elif effect in DATA_EFFECTS and effect != 'ai_history':
             channel = meta['channel'].split(' ', 1)[0]

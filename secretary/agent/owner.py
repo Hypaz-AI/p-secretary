@@ -45,13 +45,18 @@ def migrate(conn):
 
 
 # ---------------------------------------------------------------- autorità
-def authorize(mid, *, ai=False, media=False, conn=None):
-    """Autorità nativa e consenso dati esplicito della dashboard, mai flag nel payload."""
+def authorize(mid, *, ai=False, media=False, conn=None, dialogue=False):
+    """Autorità nativa e consenso dati esplicito della dashboard, mai flag nel payload.
+
+    dialogue=True ammette anche vocale, immagine e documento nella chat privata
+    del proprietario: servono a rispondere, mai a eseguire comandi o scritture.
+    """
     if conn is None:
         with db._conn() as owned:
-            return authorize(mid, ai=ai, media=media, conn=owned)
+            return authorize(mid, ai=ai, media=media, conn=owned, dialogue=dialogue)
     jobs.assert_current(conn)
-    if not policy.can_operate(conn, mid, 'owner_command', owner_required=True):
+    authority = 'owner_dialogue' if dialogue else 'owner_command'
+    if not policy.can_operate(conn, mid, authority, owner_required=True):
         raise PermissionError('Native owner authority required')
     effects = ('ai_text', 'ai_media') if media else ('ai_text',)
     for effect in effects if ai else ():
@@ -89,7 +94,11 @@ def begin(mid, text, has_images):
             VALUES (%s,%s,%s,%s) ON CONFLICT(message_id) DO NOTHING''', (mid, stamp[0], text, has_images))
         message_time, response = conn.execute(
             'SELECT message_time,response FROM owner_exchanges WHERE message_id=%s', (mid,)).fetchone()
-        if response is None:
+        # Il riuso per testo identico vale solo per il testo scritto: vocali,
+        # immagini e documenti hanno body vuoto e sono richieste DISTINTE, non
+        # copie della stessa (altrimenti il secondo vocale riceverebbe la
+        # risposta del primo).
+        if response is None and text.strip():
             # Stessa richiesta ripetuta mentre la prima è in corso o appena conclusa:
             # una sola risposta, nessun secondo ciclo AI.
             twin = conn.execute("""SELECT e.response,j.status FROM owner_exchanges e
@@ -116,7 +125,7 @@ def complete(mid, response):
     response = (response or '').strip() or 'Non ho informazioni sufficienti: puoi precisare la richiesta?'
     with db._conn() as conn, conn.transaction():
         jobs.assert_current(conn)
-        authorize(mid, conn=conn)
+        authorize(mid, conn=conn, dialogue=True)
         conn.execute('''UPDATE owner_exchanges SET response=%s,completed_at=now()
             WHERE message_id=%s AND response IS NULL''', (response, mid))
         stored = conn.execute('SELECT response FROM owner_exchanges WHERE message_id=%s', (mid,)).fetchone()[0]
@@ -134,7 +143,7 @@ def recent_history(mid, *, limit=12, max_chars=9000):
                 e.completed_at > now() - (%s * interval '1 minute')
             FROM {config.AGENT_DB_SCHEMA}.owner_exchanges e WHERE e.message_id < %s
             ORDER BY e.message_id DESC LIMIT %s''', (fresh, mid, limit)).fetchall()
-        rows = [r for r in rows if policy.can_operate(conn, r[0], 'owner_command', owner_required=True)]
+        rows = [r for r in rows if policy.can_operate(conn, r[0], 'owner_dialogue', owner_required=True)]
     result, used = [], 0
     for _, when, user, response, recent in rows:
         entry = dict(when=when.astimezone(ZoneInfo(config.TIMEZONE)).strftime('%d/%m %H:%M'),

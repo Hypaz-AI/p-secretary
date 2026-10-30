@@ -51,7 +51,8 @@ Il modello **non è autorità**: lo è la provenienza nativa verificata dal serv
   frase esatta (citazione verificata dal server sul messaggio archiviato).
 - **Effetti verso l'esterno**: un tentativo è registrato **prima** dell'I/O; un esito
   incerto non viene mai rinviato alla cieca; «accettato» non significa «consegnato».
-  Calendar = grant sigillato su payload e calendario di destinazione; email = bozza +
+  Calendar = grant sigillato su payload e calendario di destinazione; email = **vera bozza
+  nella cartella Bozze della tua casella** (la vedi e la modifichi dal tuo mail client) +
   tuo `/invia` + modalità `SECRETARY_MODE=active`.
 - **Sicurezza SQL**: una sola `SELECT` per volta, solo relazioni `agent.*`, funzioni
   consentite, transazione READ ONLY con timeout, cursore con tetto di righe e

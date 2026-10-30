@@ -62,14 +62,16 @@ def _protected(alias):
   AND NOT EXISTS (SELECT 1 FROM effect_receipts r WHERE r.message_id = {alias}.id
                   AND r.status IN ('authorized', 'attempted', 'uncertain'))
   AND NOT EXISTS (SELECT 1 FROM agent_email_outbox o
-                  WHERE (o.proposed_by_message = {alias}.id OR o.approved_by_message = {alias}.id)
+                  WHERE (o.proposed_by_message = {alias}.id OR o.approved_by_message = {alias}.id
+                         OR o.source_message = {alias}.id)
                     AND o.state IN ('proposed', 'approved', 'uncertain'))
   AND NOT EXISTS (SELECT 1 FROM calendar_effect_grants g
                   WHERE g.owner_message_id = {alias}.id AND NOT g.revoked AND g.expires_at > now())
   AND NOT EXISTS (SELECT 1 FROM system_notifications s WHERE s.expires_at > now()
                   AND ({alias}.id = ANY(s.source_ids) OR {alias}.id = ANY(s.media_source_ids)))
   AND NOT EXISTS (SELECT 1 FROM work_jobs j WHERE j.status IN {NON_TERMINAL}
-                  AND j.payload->>'message_id' = {alias}.id::text)
+                  AND (j.payload->>'message_id' = {alias}.id::text
+                       OR j.payload->>'evidence_message_id' = {alias}.id::text))
   AND NOT EXISTS (SELECT 1 FROM work_jobs j JOIN attachments a ON j.payload->>'attachment_id' = a.id::text
                   WHERE a.message_id = {alias}.id AND j.status IN {NON_TERMINAL})"""
 

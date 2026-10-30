@@ -125,7 +125,7 @@ class NativeTests(unittest.TestCase):
             conn, 'telegram', 'owner', 'Telegram · owner', '/start',
             ts=m['msg_date'], source_id=m['source_id'],
             metadata={**m['metadata'], 'is_forwarded': False}, attachments=[])
-        can_operate.assert_called_once_with(conn, 42, 'owner_command', owner_required=True)
+        can_operate.assert_called_once_with(conn, 42, 'owner_dialogue', owner_required=True)
         enqueue.assert_called_once_with(conn, 'owner', 'owner:42',
                                        {'text': '/start', 'message_id': 42, 'media': False})
         conn.execute.assert_called_once()

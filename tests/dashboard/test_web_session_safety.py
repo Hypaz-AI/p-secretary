@@ -144,7 +144,8 @@ function snapshot(marker) {
       model: 'openrouter/auto', started_at: '2099-01-01T00:00:00Z', finished_at: null}],
     emails: [{id: 5, account: `${marker}@example.invalid`, recipient: 'to@example.invalid',
       subject: `${marker} subject`, body: `${marker} body`, state: 'proposed',
-      created_at: '2099-01-01T00:00:00Z', decided_at: null, sent_at: null}]};
+      created_at: '2099-01-01T00:00:00Z', decided_at: null, sent_at: null,
+      draft_state: 'saved', draft_folder: 'Drafts', draft_error: null, source_message: null}]};
 }
 function detail(marker) {
   return {run_id: 11, calls: [{seq: 1, tool: 'db_query', args: `${marker} args`, ok: true,
@@ -193,6 +194,9 @@ async function currentLoad() {
     assertCurrent();
     // Un invio non è mai offerto dalla dashboard: la decisione passa da Telegram.
     assert.ok(element('agent-emails').textContent.includes('/invia 5'));
+    // La bozza vive nella cartella Bozze della casella: la dashboard lo dice.
+    assert.ok(element('agent-emails').textContent.includes('cartella Bozze'));
+    assert.ok(element('agent-emails').textContent.includes('Drafts'));
     assert.equal(element('agent-send').textContent.includes('disabilitato'), true);
   } else {
     for (const id of privateIds) assert.equal(element(id).textContent.includes('CURRENT_PRIVATE'), false, id);

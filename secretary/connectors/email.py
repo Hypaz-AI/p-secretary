@@ -1,18 +1,28 @@
-"""Connettore Email: legge nuove email via IMAP e invia via SMTP."""
+"""Connettore Email: legge nuove email via IMAP, salva bozze e invia via SMTP."""
 import email
 import imaplib
 import logging
+import re
 import smtplib
 import ssl
+import time
 from email.header import decode_header
 from email.message import EmailMessage
-from email.utils import getaddresses, parseaddr
+from email.utils import formatdate, getaddresses, make_msgid, parseaddr
 
 from secretary.core import config
 from secretary.connectors import ms_oauth
 
 
 logger = logging.getLogger(__name__)
+
+# Cartelle Bozze note, usate solo se il server non dichiara l'uso speciale \Drafts.
+DRAFT_FOLDERS = ('"[Gmail]/Drafts"', '"[Gmail]/Bozze"', 'Drafts', 'Bozze', 'Draft', '"Bozze"')
+MESSAGE_ID = re.compile(r'<[^<>\s\x00-\x1f]{1,900}>')
+
+
+class DraftError(RuntimeError):
+    """La bozza non è stata salvata/rimossa nella casella (motivo bounded, nessun contenuto)."""
 
 
 def _decode_bytes(value, charset=None):
@@ -69,6 +79,158 @@ def _connect(account: dict):
     else:
         imap.login(account["address"], account["password"])
     return imap
+
+
+def _unquote(name: str) -> str:
+    """Nome di cartella IMAP senza le virgolette del LIST (mai vuoto)."""
+    name = name.strip()
+    if len(name) >= 2 and name[0] == name[-1] == '"':
+        name = name[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+    return name
+
+
+def _quote_folder(name: str) -> str:
+    """Nome di cartella tra virgolette, come lo vuole IMAP (nessun carattere di controllo)."""
+    if not isinstance(name, str) or not name or len(name) > 200 or re.search(r'[\x00-\x1f\x7f]', name):
+        raise DraftError('Nome della cartella Bozze non valido')
+    return '"' + name.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def _draft_folder(imap) -> str:
+    """Cartella Bozze dichiarata dal server (\\Drafts), altrimenti un nome noto.
+
+    Ritorna il nome SENZA virgolette. Sola risoluzione del nome: nessuna
+    scrittura. Solleva DraftError se nessuna cartella è selezionabile, così il
+    chiamante non finge un salvataggio.
+    """
+    status, folders = imap.list()
+    if status == 'OK':
+        for row in folders or []:
+            if not isinstance(row, bytes):
+                continue
+            match = re.match(rb'\(([^)]*)\)\s+(?:"[^"]*"|NIL)\s+(.+)$', row)
+            if match and b'\\drafts' in match[1].lower().split():
+                return _unquote(match[2].decode('ascii'))
+    for folder in DRAFT_FOLDERS:
+        try:
+            status, _ = imap.select(folder, readonly=True)
+        except (imaplib.IMAP4.error, UnicodeError):
+            continue
+        if status == 'OK':
+            return _unquote(folder)
+    raise DraftError('Cartella Bozze non trovata nella casella')
+
+
+def _draft_message(account, to, subject, body, *, in_reply_to=None, references=None) -> bytes:
+    """MIME della bozza: un destinatario, testo semplice, thread opzionale.
+
+    Nessun allegato e nessuna intestazione arbitraria: solo From/To/Subject/Date/
+    Message-ID e, se forniti dal server, In-Reply-To/References per il thread.
+    """
+    msg = EmailMessage()
+    msg['From'] = account['address']
+    msg['To'] = to
+    msg['Subject'] = subject
+    msg['Date'] = formatdate(localtime=True)
+    msg['Message-ID'] = make_msgid(domain=account['address'].split('@', 1)[-1] or None)
+    if in_reply_to:
+        msg['In-Reply-To'] = in_reply_to
+    if references:
+        msg['References'] = references
+    msg.set_content(body)
+    return msg.as_bytes()
+
+
+def save_draft(account: dict, to: str, subject: str, body: str, *,
+               in_reply_to=None, references=None) -> dict:
+    """Salva una VERA bozza nella cartella Bozze dell'account (IMAP APPEND \\Draft).
+
+    Non invia nulla: la bozza resta nel mail client del proprietario finché non
+    la modifica o la invia lui. Ritorna cartella, UID e Message-ID della bozza.
+    """
+    raw = _draft_message(account, to, subject, body,
+                         in_reply_to=in_reply_to, references=references)
+    imap = _connect(account)
+    try:
+        folder = _draft_folder(imap)
+        status, _ = imap.append(_quote_folder(folder), r'(\Draft)',
+                                imaplib.Time2Internaldate(time.time()), raw)
+        if status != 'OK':
+            raise DraftError('Il server ha rifiutato il salvataggio della bozza')
+        # L'UID della bozza appena accodata: UIDNEXT prima dell'APPEND non è
+        # affidabile, quindi si cerca per Message-ID (unico, generato qui).
+        message_id = email.message_from_bytes(raw).get('Message-ID')
+        uid = None
+        try:
+            status, _ = imap.select(_quote_folder(folder), readonly=True)
+            if status == 'OK' and message_id:
+                status, found = imap.uid('search', None, 'HEADER', 'Message-ID', message_id)
+                if status == 'OK' and found and found[0]:
+                    uid = found[0].split()[-1].decode('ascii')
+        except (imaplib.IMAP4.error, UnicodeError):
+            uid = None
+        return dict(folder=folder, uid=uid, message_id=message_id)
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+
+
+def draft_exists(account: dict, folder: str, uid: str) -> bool:
+    """True se il messaggio esiste ancora ED è ancora una bozza (flag \\Draft).
+
+    Serve a non inviare due volte: se il proprietario ha già inviato o
+    cancellato la bozza dal suo client, il flag non c'è più.
+    """
+    if not isinstance(folder, str) or not folder or not isinstance(uid, str) \
+            or not uid.isascii() or not uid.isdecimal():
+        raise DraftError('Riferimento della bozza non valido')
+    imap = _connect(account)
+    try:
+        status, _ = imap.select(_quote_folder(folder), readonly=True)
+        if status != 'OK':
+            raise DraftError('Cartella Bozze non selezionabile')
+        status, data = imap.uid('fetch', uid, '(FLAGS)')
+        if status != 'OK' or not data or not isinstance(data[0], bytes):
+            return False
+        return b'\\Draft' in data[0]
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+
+
+def delete_draft(account: dict, folder: str, uid: str) -> bool:
+    """Rimuove una bozza salvata da noi (solo se ha ancora il flag \\Draft).
+
+    Non tocca messaggi già inviati o modificati dal client: se il flag non c'è
+    più, la bozza è diventata altro e non viene cancellata.
+    """
+    if not isinstance(folder, str) or not folder or not isinstance(uid, str) \
+            or not uid.isascii() or not uid.isdecimal():
+        raise DraftError('Riferimento della bozza non valido')
+    imap = _connect(account)
+    try:
+        status, _ = imap.select(_quote_folder(folder), readonly=False)
+        if status != 'OK':
+            raise DraftError('Cartella Bozze non selezionabile')
+        status, data = imap.uid('fetch', uid, '(FLAGS)')
+        if status != 'OK' or not data or not isinstance(data[0], bytes):
+            return False
+        if b'\\Draft' not in data[0]:
+            return False
+        status, _ = imap.uid('store', uid, '+FLAGS', '(\\Deleted)')
+        if status != 'OK':
+            raise DraftError('Il server ha rifiutato la rimozione della bozza')
+        imap.expunge()
+        return True
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
 
 
 def _parse_msg(raw: bytes, account: dict) -> dict:

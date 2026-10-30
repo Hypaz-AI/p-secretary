@@ -50,10 +50,15 @@ non è mai un confine di sicurezza.
   (`begin`/`deliver`/`complete`), storico recente (`recent_history`) e comandi slash
   deterministici (`command`: /task /attivita /fatto /conferma /annulla /invia /scarta
   /appuntamenti /note /regole /fatture /start /stop).
-- `outbox.py` — email in uscita: `propose` (agente) → `decide` (`/invia` o `/scarta`,
-  solo testo nativo dell'owner, rifiutato se `SECRETARY_MODE='observe'`) →
-  `pipeline.action` (kind `email`, SMTP, tentativo committato prima dell'I/O).
-  Un destinatario, indirizzo nudo, nessun allegato né intestazione.
+- `outbox.py` — email in uscita: `propose` (agente) registra la riga (`draft_state='pending'`,
+  attempt prima dell'I/O) → `publish_draft` salva una **vera bozza** nella cartella Bozze
+  della casella (`IMAP APPEND (\Draft)`, cartella dal flag `\Draft` del server) e avvisa
+  l'owner → `decide` (`/invia` o `/scarta`, solo testo nativo dell'owner, rifiutato se
+  `SECRETARY_MODE='observe'`) → `pipeline.action` (kind `email`, SMTP, tentativo committato
+  prima dell'I/O; `draft_guard` ferma l'invio se la copia remota non è più una bozza).
+  `retry_pending` recupera i salvataggi interrotti (attività periodica `email-drafts`).
+  Un destinatario, indirizzo nudo, nessun allegato; `In-Reply-To`/`References` solo dal
+  messaggio archiviato (`reply_to_message_id`), mai dal modello.
 - `mail.py` — IMAP **sola lettura** (`select(readonly=True)`, `BODY.PEEK`); criteri
   da parametri strutturati; consenso `email/ai_text` verificato a ogni chiamata.
 - `web.py` — ricerca web via plugin `web` di OpenRouter; query ≤200 car., niente
@@ -137,6 +142,11 @@ Dockerfile, compose*.yaml, p-secretary (launcher), requirements.txt, .env.exampl
 1. **Autorità owner** = solo testo nativo vivo, diretto, non inoltrato, in chat privata
    dal bot (`content_origin='direct_text'`, `is_forwarded=False`). Storico, inoltrati,
    email, trascrizioni e allegati sono evidenza, mai comando.
+   **Nella chat privata owner↔bot ogni input va valutato e riceve una risposta** (testo,
+   vocale, immagine, documento): l'autorità di *dialogo* (`owner_dialogue`, origini
+   `direct_text`/`direct_audio`/`attachment`) è distinta da quella di *comando*
+   (`owner_command` e ogni scrittura, solo `direct_text`). Un vocale non autorizza mai
+   una modifica: al massimo l'agente risponde e chiede di scriverla.
 2. **Consensi default-deny**, rivalutati a ogni confine reale: ogni query SQL
    dell'agente, ogni lettura live, ogni invio al provider, il digest prima del sigillo.
 3. **Scritture dell'agente**: solo strumenti tipizzati; sul conto dell'owner serve

@@ -55,12 +55,15 @@ def owner_turn(mid, *, runtime=None):
         # Già risposto (o richiesta identica appena evasa): rilancia solo la consegna.
         with db._conn() as conn, conn.transaction():
             jobs.assert_current(conn)
-            owner.authorize(mid, conn=conn)
+            owner.authorize(mid, conn=conn, dialogue=True)
             conn.execute('''UPDATE owner_exchanges SET response=%s,completed_at=COALESCE(completed_at,now())
                 WHERE message_id=%s AND response IS NULL''', (previous, mid))
             owner.deliver(conn, mid, previous)
         return previous
-    owner.authorize(mid, ai=True, media=bool(attachments))
+    # Il consenso media serve solo per vocale/immagine: un documento non deve
+    # bloccare la risposta (il suo testo passa dal gate di attachment_text).
+    owner.authorize(mid, ai=True, media=any(media_text.kind(a) for a in attachments),
+                    dialogue=True)
     spoken = media_text.message_text(body, [a for a in attachments if media_text.kind(a)])
     note = _attachments_note(attachments)
     turn_key = f'owner:{mid}'

@@ -837,6 +837,8 @@ const RUN_BADGE = {running: 'info', done: 'ok', failed: 'bad'};
 const DRAFT_STATES = {proposed: 'In attesa di tua decisione', approved: 'Approvata · invio in coda', rejected: 'Scartata',
   sent: 'Inviata · consegna non verificata', failed: 'Fallita', uncertain: 'Esito incerto · nessun reinvio automatico'};
 const DRAFT_BADGE = {proposed: 'warn', approved: 'info', rejected: '', sent: 'ok', failed: 'bad', uncertain: 'high'};
+const DRAFT_REMOTE = {saved: 'Salvata nella cartella Bozze della casella', pending: 'Salvataggio nella casella in corso',
+  failed: 'Non salvata nella casella', none: 'Solo qui (nessuna copia nella casella)'};
 function closeRun() {el('agent-detail').hidden = true;}
 el('agent-detail-close').onclick = closeRun;
 window.addEventListener('keydown', event => {if (event.key === 'Escape' && !el('agent-detail').hidden && el('dialog').hidden) closeRun();});
@@ -901,6 +903,10 @@ async function loadAgent() {
     result.emails.forEach(email => {
       const card = h('article', {class: 'draft'}, h('div', {class: 'row'}, h('h4', {text: `Bozza #${email.id}`}), badge(DRAFT_STATES[email.state] || email.state, DRAFT_BADGE[email.state])),
         h('p', {text: `Da ${email.account} a ${email.recipient}`}), h('p', {text: `Oggetto: ${email.subject}`}), h('pre', {text: email.body}));
+      const remote = DRAFT_REMOTE[email.draft_state] || DRAFT_REMOTE.none;
+      card.append(h('small', {class: 'muted', text: email.draft_state === 'saved' && email.draft_folder
+        ? `${remote}: ${email.draft_folder}` : remote}));
+      if (email.draft_state === 'failed' && email.draft_error) card.append(h('small', {class: 'muted', text: `Motivo: ${email.draft_error}`}));
       if (email.state === 'proposed') card.append(h('small', {class: 'muted', text: `Per decidere rispondi al bot: /invia ${email.id} oppure /scarta ${email.id}.`}));
       el('agent-emails').append(card);
     });

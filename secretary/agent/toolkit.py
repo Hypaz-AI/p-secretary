@@ -180,6 +180,9 @@ class EmailArgs(Strict):
     to: str = Field(description='Un solo indirizzo email.')
     subject: str
     body: str
+    reply_to_message_id: Optional[int] = Field(
+        None, description='ID del messaggio ricevuto a cui rispondere (agent.messages.id): '
+                          'il server ne ricava il thread e verifica che il destinatario sia il mittente.')
 
 
 class TriageArgs(Strict):
@@ -445,12 +448,24 @@ def t_calendar_propose(state, p):
 
 def t_email_propose(state, p):
     _require_owner(state)
-    args = p.model_dump()
+    args = p.model_dump(exclude_none=True)
 
     def apply(conn):
-        result = outbox.propose(conn, p.account, p.to, p.subject, p.body, state.owner_mid)
-        return dict(result, receipt=f'✉️ Bozza #{result["draft_id"]} pronta: rispondi /invia {result["draft_id"]} per inviarla')
-    return _clarify(lambda: _journaled(state, 'email_propose', args, apply))
+        result = outbox.propose(conn, p.account, p.to, p.subject, p.body, state.owner_mid,
+                                source_message=p.reply_to_message_id)
+        return dict(result, receipt=f'✉️ Bozza #{result["draft_id"]} registrata: la salvo nella cartella '
+                                    f'Bozze della casella e ti avviso appena è pronta')
+    result = _clarify(lambda: _journaled(state, 'email_propose', args, apply))
+    if 'draft_id' in result:
+        # I/O fuori dalla transazione del journal: la riga è già l'attempt committato.
+        # Idempotente: su un replay di un salvataggio già riuscito non fa nulla.
+        try:
+            outbox.publish_draft(result['draft_id'])
+        except (jobs.LeaseLost, jobs.Deferred):
+            raise  # il lease è la barriera: non si finge un salvataggio
+        except Exception:
+            pass  # il recupero periodico (retry_pending) riprova
+    return result
 
 
 # ------------------------------------------------------- scritture: posta in arrivo
@@ -596,8 +611,10 @@ SPECS = [
          ('owner',), write=True),
     Spec('calendar_propose', 'Propone un evento in agenda: resta una PROPOSTA locale finché il proprietario non '
          'risponde /conferma ID. Non inventare ora o data.', CalendarArgs, t_calendar_propose, ('owner', 'inbox'), write=True),
-    Spec('email_propose', 'Prepara la bozza di una email: NON la invia. Il proprietario la invia con /invia ID.',
-         EmailArgs, t_email_propose, ('owner',), write=True),
+    Spec('email_propose', 'Prepara una VERA bozza nella cartella Bozze della casella del proprietario (la vede dal suo '
+         'mail client) e la annuncia su Telegram: NON la invia. Per rispondere a un messaggio ricevuto passa '
+         'reply_to_message_id: il server ricava il thread e verifica il destinatario. Il proprietario decide con '
+         '/invia ID o /scarta ID.', EmailArgs, t_email_propose, ('owner',), write=True),
     Spec('triage', 'Registra l\'esito dell\'analisi di UN messaggio in arrivo. Va chiamato per ogni messaggio.',
          TriageArgs, t_triage, ('inbox',), write=True),
     Spec('task_from_message', 'Crea un\'attività per il proprietario derivata da un messaggio in arrivo. Solo per azioni '

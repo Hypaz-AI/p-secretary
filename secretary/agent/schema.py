@@ -13,6 +13,7 @@ tabelle sottostanti (vedi deploy/sql/agent_ro.sql, da eseguire a cura del DBA).
 import re
 
 VERSION = 'agent_core_v1'
+VERSION_V2 = 'agent_core_v2'
 DEFAULT_SCHEMA = 'agent'
 MEDIA_DIRS = 'email_attachments|tg_files|wa_media|uploads|invoices'
 
@@ -40,6 +41,21 @@ CREATE TABLE IF NOT EXISTS agent_email_outbox (
   CHECK(state IN ('proposed','approved','rejected','sent','failed','uncertain')),
  proposed_by_message BIGINT, approved_by_message BIGINT,
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(), decided_at TIMESTAMPTZ, sent_at TIMESTAMPTZ);
+"""
+
+# v2: la bozza vive anche nella cartella Bozze della casella (IMAP APPEND \Draft).
+# `draft_state` dice se il salvataggio remoto è avvenuto; `draft_folder`/`draft_uid`
+# identificano la copia remota per poterla rimuovere su /scarta. `in_reply_to` e
+# `references` conservano il thread del messaggio a cui si risponde.
+DRAFT_COLUMNS = """
+ALTER TABLE agent_email_outbox ADD COLUMN IF NOT EXISTS draft_state TEXT NOT NULL DEFAULT 'none';
+ALTER TABLE agent_email_outbox ADD COLUMN IF NOT EXISTS draft_folder TEXT;
+ALTER TABLE agent_email_outbox ADD COLUMN IF NOT EXISTS draft_uid TEXT;
+ALTER TABLE agent_email_outbox ADD COLUMN IF NOT EXISTS draft_message_id TEXT;
+ALTER TABLE agent_email_outbox ADD COLUMN IF NOT EXISTS draft_error TEXT;
+ALTER TABLE agent_email_outbox ADD COLUMN IF NOT EXISTS in_reply_to TEXT;
+ALTER TABLE agent_email_outbox ADD COLUMN IF NOT EXISTS references_header TEXT;
+ALTER TABLE agent_email_outbox ADD COLUMN IF NOT EXISTS source_message BIGINT;
 """
 
 INDEXES = """
@@ -150,14 +166,18 @@ def migrate(conn, schema=DEFAULT_SCHEMA):
             version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
             reset_rows BIGINT NOT NULL)''')
         version = f'{VERSION}:{schema}'
-        if conn.execute('SELECT 1 FROM schema_migrations WHERE version=%s', (version,)).fetchone():
-            return
-        conn.execute(TABLES)
-        conn.execute(INDEXES)
-        conn.execute(f'CREATE SCHEMA IF NOT EXISTS {schema}')
-        for name, body in views(schema):
-            conn.execute(f'CREATE OR REPLACE VIEW {schema}.{name} AS {body}')
-        conn.execute('INSERT INTO schema_migrations(version,reset_rows) VALUES (%s,0)', (version,))
+        if not conn.execute('SELECT 1 FROM schema_migrations WHERE version=%s', (version,)).fetchone():
+            conn.execute(TABLES)
+            conn.execute(INDEXES)
+            conn.execute(f'CREATE SCHEMA IF NOT EXISTS {schema}')
+            for name, body in views(schema):
+                conn.execute(f'CREATE OR REPLACE VIEW {schema}.{name} AS {body}')
+            conn.execute('INSERT INTO schema_migrations(version,reset_rows) VALUES (%s,0)', (version,))
+        # v2 additiva: vale anche per le installazioni già migrate alla v1.
+        version_v2 = f'{VERSION_V2}:{schema}'
+        if not conn.execute('SELECT 1 FROM schema_migrations WHERE version=%s', (version_v2,)).fetchone():
+            conn.execute(DRAFT_COLUMNS)
+            conn.execute('INSERT INTO schema_migrations(version,reset_rows) VALUES (%s,0)', (version_v2,))
 
 
 # Assumere un ruolo (SET ROLE) richiede il privilegio SET su PostgreSQL 16+. Lì essere MEMBER
