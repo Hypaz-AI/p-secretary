@@ -146,7 +146,11 @@ Dockerfile, compose*.yaml, p-secretary (launcher), requirements.txt, .env.exampl
    vocale, immagine, documento): l'autorità di *dialogo* (`owner_dialogue`, origini
    `direct_text`/`direct_audio`/`attachment`) è distinta da quella di *comando*
    (`owner_command` e ogni scrittura, solo `direct_text`). Un vocale non autorizza mai
-   una modifica: al massimo l'agente risponde e chiede di scriverla.
+   una modifica: al massimo l'agente risponde e chiede di scriverla. Anche i consensi dati
+   (`ai_text`/`ai_media`) letti da `owner.authorize(..., dialogue=True)` usano le origini di
+   dialogo (`can_operate(..., dialogue=True)`, valido solo per `DATA_EFFECTS` e
+   `owner_dialogue`, ignorato per ogni scrittura): senza, il job del vocale resta `pending`
+   per sempre in un ciclo di `Deferred`.
 2. **Consensi default-deny**, rivalutati a ogni confine reale: ogni query SQL
    dell'agente, ogni lettura live, ogni invio al provider, il digest prima del sigillo.
 3. **Scritture dell'agente**: solo strumenti tipizzati; sul conto dell'owner serve

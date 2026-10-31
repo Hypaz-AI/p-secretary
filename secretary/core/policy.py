@@ -216,25 +216,30 @@ def can_read_context(conn, message_id, effect='ai_text', *, owner_required=False
     return allowed
 
 
-def can_operate(conn, message_id, effect, owner_required=False):
+def can_operate(conn, message_id, effect, owner_required=False, *, dialogue=False):
     """False on missing/history/unknown effect; external evidence is never command.
 
     owner_required can only restrict: neither it nor a payload/model flag can
     grant authority. Own outgoing messages remain evidence/proposals for now.
     ai_history is a read-context consent modifier, never an operational effect.
     Audits contain safe reason codes, no message text, prompts or secrets.
+
+    dialogue=True lets a voice/image/document in the owner's private chat count
+    as owner for READS ONLY: the owner_dialogue effect and the data-egress
+    consents (ai_text/ai_media) needed to answer. It is ignored for every other
+    effect, so no write can ever be authorized by a non-text origin.
     """
     if not isinstance(effect, str) or not effect or len(effect) > 80:
         return False
     effect = ALIASES.get(effect, effect)
     meta = metadata_for(conn, message_id)
     allowed, reason = False, 'missing_message'
+    origins = (DIALOGUE_ORIGINS if effect == 'owner_dialogue' or (dialogue and effect in DATA_EFFECTS)
+               else COMMAND_ORIGINS)
     if meta:
         if meta.get('metadata', {}).get('historical', False) is not False:
             reason = 'historical'
-        elif (owner_required or effect in OWNER_EFFECTS) and not _owner(
-                meta, origins=(DIALOGUE_ORIGINS if effect == 'owner_dialogue'
-                               else COMMAND_ORIGINS)):
+        elif (owner_required or effect in OWNER_EFFECTS) and not _owner(meta, origins=origins):
             reason = 'owner_required'
         elif effect in DATA_EFFECTS and effect != 'ai_history':
             channel = meta['channel'].split(' ', 1)[0]

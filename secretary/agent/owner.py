@@ -60,7 +60,8 @@ def authorize(mid, *, ai=False, media=False, conn=None, dialogue=False):
         raise PermissionError('Native owner authority required')
     effects = ('ai_text', 'ai_media') if media else ('ai_text',)
     for effect in effects if ai else ():
-        if not policy.can_operate(conn, mid, effect, owner_required=True):
+        # I consensi dati sono una lettura: in dialogo valgono anche per vocale/immagine/documento.
+        if not policy.can_operate(conn, mid, effect, owner_required=True, dialogue=dialogue):
             raise jobs.Deferred('Owner AI data permission required in dashboard')
 
 

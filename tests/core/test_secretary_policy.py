@@ -136,6 +136,21 @@ class AuthorityTests(IsolatedTests):
         self.assertTrue(self.allowed(native(), 'owner_command', owner_required=True))
         self.assertTrue(self.allowed(native(), 'owner_dialogue', owner_required=True))
 
+    def test_dialogue_origins_widen_only_data_consents_never_writes(self):
+        # I consensi dati (lettura) di un vocale devono poter usare l'origine di
+        # dialogo; nessun effetto di scrittura può farlo, qualunque flag si passi.
+        voice = native(metadata={'content_origin': 'direct_audio'})
+        self.conn.execute.return_value.fetchone.return_value = (True,)
+        for effect in ('ai_text', 'ai_media'):
+            with self.subTest(effect=effect):
+                self.assertFalse(self.allowed(voice, effect, owner_required=True))
+                self.assertTrue(self.allowed(voice, effect, owner_required=True, dialogue=True))
+        for effect in ('owner_command', 'task_apply', 'task_create', 'memory_write',
+                       'reminder_create', 'email_send'):
+            with self.subTest(effect=effect):
+                self.assertFalse(self.allowed(voice, effect, owner_required=True, dialogue=True))
+                self.assertFalse(self.allowed(voice, effect, dialogue=True))
+
     def test_dialogue_authority_still_requires_the_private_owner_chat(self):
         for change in ({'channel': 'telegram (account)'}, {'channel': 'whatsapp'},
                        {'account': 'bot:999'}, {'author': '8'}, {'chat_id': '8'},

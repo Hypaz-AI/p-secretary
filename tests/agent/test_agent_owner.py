@@ -139,6 +139,38 @@ class CommandAuthorityTests(OwnerCommandCase):
         self.assertEqual(self.conn.execute('SELECT count(*) FROM tasks').fetchone()[0], 1)
         self.assertEqual(len(self.keys(f'owner-reply:{mid}:%')), 1)
 
+    def test_voice_and_attachment_pass_dialogue_authorization_with_ai_consents(self):
+        # Regressione di produzione: un vocale restava `pending` con attempts=0 per
+        # sempre. `authorize(..., ai=True)` verificava i consensi dati (ai_text/ai_media)
+        # con le origini di COMANDO, quindi per un vocale rispondeva sempre no e alzava
+        # Deferred (che non consuma tentativi) a ogni giro.
+        for origin in ('direct_audio', 'attachment'):
+            with self.subTest(origin=origin):
+                mid = self.owner_message('', origin=origin)
+                for effect in ('ai_text', 'ai_media'):
+                    self.consent('telegram', effect)
+                owner.authorize(mid, ai=True, media=True, dialogue=True)  # non solleva
+                # ...ma non diventa mai autorità di comando/scrittura.
+                with self.assertRaises(PermissionError):
+                    owner.authorize(mid)
+                with self.assertRaises(PermissionError):
+                    owner.authorize(mid, ai=True, media=True)
+
+    def test_dialogue_authorization_still_requires_the_data_consents(self):
+        mid = self.owner_message('', origin='direct_audio')
+        self.consent('telegram', 'ai_text')
+        self.consent('telegram', 'ai_media', allowed=False)
+        with self.assertRaises(jobs.Deferred):
+            owner.authorize(mid, ai=True, media=True, dialogue=True)
+        self.consent('telegram', 'ai_text', allowed=False)
+        with self.assertRaises(jobs.Deferred):
+            owner.authorize(mid, ai=True, dialogue=True)
+        # Un vocale che non è del proprietario nella chat privata non passa comunque.
+        stranger = self.owner_message('', origin='direct_audio', author='202')
+        self.consent('telegram', 'ai_text')
+        with self.assertRaises(PermissionError):
+            owner.authorize(stranger, ai=True, dialogue=True)
+
     def test_two_distinct_voice_messages_are_not_deduplicated(self):
         # Un vocale ha body vuoto: due vocali diversi sono richieste distinte e
         # non devono ricevere la stessa risposta (né rimandarsi a vicenda).

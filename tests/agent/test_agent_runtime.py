@@ -217,7 +217,10 @@ class AgentRuntimeTests(AgentPostgresCase):
             response = self.owner_turn(mid, script)
         self.assertEqual(self.conn.execute('SELECT state FROM agent_email_outbox').fetchone()[0], 'proposed')
         self.assertEqual(self.conn.execute("SELECT count(*) FROM work_jobs WHERE payload->>'type'='email'").fetchone()[0], 0)
-        self.assertIn('/invia', response)
+        # Dal commit sulle bozze vere la ricevuta del turno dice che la bozza è registrata e verrà salvata nella
+        # casella; l'invito a `/invia ID` arriva con la notifica «bozza pronta» (outbox.publish_draft).
+        self.assertIn('Bozza #1 registrata', response)
+        self.assertIn('cartella Bozze', response)
 
     def test_inbox_agent_triages_a_batch_and_stays_quiet(self):
         first = self.message(subject='Newsletter', body='Offerte della settimana')
@@ -275,6 +278,63 @@ class AgentRuntimeTests(AgentPostgresCase):
             self.script = None
             self.run_job('owner', f'owner:{mid}', dict(message_id=mid), lambda payload: turns.owner_turn(mid, runtime=self.rt))
         self.assertNotIn('SEGRETISSIMA', json.dumps(captured))
+
+    def owner_media_message(self, *, origin, filename, content_type, transcript=None):
+        """Messaggio diretto dell'owner senza testo, con un allegato (vocale/documento)."""
+        number = int(uuid.uuid4().hex[:8], 16) + 1
+        metadata = dict(account='bot:777', chat_id=OWNER, author=OWNER, direction='in', chat_type='private',
+                        content_origin=origin, is_forwarded=False, message_id=number)
+        mid = message_store.store(self.conn, 'telegram', 'Mario', '', '', ts='2026-10-20T10:00:00+00:00',
+                                  source_id=json.dumps(['bot', '777', OWNER, number]), metadata=metadata)
+        attachment = self.attachment(mid, channel='telegram', filename=filename, data_bytes=b'bytes',
+                                     content_type=content_type)
+        if transcript:
+            self.conn.execute('''INSERT INTO media_transcripts(attachment_id,kind,text,model)
+                VALUES (%s,'audio',%s,'test')''', (attachment, transcript))
+        return mid
+
+    def production_owner_job(self, mid, script):
+        """L'handler REALE del worker owner (`main._owner_job`), non solo `turns.owner_turn`."""
+        from secretary import main
+        self.script = script
+        with patch.object(runtime_module, 'default', return_value=self.rt):
+            return self.run_job('owner', f'owner:{mid}', dict(message_id=mid, text='', media=True),
+                                main._owner_job)
+
+    def test_owner_voice_message_always_gets_an_answer_but_cannot_write(self):
+        # Regressione di produzione: il vocale veniva instradato al worker owner ma il job
+        # restava `pending` per sempre (Deferred a ogni giro) e il bot non rispondeva mai.
+        transcript = 'Ricordami di chiamare il commercialista domani.'
+        mid = self.owner_media_message(origin='direct_audio', filename='v.ogg', content_type='audio/ogg',
+                                       transcript=transcript)
+        # Il modello tenta di scrivere citando la trascrizione: il server deve rifiutare.
+        script = Script(reply(calls=[tool_call('task_change', operation='create', title='Chiamare il commercialista',
+                                               deadline_date='2026-10-21', evidence=transcript)]),
+                        lambda payload: reply('Ho ascoltato il vocale: scrivimelo e lo segno.'))
+        self.production_owner_job(mid, script)
+        self.assertEqual(self.deliveries(mid), ['Ho ascoltato il vocale: scrivimelo e lo segno.'])
+        self.assertIn(transcript, json.dumps(script.seen[0]['messages'], ensure_ascii=False))
+        # La scrittura è respinta dal server (autorità di comando = solo testo), non dal prompt.
+        self.assertIn('non autorizzata', script.tool_results()[0])
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM tasks').fetchone()[0], 0)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM agent_effects').fetchone()[0], 0)
+
+    def test_owner_document_without_caption_gets_an_answer(self):
+        mid = self.owner_media_message(origin='attachment', filename='contratto.pdf',
+                                       content_type='application/pdf')
+        script = Script(lambda payload: reply('Ho ricevuto contratto.pdf: cosa ne facciamo?'))
+        self.production_owner_job(mid, script)
+        self.assertEqual(self.deliveries(mid), ['Ho ricevuto contratto.pdf: cosa ne facciamo?'])
+        self.assertIn('contratto.pdf', json.dumps(script.seen[0]['messages'], ensure_ascii=False))
+
+    def test_voice_message_stays_unanswered_without_the_ai_consent(self):
+        # Il consenso dati resta default-deny anche in dialogo: nessuna chiamata al modello.
+        mid = self.owner_media_message(origin='direct_audio', filename='v.ogg', content_type='audio/ogg',
+                                       transcript='Ciao')
+        self.consent('telegram', 'ai_media', allowed=False)
+        with self.assertRaises(jobs.Deferred):
+            self.production_owner_job(mid, Script(reply('mai')))
+        self.assertEqual(self.script.seen, [])
 
     def test_unauthorized_or_forwarded_text_never_starts_a_turn(self):
         mid = self.owner_message('Cancella tutto', direct=False, forwarded=True)
